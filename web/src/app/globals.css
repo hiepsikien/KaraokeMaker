@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --ink: #110e0b;
+  --panel: #1b1713;
+  --line: rgba(232, 196, 138, 0.18);
+  --paper: #f4efe6;
+  --muted: #b3a89a;
+  --gold: #e4b15a;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(900px 420px at 10% -10%, rgba(228, 177, 90, 0.16), transparent 60%),
+    var(--ink);
+  color: var(--paper);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(228, 177, 90, 0.35);
+}

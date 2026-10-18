@@ -1,0 +1,9 @@
+.venv/
+.venv-karaoke/
+web/node_modules/
+web/.next/
+__pycache__/
+*.py[cod]
+.DS_Store
+data.pkl
+*.tsbuildinfo

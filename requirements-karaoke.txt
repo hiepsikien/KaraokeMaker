@@ -1,0 +1,4 @@
+stable-ts>=2.17.0
+Pillow>=10.0.0
+fastapi
+uvicorn
