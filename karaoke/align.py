@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import array
+import math
+import wave
 from pathlib import Path
 
 from karaoke.lyrics import extract_sung_lines, normalize_token
@@ -75,6 +78,175 @@ def repair_stretched_words(words: list[dict]) -> tuple[list[dict], int]:
             moved += 1
         repaired.append(_word_dict(word["text"], word["start"], word["end"]))
     return repaired, moved
+
+
+def _loosen_packed(words: list[dict], limit: float | None = None) -> list[dict]:
+    """Give packed words enough time for the gold sweep to follow the voice."""
+    if len(words) < 2:
+        return words
+    floor = 0.42
+    start = words[0]["start"]
+    durations = [max(word["end"] - word["start"], floor) for word in words]
+    if limit is not None:
+        available = limit - start
+        if available < 0.12 * len(words):
+            return words
+        total = sum(durations)
+        if total > available:
+            scale = available / total
+            durations = [item * scale for item in durations]
+    cursor = start
+    loosened: list[dict] = []
+    for word, duration in zip(words, durations):
+        loosened.append(_word_dict(word["text"], cursor, cursor + duration))
+        cursor += duration
+    return loosened
+
+
+def _vocal_rms(vocal_path: Path, hop: float = 0.03) -> tuple[list[float], float]:
+    with wave.open(str(vocal_path), "rb") as handle:
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        rate = handle.getframerate()
+        frames = handle.readframes(handle.getnframes())
+    if width != 2 or rate <= 0 or channels <= 0:
+        raise AlignError("File vocal không phải WAV 16-bit.")
+    samples = array.array("h")
+    samples.frombytes(frames)
+    hop_count = max(1, int(hop * rate))
+    total = len(samples) // channels
+    levels: list[float] = []
+    for start in range(0, max(0, total - hop_count), hop_count):
+        total_square = 0.0
+        for index in range(hop_count):
+            base = (start + index) * channels
+            mixed = sum(samples[base + channel] for channel in range(channels)) / channels
+            total_square += mixed * mixed
+        levels.append(math.sqrt(total_square / hop_count))
+    return levels, hop
+
+
+def _voice_bounds(levels: list[float], hop: float, origin: float, limit: float) -> tuple[float, float, float] | None:
+    """Return the sung phrase that contains this line, stopping at a real silence."""
+    if not levels:
+        return None
+    start_index = max(0, int((origin - 0.25) / hop))
+    end_index = min(len(levels) - 1, int(limit / hop))
+    if end_index <= start_index:
+        return None
+    window = levels[start_index : end_index + 1]
+    peak = max(window)
+    if peak < 80:
+        return None
+    threshold = peak * 0.12
+    active = [index for index, level in enumerate(window) if level >= threshold]
+    if not active:
+        return None
+    runs: list[tuple[int, int]] = []
+    run_start = previous = active[0]
+    for index in active[1:]:
+        if (index - previous) * hop > 0.55:
+            runs.append((run_start, previous))
+            run_start = index
+        previous = index
+    runs.append((run_start, previous))
+    origin_index = int(origin / hop) - start_index
+    chosen = runs[0]
+    for run in runs:
+        if run[0] - 4 <= origin_index <= run[1] + 8:
+            chosen = run
+            break
+    finish = chosen[1]
+    for run in runs:
+        if run[0] > finish and (run[0] - finish) * hop < 0.7:
+            finish = run[1]
+    return (start_index + chosen[0]) * hop, (start_index + finish + 1) * hop, threshold
+
+
+def _place_into_span(words: list[dict], start: float, end: float) -> list[dict]:
+    """Put every word of the line inside the time the voice is actually singing."""
+    span = max(0.12 * len(words), end - start)
+    weights: list[float] = []
+    for word in words:
+        duration = word["end"] - word["start"]
+        inside = start - 0.2 <= word["start"] <= end + 0.2 and 0.08 <= duration <= 1.6
+        weights.append(duration if inside else -1.0)
+    known = [item for item in weights if item > 0]
+    typical = sorted(known)[len(known) // 2] if known else span / len(words)
+    weights = [item if item > 0 else typical for item in weights]
+    scale = span / sum(weights)
+    cursor = start
+    placed: list[dict] = []
+    for word, weight in zip(words, weights):
+        duration = max(0.08, weight * scale)
+        placed.append(_word_dict(word["text"], cursor, cursor + duration))
+        cursor += duration
+    if placed:
+        placed[-1]["end"] = start + span
+    return placed
+
+
+def _absorb_voiced_gaps(words: list[dict], levels: list[float], hop: float, threshold: float) -> list[dict]:
+    """A gap that is still loud is the singer holding the previous word."""
+    adjusted = [dict(word) for word in words]
+    for index in range(1, len(adjusted)):
+        gap_start = adjusted[index - 1]["end"]
+        gap_end = adjusted[index]["start"]
+        if gap_end - gap_start < 0.45:
+            continue
+        first = max(0, int(gap_start / hop))
+        last = min(len(levels), int(gap_end / hop))
+        if last <= first:
+            continue
+        voiced = sum(1 for level in levels[first:last] if level >= threshold)
+        if voiced / (last - first) >= 0.55:
+            adjusted[index - 1]["end"] = gap_end
+    return [_word_dict(word["text"], word["start"], word["end"]) for word in adjusted]
+
+
+def fit_lines_to_voice(lines: list[dict], vocal_path: Path) -> list[dict]:
+    """Keep each lyric on screen for the note that is actually being sung."""
+    levels, hop = _vocal_rms(vocal_path)
+    fitted: list[dict] = []
+    for index, line in enumerate(lines):
+        words = line.get("words") or []
+        if not words:
+            continue
+        next_start = lines[index + 1]["start"] if index + 1 < len(lines) else words[0]["start"] + 12
+        bounds = _voice_bounds(levels, hop, words[0]["start"], min(next_start - 0.04, words[0]["start"] + 12))
+        if bounds is None:
+            fitted.append(line)
+            continue
+        active_start, active_end, threshold = bounds
+        if fitted:
+            active_start = max(active_start, fitted[-1]["end"])
+        if active_end - active_start < 0.18 * len(words):
+            fitted.append(line)
+            continue
+        outside = any(word["start"] > active_end + 0.25 for word in words)
+        word_span = words[-1]["end"] - words[0]["start"]
+        active_span = active_end - active_start
+        if outside or word_span > active_span * 1.45:
+            words = _place_into_span(words, active_start, active_end)
+        else:
+            words = _absorb_voiced_gaps(words, levels, hop, threshold)
+            if active_end > words[-1]["end"] + 0.22:
+                words[-1] = _word_dict(words[-1]["text"], words[-1]["start"], min(active_end, words[-1]["end"] + 2.5))
+        fitted.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
+    return fitted
+
+
+def loosen_against_next_line(lines: list[dict]) -> list[dict]:
+    loosened: list[dict] = []
+    for index, line in enumerate(lines):
+        words = line["words"]
+        if line.get("repaired") and index + 1 < len(lines):
+            words = _loosen_packed(words, lines[index + 1]["start"] - 0.08)
+        elif line.get("repaired"):
+            words = _loosen_packed(words)
+        if words:
+            loosened.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
+    return loosened
 
 
 def _match_lines(lines: list[str], timed_words: list[dict]) -> list[dict]:
@@ -236,8 +408,15 @@ def align_lyrics(
         words, count = repair_stretched_words(line["words"])
         moved += count
         if words:
-            repaired.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
-    matched = repaired
+            repaired_line = _line_from_words(line["text"], words, uncertain=bool(line.get("uncertain")))
+            if count:
+                repaired_line["repaired"] = True
+            repaired.append(repaired_line)
+    matched = loosen_against_next_line(repaired)
+    try:
+        matched = fit_lines_to_voice(matched, vocal_path)
+    except (AlignError, wave.Error, EOFError) as error:
+        log(f"Không chỉnh được câu theo tiếng hát ({error}). Giữ thời gian căn được.")
     if moved:
         log(f"Đã kéo {moved} chữ bị đặt vào khoảng nhạc về sát câu hát.")
     unsure = [line["text"] for line in matched if line.get("uncertain")]

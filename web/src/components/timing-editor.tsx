@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { cueAt, formatSeconds, wordFill, type TimedLine, type TimedWord } from "@/lib/cue";
+import { AlignTimeline } from "@/components/align-timeline";
+import { cueAt, formatSeconds, wordFill, type TimedLine } from "@/lib/cue";
 
 function cloneLines(lines: TimedLine[]) {
   return lines.map((line) => ({
@@ -27,7 +28,7 @@ function syncLine(line: TimedLine): TimedLine {
 
 function LyricLine({ line, time, preview }: { line: TimedLine; time: number; preview: boolean }) {
   return (
-    <p className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-3xl font-semibold tracking-wide sm:text-4xl">
+    <p className="flex flex-wrap justify-center gap-x-2 gap-y-1 text-lg font-semibold tracking-wide sm:text-xl">
       {line.words.map((word, index) => {
         const fill = preview ? 0 : wordFill(word, time);
         return (
@@ -40,98 +41,6 @@ function LyricLine({ line, time, preview }: { line: TimedLine; time: number; pre
         );
       })}
     </p>
-  );
-}
-
-function WordTrack({
-  line,
-  locked,
-  onChange,
-  onSeek,
-}: {
-  line: TimedLine;
-  locked: boolean;
-  onChange: (words: TimedWord[]) => void;
-  onSeek: (time: number) => void;
-}) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const first = line.words[0]?.start ?? line.start;
-  const last = line.words[line.words.length - 1]?.end ?? line.end;
-  const windowStart = Math.max(0, first - 1.2);
-  const windowEnd = Math.max(windowStart + 6, last + 1.2);
-  const span = windowEnd - windowStart;
-
-  function beginDrag(event: ReactPointerEvent<HTMLButtonElement>, index: number) {
-    if (locked) return;
-    const track = trackRef.current;
-    if (!track) return;
-    const width = track.getBoundingClientRect().width || 1;
-    const origin = event.clientX;
-    const duration = Math.max(0.08, line.words[index].end - line.words[index].start);
-    const start0 = line.words[index].start;
-    const neighbors = line.words.map((word) => ({ ...word }));
-    let words = neighbors.map((word) => ({ ...word }));
-    let dragged = false;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const move = (ev: PointerEvent) => {
-      const delta = ev.clientX - origin;
-      if (Math.abs(delta) > 4) dragged = true;
-      const previousEnd = index > 0 ? neighbors[index - 1].end : 0;
-      const nextLimit = index + 1 < neighbors.length ? neighbors[index + 1].start : Number.POSITIVE_INFINITY;
-      let nextStart = Math.max(0, start0 + (delta / width) * span);
-      if (nextLimit > previousEnd) {
-        nextStart = Math.min(Math.max(nextStart, previousEnd), Math.max(previousEnd, nextLimit - 0.08));
-      }
-      let nextEnd = nextStart + duration;
-      if (nextEnd > nextLimit) nextEnd = nextLimit;
-      words = words.map((word, wordIndex) =>
-        wordIndex === index ? { ...word, start: nextStart, end: nextEnd } : word,
-      );
-      onChange(words);
-    };
-    const finish = (ev: PointerEvent) => {
-      const target = ev.currentTarget as HTMLButtonElement;
-      if (target.hasPointerCapture(ev.pointerId)) target.releasePointerCapture(ev.pointerId);
-      target.onpointermove = null;
-      target.onpointerup = null;
-      target.onpointercancel = null;
-      if (dragged) onChange([...words].sort((a, b) => a.start - b.start));
-      (target as HTMLButtonElement & { dragged?: boolean }).dragged = dragged;
-    };
-    event.currentTarget.onpointermove = move;
-    event.currentTarget.onpointerup = finish;
-    event.currentTarget.onpointercancel = finish;
-  }
-
-  return (
-    <div ref={trackRef} className="relative h-14 rounded-xl bg-black/35">
-      {line.words.map((word, index) => {
-        const left = ((word.start - windowStart) / span) * 100;
-        const width = Math.max(6, ((word.end - word.start) / span) * 100);
-        return (
-          <button
-            key={index}
-            type="button"
-            disabled={locked}
-            title="Kéo để đổi lúc chữ xuất hiện"
-            onClick={(event) => {
-              const dragged = (event.currentTarget as HTMLButtonElement & { dragged?: boolean }).dragged;
-              if (dragged) {
-                (event.currentTarget as HTMLButtonElement & { dragged?: boolean }).dragged = false;
-                return;
-              }
-              onSeek(Math.max(0, word.start - 0.3));
-            }}
-            onPointerDown={(event) => beginDrag(event, index)}
-            className="absolute top-2 h-10 cursor-ew-resize overflow-hidden rounded-lg border border-[var(--gold)]/50 bg-[var(--gold)]/20 px-2 text-left text-xs text-[var(--paper)] disabled:cursor-default"
-            style={{ left: `${left}%`, width: `${width}%`, minWidth: "2.5rem" }}
-          >
-            <span className="block truncate font-medium">{word.text}</span>
-            <span className="block text-[10px] text-[var(--muted)]">{formatSeconds(word.start)}</span>
-          </button>
-        );
-      })}
-    </div>
   );
 }
 
@@ -157,9 +66,30 @@ export function TimingEditor({
   onBack: () => void;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const dirty = useRef(false);
   const [lines, setLines] = useState(() => cloneLines(initialLines));
   const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const cue = cueAt(lines, time);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/jobs/${jobId}/fit`, { method: "POST" })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return response.json();
+      })
+      .then((body: { lines?: TimedLine[] } | null) => {
+        if (cancelled || dirty.current || !body?.lines?.length) return;
+        setLines(cloneLines(body.lines));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId]);
 
   useEffect(() => {
     let frame = 0;
@@ -173,6 +103,7 @@ export function TimingEditor({
   }, []);
 
   function replaceLine(index: number, line: TimedLine) {
+    dirty.current = true;
     setLines((current) => current.map((item, itemIndex) => (itemIndex === index ? line : item)));
   }
 
@@ -194,11 +125,17 @@ export function TimingEditor({
     const line = lines[lineIndex];
     const words = line.words.filter((_, index) => index !== wordIndex);
     if (words.length === 0) {
+      dirty.current = true;
       setLines((current) => current.filter((_, index) => index !== lineIndex));
       return;
     }
     replaceLine(lineIndex, syncLine({ ...line, words }));
   }
+
+  useEffect(() => {
+    if (selectedLine == null) return;
+    document.getElementById(`karaoke-line-${selectedLine}`)?.scrollIntoView({ block: "nearest" });
+  }, [selectedLine]);
 
   function seek(next: number) {
     const audio = audioRef.current;
@@ -211,19 +148,32 @@ export function TimingEditor({
 
   return (
     <div className="space-y-5">
-      <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
+    <AlignTimeline
+      jobId={jobId}
+      lines={lines}
+      time={time}
+      duration={duration}
+      playing={playing}
+      locked={locked}
+      selectedLine={selectedLine}
+      onSeek={seek}
+      onSelectLine={setSelectedLine}
+      onChangeLine={replaceLine}
+    />
+    <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
+      <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Sửa lời</p>
-            <h2 className="mt-1 text-2xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
+            <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
           </div>
           <button type="button" onClick={onBack} className="text-sm text-[var(--muted)] hover:text-white">
             Quay lại phần chọn file
           </button>
         </div>
-        <div className="flex min-h-40 flex-col items-center justify-center rounded-2xl bg-black/45 px-6 py-8">
+        <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl bg-black/45 px-4 py-5">
           {cue.mode === "countdown" && (
-            <p className="mb-3 text-5xl font-semibold text-[var(--gold)]">{cue.number}</p>
+            <p className="mb-2 text-3xl font-semibold text-[var(--gold)]">{cue.number}</p>
           )}
           {cue.line ? (
             <LyricLine line={cue.line} time={time} preview={cue.mode === "countdown"} />
@@ -231,15 +181,29 @@ export function TimingEditor({
             <p className="text-sm text-[var(--muted)]">Đoạn nhạc, chưa tới câu hát</p>
           )}
         </div>
-        <audio ref={audioRef} className="mt-4 w-full" controls src={`/api/jobs/${jobId}/audio`} />
+        <audio
+          ref={audioRef}
+          className="mt-4 w-full"
+          controls
+          src={`/api/jobs/${jobId}/audio`}
+          onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+        />
         <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-          Nghe vocal để đối chiếu. Kéo ô chữ trên thước thời gian để đổi lúc chữ được tô vàng. Câu sau một đoạn nhạc từ 8 giây sẽ hiện trước kèm số đếm 5, 4, 3, 2, 1.
+          Sóng âm ở trên, chữ ở dưới. Cuộn để kéo ngang. Giữ ⌘ rồi cuộn để phóng to, giống Audacity. Câu sau hiện ngay khi câu trước ngân xong.
         </p>
       </section>
 
-      <section className="space-y-4">
+      <div className="min-w-0 space-y-3 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:pr-1">
+      <section className="space-y-3">
         {lines.map((line, lineIndex) => (
-          <article key={lineIndex} className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5">
+          <article
+            id={`karaoke-line-${lineIndex}`}
+            key={lineIndex}
+            onClick={() => setSelectedLine(lineIndex)}
+            className={`cursor-pointer rounded-3xl border bg-[var(--panel)] p-4 sm:p-5 ${selectedLine === lineIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
+          >
             {line.uncertain && (
               <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
                 Câu này được ghép ước lượng. Hãy nghe và kéo lại từng chữ.
@@ -249,24 +213,19 @@ export function TimingEditor({
               <span>
                 Câu {lineIndex + 1} · {formatSeconds(line.start)} – {formatSeconds(line.end)}
               </span>
-              <button type="button" disabled={locked} onClick={() => seek(Math.max(0, line.start - 0.4))} className="text-[var(--gold)] disabled:opacity-40">
+              <button
+                type="button"
+                disabled={locked}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSelectedLine(lineIndex);
+                  seek(Math.max(0, line.start - 0.4));
+                }}
+                className="text-[var(--gold)] disabled:opacity-40"
+              >
                 Nghe câu này
               </button>
             </div>
-            <WordTrack
-              line={line}
-              locked={locked}
-              onSeek={seek}
-              onChange={(words) =>
-                replaceLine(lineIndex, {
-                  ...line,
-                  words,
-                  text: words.map((word) => word.text).join(" "),
-                  start: Math.min(...words.map((word) => word.start)),
-                  end: Math.max(...words.map((word) => word.end)),
-                })
-              }
-            />
             <div className="mt-3 flex flex-wrap gap-2">
               {line.words.map((word, wordIndex) => (
                 <label key={`${lineIndex}-${wordIndex}`} className="flex items-center gap-1 rounded-xl border border-[var(--line)] bg-black/20 px-2 py-1">
@@ -274,7 +233,7 @@ export function TimingEditor({
                     value={word.text}
                     disabled={locked}
                     onChange={(event) => changeWord(lineIndex, wordIndex, event.target.value)}
-                    className="w-24 bg-transparent text-sm outline-none"
+                    className="w-20 bg-transparent text-xs outline-none"
                   />
                   <button type="button" disabled={locked} className="text-xs text-[var(--muted)] hover:text-white disabled:opacity-40" onClick={() => removeWord(lineIndex, wordIndex)}>
                     ×
@@ -323,6 +282,8 @@ export function TimingEditor({
           ))}
         </ol>
       </section>
+      </div>
+    </div>
     </div>
   );
 }

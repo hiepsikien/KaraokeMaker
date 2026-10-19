@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
+from karaoke.align import fit_lines_to_voice
 from karaoke.pipeline import JobError, align_job, prepare_job, render_job
 
 app = FastAPI(title="KaraokeMaker")
@@ -383,6 +384,25 @@ def job_audio(job_id: str):
         raise HTTPException(status_code=404, detail="Không thấy file vocal.")
     media_type = _AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream")
     return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@app.post("/api/jobs/{job_id}/fit")
+def fit_job(job_id: str):
+    """Pull lyric times onto the vocal note, including the sustain."""
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("lines") or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Chưa có lời để chỉnh.")
+        vocal = Path(record["prepared"]["vocal_audio"])
+        lines = record["lines"]
+    try:
+        fitted = fit_lines_to_voice(lines, vocal)
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"Không chỉnh được theo tiếng hát: {error}") from error
+    with _lock:
+        if _jobs.get(job_id) is record:
+            record["lines"] = fitted
+    return {"lines": fitted}
 
 
 @app.post("/api/jobs/{job_id}/render")

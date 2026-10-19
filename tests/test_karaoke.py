@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 
 from karaoke.access import AccessError, audio_root, clear_grants, ensure_allowed, grant
-from karaoke.align import _segments_match_lines, repair_stretched_words
+import math
+import struct
+import wave
+
+from karaoke.align import _segments_match_lines, fit_lines_to_voice, loosen_against_next_line, repair_stretched_words
 from karaoke.lyrics import extract_sung_lines
 from karaoke.render import COUNTDOWN, LONG_GAP, cue_at
 
@@ -35,6 +39,22 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(moved, 0)
         self.assertEqual(repaired[1]["start"], 10.9)
 
+    def test_loosens_a_line_after_pulling_the_last_word_back(self):
+        words = [
+            {"text": "BÌNH", "start": 118.56, "end": 118.84},
+            {"text": "NAM!", "start": 191.46, "end": 192.68},
+        ]
+        repaired, moved = repair_stretched_words(words)
+        self.assertEqual(moved, 1)
+        lines = [
+            {"text": "điệp khúc", "start": repaired[0]["start"], "end": repaired[-1]["end"], "words": repaired, "repaired": True},
+            {"text": "sau", "start": 192.68, "end": 195.0, "words": [{"text": "sau", "start": 192.68, "end": 195.0}]},
+        ]
+        loosened = loosen_against_next_line(lines)
+        self.assertLess(loosened[0]["words"][1]["start"], 130)
+        self.assertGreaterEqual(loosened[0]["words"][0]["end"] - loosened[0]["words"][0]["start"], 0.42)
+        self.assertLess(loosened[0]["end"], 192.68)
+
 
 class CueTests(unittest.TestCase):
     def test_constants_match_the_typescript_preview(self):
@@ -55,6 +75,89 @@ class CueTests(unittest.TestCase):
         self.assertEqual(cue_at(lines, 80.0)[0], "blank")
         self.assertEqual(cue_at(lines, 115.5)[0], "countdown")
         self.assertEqual(cue_at(lines, 120.1)[0], "sing")
+
+    def test_shows_the_next_line_as_soon_as_the_previous_one_ends(self):
+        lines = [
+            {"text": "trước", "start": 86.0, "end": 89.72},
+            {"text": "Tốt", "start": 90.02, "end": 92.9},
+        ]
+        mode, line, _number = cue_at(lines, 89.5)
+        self.assertEqual(mode, "sing")
+        self.assertEqual(line["text"], "trước")
+        mode, line, _number = cue_at(lines, 89.8)
+        self.assertEqual(mode, "sing")
+        self.assertEqual(line["text"], "Tốt")
+
+    def test_switches_as_soon_as_the_note_ends(self):
+        lines = [
+            {"text": "trước", "start": 48.0, "end": 52.24},
+            {"text": "sau", "start": 54.06, "end": 57.0},
+        ]
+        mode, line, _number = cue_at(lines, 52.1)
+        self.assertEqual(mode, "sing")
+        self.assertEqual(line["text"], "trước")
+        mode, line, _number = cue_at(lines, 52.3)
+        self.assertEqual(mode, "sing")
+        self.assertEqual(line["text"], "sau")
+
+
+class VoiceFitTests(unittest.TestCase):
+    def _tone(self, path: Path, spans: list[tuple[float, float]], seconds: float = 3.0) -> None:
+        rate = 8000
+        count = int(seconds * rate)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(rate)
+            frames = bytearray()
+            for index in range(count):
+                moment = index / rate
+                loud = any(start <= moment < end for start, end in spans)
+                sample = int(12000 * math.sin(2 * math.pi * 220 * moment)) if loud else 0
+                frames += struct.pack("<h", sample)
+            handle.writeframes(frames)
+
+    def test_pulls_a_word_out_of_the_silence_after_the_phrase(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            self._tone(vocal, [(0.40, 1.30)])
+            lines = [
+                {
+                    "text": "bình ngô đại cáo",
+                    "start": 0.40,
+                    "end": 2.60,
+                    "words": [
+                        {"text": "bình", "start": 0.40, "end": 2.05},
+                        {"text": "ngô", "start": 2.05, "end": 2.20},
+                        {"text": "đại", "start": 2.20, "end": 2.40},
+                        {"text": "cáo", "start": 2.40, "end": 2.60},
+                    ],
+                }
+            ]
+            fitted = fit_lines_to_voice(lines, vocal)
+            self.assertLess(fitted[0]["end"], 1.45)
+            self.assertGreater(fitted[0]["words"][-1]["start"], 0.9)
+            self.assertLess(fitted[0]["words"][0]["end"] - fitted[0]["words"][0]["start"], 0.5)
+
+    def test_keeps_the_last_word_on_screen_while_the_note_is_held(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            self._tone(vocal, [(0.40, 1.30)])
+            lines = [
+                {
+                    "text": "một hai",
+                    "start": 0.40,
+                    "end": 0.90,
+                    "words": [
+                        {"text": "một", "start": 0.40, "end": 0.70},
+                        {"text": "hai", "start": 0.70, "end": 0.90},
+                    ],
+                }
+            ]
+            fitted = fit_lines_to_voice(lines, vocal)
+            self.assertAlmostEqual(fitted[0]["words"][0]["start"], 0.40, delta=0.08)
+            self.assertGreater(fitted[0]["end"], 1.15)
+            self.assertLess(fitted[0]["end"], 1.45)
 
 
 class SegmentMatchTests(unittest.TestCase):

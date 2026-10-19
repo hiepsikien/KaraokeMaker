@@ -2,7 +2,7 @@ import { MakerForm } from "@/components/maker-form";
 
 export default function HomePage() {
   return (
-    <main className="mx-auto max-w-6xl px-5 py-8 sm:px-8">
+    <main className="mx-auto max-w-[96rem] px-5 py-8 sm:px-8">
       <header className="mb-8 flex items-end justify-between gap-6 border-b border-[var(--line)] pb-6">
         <div>
           <p className="text-xs font-semibold tracking-[0.22em] text-[var(--gold)] uppercase">Studio</p>

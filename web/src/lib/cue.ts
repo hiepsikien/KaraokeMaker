@@ -21,21 +21,21 @@ export type Cue =
   | { mode: "countdown"; line: TimedLine; number: number }
   | { mode: "blank"; line: null; number: 0 };
 
+function displayStart(lines: TimedLine[], index: number) {
+  const line = lines[index];
+  const previousEnd = index > 0 ? lines[index - 1].end : 0;
+  if (index === 0 || line.start - previousEnd >= LONG_GAP_SECONDS) return line.start;
+  return previousEnd;
+}
+
 function displayEnd(lines: TimedLine[], index: number) {
   const line = lines[index];
   if (index + 1 >= lines.length) return line.end + 0.7;
-  const gap = lines[index + 1].start - line.end;
-  if (gap >= LONG_GAP_SECONDS) return line.end + 0.35;
-  return lines[index + 1].start;
+  if (lines[index + 1].start - line.end >= LONG_GAP_SECONDS) return line.end + 0.2;
+  return Math.min(line.end, displayStart(lines, index + 1));
 }
 
 export function cueAt(lines: TimedLine[], songTime: number): Cue {
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.start <= songTime && songTime < displayEnd(lines, index)) {
-      return { mode: "sing", line, number: 0 };
-    }
-  }
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const previousEnd = index > 0 ? lines[index - 1].end : 0;
@@ -44,6 +44,12 @@ export function cueAt(lines: TimedLine[], songTime: number): Cue {
       const remaining = line.start - songTime;
       const number = Math.max(1, Math.min(COUNTDOWN_SECONDS, Math.ceil(remaining - 1e-9)));
       return { mode: "countdown", line, number };
+    }
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (displayStart(lines, index) <= songTime && songTime < displayEnd(lines, index)) {
+      return { mode: "sing", line, number: 0 };
     }
   }
   return { mode: "blank", line: null, number: 0 };

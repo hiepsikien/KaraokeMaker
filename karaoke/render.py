@@ -85,21 +85,26 @@ def _render_text_pair(line: dict):
     }
 
 
+def _display_start(layouts: list[dict], index: int) -> float:
+    """Show the next line the moment the previous note finishes. Long gaps stay blank."""
+    layout = layouts[index]
+    previous_end = layouts[index - 1]["end"] if index else 0.0
+    if index == 0 or layout["start"] - previous_end >= LONG_GAP:
+        return layout["start"]
+    return previous_end
+
+
 def _display_end(layouts: list[dict], index: int) -> float:
     layout = layouts[index]
     if index + 1 >= len(layouts):
         return layout["end"] + 0.7
-    gap = layouts[index + 1]["start"] - layout["end"]
-    if gap >= LONG_GAP:
-        return layout["end"] + 0.35
-    return layouts[index + 1]["start"]
+    if layouts[index + 1]["start"] - layout["end"] >= LONG_GAP:
+        return layout["end"] + 0.2
+    return min(layout["end"], _display_start(layouts, index + 1))
 
 
 def cue_at(layouts: list[dict], song_time: float) -> tuple[str, dict | None, int]:
     """Return sing, countdown, or blank for one moment in the song."""
-    for index, layout in enumerate(layouts):
-        if layout["start"] <= song_time < _display_end(layouts, index):
-            return "sing", layout, 0
     for index, layout in enumerate(layouts):
         previous_end = layouts[index - 1]["end"] if index else 0.0
         if layout["start"] - previous_end < LONG_GAP:
@@ -108,6 +113,9 @@ def cue_at(layouts: list[dict], song_time: float) -> tuple[str, dict | None, int
             remaining = layout["start"] - song_time
             number = max(1, min(int(COUNTDOWN), math.ceil(remaining - 1e-9)))
             return "countdown", layout, number
+    for index, layout in enumerate(layouts):
+        if _display_start(layouts, index) <= song_time < _display_end(layouts, index):
+            return "sing", layout, 0
     return "blank", None, 0
 
 
