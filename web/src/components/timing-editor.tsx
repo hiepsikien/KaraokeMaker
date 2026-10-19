@@ -172,18 +172,30 @@ export function TimingEditor({
     setSelectedWord(0);
   }
 
-  function splitLine() {
-    if (selectedLine == null || selectedWord == null || selectedWord <= 0) return;
-    const line = lines[selectedLine];
-    if (!line || selectedWord >= line.words.length) return;
-    const head = syncLine({ ...line, words: line.words.slice(0, selectedWord) });
-    const tail = syncLine({ ...line, words: line.words.slice(selectedWord) });
+  function splitWordIndex(lineIndex: number) {
+    const line = lines[lineIndex];
+    if (!line || line.words.length < 2) return null;
+    if (selectedLine === lineIndex && selectedWord != null) {
+      return selectedWord > 0 && selectedWord < line.words.length ? selectedWord : null;
+    }
+    if (time <= line.words[0].start || time >= line.words[line.words.length - 1].end) return null;
+    const index = line.words.findIndex((word) => (word.start < time && word.end > time) || word.start >= time);
+    return index > 0 ? index : null;
+  }
+
+  function splitLine(lineIndex = selectedLine ?? lines.findIndex((line) => time >= line.start && time < line.end)) {
+    if (lineIndex == null || lineIndex < 0) return;
+    const wordIndex = splitWordIndex(lineIndex);
+    const line = lines[lineIndex];
+    if (wordIndex == null || !line) return;
+    const head = syncLine({ ...line, words: line.words.slice(0, wordIndex) });
+    const tail = syncLine({ ...line, words: line.words.slice(wordIndex) });
     setLines((current) => {
       const next = [...current];
-      next.splice(selectedLine, 1, head, tail);
+      next.splice(lineIndex, 1, head, tail);
       return next;
     });
-    setSelectedLine(selectedLine + 1);
+    setSelectedLine(lineIndex + 1);
     setSelectedWord(0);
   }
 
@@ -219,7 +231,7 @@ export function TimingEditor({
       locked={locked}
       selectedLine={selectedLine}
       selectedWord={selectedWord}
-      canSplit={selectedLine != null && selectedWord != null && selectedWord > 0}
+      canSplit={splitWordIndex(selectedLine ?? lines.findIndex((line) => time >= line.start && time < line.end)) != null}
       onSeek={seek}
       onSelectLine={chooseLine}
       onSelectWord={setSelectedWord}
@@ -227,7 +239,7 @@ export function TimingEditor({
       onTogglePlay={togglePlay}
       onPlayFrom={playFrom}
       onAddLine={addLine}
-      onSplitLine={splitLine}
+      onSplitLine={() => splitLine()}
     />
     <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
       <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
@@ -322,14 +334,15 @@ export function TimingEditor({
               </button>
               <button
                 type="button"
-                disabled={locked || selectedLine !== lineIndex || selectedWord == null || selectedWord <= 0}
+                disabled={locked || splitWordIndex(lineIndex) == null}
                 onClick={(event) => {
                   event.stopPropagation();
-                  splitLine();
+                  setSelectedLine(lineIndex);
+                  splitLine(lineIndex);
                 }}
                 className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] disabled:opacity-40"
               >
-                Tách từ chữ này
+                Chia câu
               </button>
             </div>
           </article>

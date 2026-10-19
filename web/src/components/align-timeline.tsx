@@ -389,8 +389,8 @@ export function AlignTimeline({
           </p>
           <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
             {activeIndex == null
-              ? "Kéo cả câu để dời. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ."
-              : "Kéo chữ tới chỗ hát bắt đầu. Kéo mép chữ để đổi độ dài. Bấm Các câu để quay lại."}
+              ? "Kéo cả câu để dời. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ. Chia câu cắt đôi tại vạch phát."
+              : "Kéo chữ tới chỗ hát bắt đầu. Kéo mép chữ để đổi độ dài. Chia câu cắt đôi tại chữ đang chọn. Bấm Các câu để quay lại."}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -400,8 +400,14 @@ export function AlignTimeline({
           <button type="button" disabled={locked} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs disabled:opacity-40" onClick={onAddLine}>
             Thêm câu
           </button>
-          <button type="button" disabled={locked || !canSplit} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs disabled:opacity-40" onClick={onSplitLine}>
-            Tách câu
+          <button
+            type="button"
+            disabled={locked || !canSplit}
+            title={canSplit ? "Chia câu này thành hai tại chỗ đang chọn" : "Chọn một chữ sau chữ đầu, hoặc đặt vạch phát giữa câu"}
+            className="rounded-full border border-[var(--line)] px-3 py-1 text-xs disabled:opacity-40"
+            onClick={onSplitLine}
+          >
+            Chia câu
           </button>
           {activeIndex != null && (
             <button type="button" className="rounded-full border border-[var(--line)] px-3 py-1 text-xs text-[var(--gold)]" onClick={() => onSelectLine(null)}>
