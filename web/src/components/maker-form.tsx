@@ -5,7 +5,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { HomeGate } from "@/components/home-gate";
 import { PhaseStepper } from "@/components/phase-stepper";
 import { ProjectSetup } from "@/components/project-setup";
-import { TimingEditor } from "@/components/timing-editor";
+import { TimingEditor, type ExportOptions } from "@/components/timing-editor";
 import type { TimedLine } from "@/lib/cue";
 import {
   emptyFields,
@@ -39,8 +39,11 @@ export function MakerForm() {
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
+  const exported = job?.status === "done";
+  // Only highlight Xuất while rendering or right after a finished export.
+  // Once the user edits again (status back to editing), return to Biên tập.
   const displayPhase: Phase =
-    phase === "edit" && (job?.status === "rendering" || job?.status === "done") ? "export" : phase;
+    phase === "edit" && (rendering || exported) ? "export" : phase;
 
   useEffect(() => {
     fetch("/api/defaults")
@@ -272,19 +275,40 @@ export function MakerForm() {
     }
   }
 
-  async function renderVideos(nextLines: TimedLine[]) {
+  function resumeEditing() {
+    setJob((current) => {
+      if (!current || (current.status !== "done" && current.status !== "error")) return current;
+      return { ...current, status: "editing", error: "" };
+    });
+  }
+
+  async function browseExportDir() {
+    const paths = await browse("output");
+    const selected = paths[0] || null;
+    if (selected) {
+      setFields((current) => ({ ...current, output_dir: selected }));
+    }
+    return selected;
+  }
+
+  async function renderVideos(nextLines: TimedLine[], options: ExportOptions) {
     if (!job) return;
     setNotice("");
     try {
       const response = await fetch(`/api/jobs/${job.id}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lines: nextLines }),
+        body: JSON.stringify({
+          lines: nextLines,
+          output_dir: options.output_dir,
+          format: options.format,
+        }),
       });
       if (!response.ok) {
         setNotice(await readError(response));
         return;
       }
+      setFields((current) => ({ ...current, output_dir: options.output_dir || current.output_dir }));
       setJob((current) => (current ? { ...current, status: "rendering", error: "" } : current));
     } catch {
       setNotice("Không gửi được lệnh xuất video. Server Python chưa chạy.");
@@ -349,11 +373,15 @@ export function MakerForm() {
           jobId={job.id}
           initialLines={job.lines}
           locked={rendering}
+          exported={exported}
           error={job.status === "error" ? job.error : notice}
           log={job.log}
-          outputs={job.status === "done" ? job.outputs : null}
+          outputs={job.outputs}
+          defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
           onRender={renderVideos}
           onReveal={reveal}
+          onResumeEditing={resumeEditing}
+          onBrowseOutput={browseExportDir}
           onBack={() => {
             setNotice("");
             setPhase("setup");

@@ -45,6 +45,27 @@ def grant(path: Path) -> None:
             _granted.append(resolved)
 
 
+def grant_project_paths(payload: dict) -> None:
+    """Allow media paths stored in a project the user just opened via the file dialog."""
+    for key in (
+        "original_audio",
+        "vocal_audio",
+        "instrumental_audio",
+        "cover_image",
+        "output_dir",
+        "path",
+        "project_path",
+        "timing_path",
+    ):
+        text = str(payload.get(key) or "").strip()
+        if text:
+            grant(Path(text))
+    for item in payload.get("background_images") or []:
+        text = str(item or "").strip()
+        if text:
+            grant(Path(text))
+
+
 def allowed_roots() -> list[Path]:
     roots: list[Path] = []
     root = audio_root()

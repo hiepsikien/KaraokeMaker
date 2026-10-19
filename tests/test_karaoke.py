@@ -17,7 +17,16 @@ from karaoke.align import (
     repair_stretched_words,
 )
 from karaoke.lyrics import extract_sung_lines
-from karaoke.pipeline import JobError, export_gaps, load_timing_file, open_project_file, render_job, save_timing_file
+from karaoke.pipeline import (
+    JobError,
+    export_gaps,
+    load_timing_file,
+    normalize_export_format,
+    open_project_file,
+    render_job,
+    save_timing_file,
+    unique_export_names,
+)
 from karaoke.project import load_project, project_from_fields, project_path_for, save_project, sync_project_file
 from karaoke.render import (
     COUNTDOWN,
@@ -258,6 +267,48 @@ class AccessTests(unittest.TestCase):
                     os.environ.pop("KARAOKE_AUDIO_ROOT", None)
                 else:
                     os.environ["KARAOKE_AUDIO_ROOT"] = previous
+
+    def test_opening_a_project_grants_its_stored_image_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = Path(tempfile.mkdtemp())
+            cover = images / "cover.jpg"
+            cover.write_bytes(b"JPEG")
+            bg = images / "bg.jpg"
+            bg.write_bytes(b"JPEG")
+            previous = os.environ.get("KARAOKE_AUDIO_ROOT")
+            os.environ["KARAOKE_AUDIO_ROOT"] = str(root)
+            try:
+                grant(root)
+                project = project_from_fields(
+                    {
+                        "title": "Ảnh",
+                        "artist": "A",
+                        "output_dir": str(root),
+                        "cover_image": str(cover),
+                        "background_images": [str(bg)],
+                        "vocal_audio": "",
+                    },
+                    status="draft",
+                )
+                path = save_project(project_path_for(root, "Ảnh"), project)
+                clear_grants()
+                grant(path)  # browse grants the project file only
+                with self.assertRaises(AccessError):
+                    ensure_allowed(bg)
+                with patch("karaoke.pipeline.probe_duration", return_value=10.0):
+                    prepared, _lines, opened = open_project_file(str(path))
+                self.assertEqual(Path(prepared["cover_image"]).resolve(), cover.resolve())
+                self.assertEqual([Path(item).resolve() for item in prepared["background_images"]], [bg.resolve()])
+                self.assertEqual(ensure_allowed(bg), bg.resolve())
+                self.assertEqual(opened["background_images"][0], prepared["background_images"][0])
+            finally:
+                clear_grants()
+                if previous is None:
+                    os.environ.pop("KARAOKE_AUDIO_ROOT", None)
+                else:
+                    os.environ["KARAOKE_AUDIO_ROOT"] = previous
+                shutil.rmtree(images, ignore_errors=True)
 
 
 class TimingFileTests(unittest.TestCase):
@@ -543,6 +594,28 @@ class ProjectFileTests(unittest.TestCase):
             loaded, _ = load_project(project_path_for(root, "Other"))
             self.assertEqual(loaded["title"], "Other")
             self.assertEqual(loaded["lines"][0]["text"], "hai")
+
+
+class ExportNamingTests(unittest.TestCase):
+    def test_rejects_unknown_export_format(self):
+        with self.assertRaises(JobError):
+            normalize_export_format("avi")
+
+    def test_unique_export_names_add_a_timestamp_suffix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            vocal, instrumental = unique_export_names(root, "Bài", "mp4")
+            self.assertTrue(vocal.startswith("Bài (có giọng) "))
+            self.assertTrue(vocal.endswith(".mp4"))
+            self.assertTrue(instrumental.startswith("Bài (không lời) "))
+            self.assertNotEqual(vocal, instrumental)
+            (root / vocal).write_bytes(b"x")
+            (root / instrumental).write_bytes(b"x")
+            again_vocal, again_instrumental = unique_export_names(root, "Bài", "mp4")
+            self.assertNotEqual(again_vocal, vocal)
+            self.assertTrue(again_vocal.endswith(".mp4"))
+            self.assertFalse((root / again_vocal).exists())
+            self.assertFalse((root / again_instrumental).exists())
 
 
 class LyricLayoutTests(unittest.TestCase):

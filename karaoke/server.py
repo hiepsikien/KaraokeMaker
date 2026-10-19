@@ -123,6 +123,8 @@ class LineIn(BaseModel):
 
 class RenderRequest(BaseModel):
     lines: list[LineIn] = Field(default_factory=list)
+    output_dir: str = ""
+    format: str = "mp4"
 
 
 _AUDIO_TYPES = {
@@ -681,8 +683,9 @@ def start_render(job_id: str, body: RenderRequest):
             raise HTTPException(status_code=409, detail="Việc này đang chạy.")
         record["status"] = "rendering"
         record["error"] = ""
-        prepared = record["prepared"]
+        prepared = dict(record["prepared"])
         lines = [line.model_dump() for line in body.lines]
+        export_options = {"output_dir": body.output_dir, "format": body.format}
 
     def log(message: str) -> None:
         with _lock:
@@ -690,11 +693,12 @@ def start_render(job_id: str, body: RenderRequest):
 
     def worker() -> None:
         try:
-            outputs = render_job(prepared, lines, log)
+            outputs = render_job(prepared, lines, log, export_options=export_options)
             with _lock:
                 record["status"] = "done"
                 record["outputs"] = outputs
                 record["lines"] = lines
+                record["prepared"]["output_dir"] = prepared.get("output_dir") or record["prepared"].get("output_dir")
         except JobError as error:
             with _lock:
                 record["status"] = "error"

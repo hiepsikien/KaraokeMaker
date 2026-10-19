@@ -312,33 +312,31 @@ def _mux(video: Path, audio: Path, destination: Path, cover_duration: float, log
     delay = int(round(cover_duration * 1000))
     channels = probe_channels(audio)
     delay_filter = "adelay=" + "|".join([str(delay)] * channels)
-    _run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video),
-            "-i",
-            str(audio),
-            "-filter_complex",
-            f"[1:a]{delay_filter},apad[a]",
-            "-map",
-            "0:v:0",
-            "-map",
-            "[a]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(destination),
-        ],
-        log,
-    )
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video),
+        "-i",
+        str(audio),
+        "-filter_complex",
+        f"[1:a]{delay_filter},apad[a]",
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
+    ]
+    if destination.suffix.lower() == ".mp4":
+        command += ["-movflags", "+faststart"]
+    command.append(str(destination))
+    _run(command, log)
 
 
 def render_videos(
