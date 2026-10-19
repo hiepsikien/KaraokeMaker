@@ -19,7 +19,15 @@ from karaoke.align import (
 from karaoke.lyrics import extract_sung_lines
 from karaoke.pipeline import JobError, export_gaps, load_timing_file, open_project_file, render_job, save_timing_file
 from karaoke.project import load_project, project_from_fields, project_path_for, save_project, sync_project_file
-from karaoke.render import COUNTDOWN, LONG_GAP, cue_at
+from karaoke.render import (
+    COUNTDOWN,
+    LONG_GAP,
+    LYRIC_FONT_SIZE,
+    MAX_LYRIC_WIDTH,
+    _render_text_pair,
+    _wrap_word_rows,
+    cue_at,
+)
 
 
 class LyricsTests(unittest.TestCase):
@@ -495,6 +503,78 @@ class ProjectFileTests(unittest.TestCase):
             loaded, _ = load_project(again)
             self.assertEqual(path, again)
             self.assertEqual(loaded["status"], "exported")
+
+    def test_sync_refuses_to_overwrite_another_project_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            other = project_from_fields(
+                {"title": "Other", "artist": "B", "output_dir": str(root), "lyrics": "hai"},
+                lines=[{"text": "hai", "words": [{"text": "hai", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            save_project(project_path_for(root, "Other"), other)
+            prepared = {
+                "title": "Mine",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            mine = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            prepared["title"] = "Other"
+            with self.assertRaises(JobError) as caught:
+                sync_project_file(prepared, status="aligned")
+            self.assertIn("Other.karaoke.json", str(caught.exception))
+            self.assertTrue(mine.is_file())
+            loaded, _ = load_project(project_path_for(root, "Other"))
+            self.assertEqual(loaded["title"], "Other")
+            self.assertEqual(loaded["lines"][0]["text"], "hai")
+
+
+class LyricLayoutTests(unittest.TestCase):
+    def test_uses_one_fixed_font_size_for_short_and_long_lines(self):
+        short = {
+            "text": "một hai",
+            "start": 0,
+            "end": 1,
+            "words": [
+                {"text": "một", "start": 0, "end": 0.4},
+                {"text": "hai", "start": 0.4, "end": 1.0},
+            ],
+        }
+        long_words = [{"text": f"chữ{index}", "start": index * 0.2, "end": index * 0.2 + 0.15} for index in range(18)]
+        long = {
+            "text": " ".join(word["text"] for word in long_words),
+            "start": 0,
+            "end": 4,
+            "words": long_words,
+        }
+        short_layout = _render_text_pair(short)
+        long_layout = _render_text_pair(long)
+        self.assertEqual(len({box["height"] for box in short_layout["boxes"]}), 1)
+        self.assertEqual(short_layout["boxes"][0]["height"], long_layout["boxes"][0]["height"])
+        row_ys = {round(box["y"], 2) for box in long_layout["boxes"]}
+        self.assertGreaterEqual(len(row_ys), 2)
+        self.assertLessEqual(long_layout["white"].width, MAX_LYRIC_WIDTH + 8)
+        self.assertEqual(LYRIC_FONT_SIZE, 56)
+
+    def test_wrap_keeps_a_short_line_on_one_row(self):
+        rows = _wrap_word_rows([40.0, 40.0, 40.0], 10.0, MAX_LYRIC_WIDTH)
+        self.assertEqual(rows, [[0, 1, 2]])
 
 
 if __name__ == "__main__":

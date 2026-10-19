@@ -28,8 +28,27 @@ def project_path_for(output_dir: str | Path, title: str) -> Path:
 
 
 def is_project_path(path: Path) -> bool:
-    name = path.name.lower()
-    return name.endswith(".karaoke.json") or name.endswith(".karaoke")
+    return path.name.lower().endswith(".karaoke.json")
+
+
+def assert_project_path_available(desired: Path, previous: Path | None) -> None:
+    """Refuse to overwrite another project's file when renaming/moving."""
+    if not desired.is_file():
+        return
+    try:
+        desired_resolved = desired.resolve()
+    except OSError:
+        desired_resolved = desired.expanduser()
+    if previous is not None:
+        try:
+            if previous.expanduser().resolve() == desired_resolved:
+                return
+        except OSError:
+            if previous.expanduser() == desired.expanduser():
+                return
+    raise JobError(
+        f"Đã có dự án khác tại «{desired.name}». Đổi tên bài hoặc chọn thư mục xuất khác."
+    )
 
 
 def _optional_str(value: Any) -> str:
@@ -251,6 +270,7 @@ def sync_project_file(
     desired = resolve_project_path({}, prepared)
     stored = str(prepared.get("project_path") or "").strip()
     previous = Path(stored) if stored else None
+    assert_project_path_available(desired, previous)
     existing: dict = {}
     source: Path | None = None
     for candidate in (previous, desired):

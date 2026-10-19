@@ -243,7 +243,7 @@ export function ProjectSetup({
           />
           {fields.project_path && (
             <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-              File dự án hiện tại: {fields.project_path}. Đổi tên bài hoặc thư mục xuất rồi lưu sẽ ghi sang file mới (tên/thư mục mới) và gỡ bản cũ.
+              File dự án hiện tại: {fields.project_path}. Đổi tên bài hoặc thư mục xuất rồi lưu sẽ ghi sang file mới và gỡ bản cũ — trừ khi tên mới trùng dự án khác (bị từ chối).
             </p>
           )}
         </div>

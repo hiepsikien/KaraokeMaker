@@ -36,7 +36,8 @@ export function HomeGate({
         {busy ? "Đang mở…" : "Mở dự án đã có"}
       </button>
       <p className="text-xs leading-5 text-[var(--muted)]">
-        File dự án có đuôi <span className="text-[var(--paper)]">.karaoke.json</span>. Bản timing.json cũ vẫn mở được và sẽ được chuyển sang file dự án.
+        Chọn file <span className="text-[var(--paper)]">.karaoke.json</span>. Bản{" "}
+        <span className="text-[var(--paper)]">… timing.json</span> cũ vẫn mở được và sẽ được chuyển sang file dự án.
       </p>
     </div>
   );

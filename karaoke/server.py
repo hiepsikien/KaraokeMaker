@@ -27,6 +27,7 @@ from karaoke.pipeline import (
     timing_path_for,
 )
 from karaoke.project import (
+    assert_project_path_available,
     project_from_fields,
     project_path_for,
     public_project,
@@ -254,7 +255,7 @@ def defaults():
 
 def _is_openable_project(path: Path) -> bool:
     name = path.name.lower()
-    return name.endswith(".karaoke.json") or name.endswith(".karaoke") or name.endswith(" timing.json")
+    return name.endswith(".karaoke.json") or name.endswith(" timing.json")
 
 
 @app.post("/api/browse")
@@ -391,7 +392,7 @@ def _store_job(record: dict) -> dict:
 
 @app.post("/api/projects")
 def create_project(body: ProjectFieldsRequest):
-    """Save a draft project file without aligning."""
+    """Save a draft project file without aligning. Path follows title + output_dir."""
     payload = body.model_dump()
     try:
         project = project_from_fields(payload, status="draft")
@@ -407,16 +408,16 @@ def create_project(body: ProjectFieldsRequest):
         output.mkdir(parents=True, exist_ok=True)
         grant(output)
         project["output_dir"] = str(output)
-        if payload.get("project_path"):
-            target = Path(payload["project_path"]).expanduser()
-            try:
-                ensure_allowed(target.parent)
-            except AccessError as error:
-                raise JobError(str(error)) from error
-            grant(target.parent)
-        else:
-            target = project_path_for(output, project["title"])
+        target = project_path_for(output, project["title"])
+        previous = Path(payload["project_path"]).expanduser() if payload.get("project_path") else None
+        assert_project_path_available(target, previous)
         saved = save_project(target, project)
+        if previous is not None:
+            try:
+                if previous.resolve() != saved.resolve() and previous.is_file():
+                    previous.unlink()
+            except OSError:
+                pass
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except AccessError as error:
