@@ -1,109 +1,21 @@
-# KaraokeMaker
+# Phần Python của KaraokeMaker
 
-KaraokeMaker ghép một bài hát đã tách giọng thành hai video karaoke: một bản có giọng và một bản không lời. Hai video dùng chung hình nền, trang bìa và chỗ đổi màu từng chữ.
+Cách chạy, cách dùng và file xuất ra nằm ở [README.md](../README.md) ở thư mục gốc.
 
-Giao diện là ứng dụng Next.js. Phần căn lời và dựng video chạy bằng Python, vì cần Whisper và FFmpeg.
+Thư mục này là API, căn lời và dựng video:
 
-KaraokeMaker chạy trên macOS. Hộp thoại chọn file dùng AppleScript, nút mở thư mục dùng Finder, chữ Việt dùng font Arial Unicode của hệ thống, và GPU căn lời là Apple MPS. Bản này không dành cho Windows hay Linux.
+```text
+access.py    # thư mục được phép đọc
+server.py    # API, chỉ trên 127.0.0.1:8765
+pipeline.py  # kiểm tra file, mở bản đã sửa, căn lời, xuất video
+align.py     # căn lời vào vocal và kéo chữ về đoạn đang hát
+lyrics.py    # bỏ dòng ghi chú, so khớp tên bài
+media.py     # ảnh, thời lượng, chuyển vocal sang WAV
+render.py    # dựng hình, đếm ngược, chữ và hai file MP4
+```
 
-## Chạy
-
-Cần hai terminal, cùng thư mục gốc của repo. API chỉ nghe `127.0.0.1:8765`. Không đưa port 8765 hay 3000 ra mạng: API đọc file trong thư mục nhạc và các thư mục bạn đã chọn trong phiên này.
+Chạy từ thư mục gốc của repo:
 
 ```bash
 .venv-karaoke/bin/python -m karaoke
 ```
-
-```bash
-cd web
-npm run dev
-```
-
-Mở http://127.0.0.1:3000. Next.js chuyển các đường dẫn `/api/*` sang API đó, kể cả file vocal dùng để nghe thử.
-
-Nếu chưa có môi trường Python:
-
-```bash
-python3 -m venv .venv-karaoke
-.venv-karaoke/bin/python -m pip install -r requirements-karaoke.txt
-ffmpeg -version
-ffprobe -version
-cd web && npm install
-```
-
-`requirements-karaoke.txt` gồm `stable-ts`, `torch`, Pillow, FastAPI và Uvicorn. `torch` là bản chạy Whisper, kể cả trên GPU Apple. Lần cài đầu có thể mất vài phút vì gói này lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
-
-Thư mục nhạc mặc định là `~/Downloads/Audio` nếu thư mục đó tồn tại (kể cả tên có một dấu cách ở cuối). Đổi bằng biến môi trường:
-
-```bash
-export KARAOKE_AUDIO_ROOT="$HOME/Music/Karaoke"
-```
-
-`KARAOKE_ALLOWED_ROOTS` là danh sách thư mục thêm, ngăn cách bằng dấu `:` . File nằm ngoài các thư mục này và ngoài thư mục bạn vừa chọn trong hộp thoại sẽ bị từ chối.
-
-Môi trường `.venv` của UVR và `.venv-karaoke` tách riêng. UVR khóa `numpy` 1.23.5, còn thư viện căn lời cần bản mới hơn.
-
-## Cách dùng
-
-1. Nhập tên bài hát và tác giả. Dòng phụ trên bìa là tùy chọn.
-2. Chọn audio gốc, file vocal và file instrumental.
-3. Dán lời bài hát.
-4. Chọn ảnh bìa và các ảnh nền sẽ được lặp đến hết bài. Khung video là 1920×1080 (16:9). Ảnh đúng tỉ lệ này đầy khung. Ảnh vuông hoặc 3:2 vẫn dùng được, nhưng nằm giữa và có viền tối hai bên. Mỗi ảnh hiện thumbnail kèm kích thước thật.
-5. Chọn thư mục xuất, rồi bấm **Căn lời**.
-6. Trang sửa mở ra khi căn xong. Sửa chữ, kéo từng chữ trên thước thời gian, nghe thử vocal. Đoạn nhạc dài từ 8 giây sẽ hiện câu sắp hát kèm số đếm 5, 4, 3, 2, 1 trong 5 giây cuối.
-7. Bấm **Xuất hai video**.
-
-Chọn file vocal hoặc instrumental dạng `1_Tên bài_(Vocals).wav` thì ứng dụng tự điền file còn lại trong cùng thư mục, và tìm bài gốc cùng tên trong thư mục `Songs`. Chọn thẳng bài gốc thì ứng dụng lấy cặp vocal và instrumental mới nhất trong `Separated`.
-
-Hộp thoại chọn file mở sẵn `Songs`, `Separated/Kim2` và `Karaoke` bên trong thư mục nhạc, nếu các thư mục đó còn tồn tại.
-
-## Lời bài hát
-
-Mỗi câu hát là một dòng. Dòng trống được bỏ qua. Dòng nằm trọn trong ngoặc vuông cũng được bỏ, vì đó là ghi chú sản xuất chứ không phải lời hát:
-
-```text
-[Verse 1]
-[Tiếng trống trận]
-Mười tám con người dưới cờ Lũng Nhai
-```
-
-Chỉ dòng thứ ba được căn giờ và hiện trên video.
-
-Căn lời dùng file vocal, không dùng bản instrumental. Model mặc định là `small`, chạy trên CPU. Có thể chọn `tiny`, `base`, `small` hoặc `medium`, và chuyển sang GPU Apple (MPS). Lần đầu máy tải model Whisper về, các lần sau dùng lại bản đã tải.
-
-## Video xuất ra
-
-Với bài tên `Bình Ngô Đại Cáo`, thư mục xuất có:
-
-- `Bình Ngô Đại Cáo (có giọng).mp4` dùng audio gốc
-- `Bình Ngô Đại Cáo (không lời).mp4` dùng instrumental
-- `Bình Ngô Đại Cáo timing.json` là thời điểm từng chữ, tính từ đầu bài hát
-
-Trang bìa hiện trước, mặc định 5 giây, với ảnh bìa, tên bài và tác giả. Trong lúc đó tiếng được lùi đúng bằng thời lượng bìa, nên chữ bắt đầu đổi màu khi bài hát bắt đầu. Ảnh nền đổi lần lượt, mặc định mỗi ảnh 8 giây. Nếu không chọn ảnh nền, ảnh bìa được lặp lại.
-
-Câu hát nằm ở cuối khung hình. Chữ chưa hát màu trắng, chữ đang hát được tô vàng dần. Câu kết thúc sau chữ cuối, không nằm chờ qua đoạn nhạc. Trước câu đầu và trước câu sau một khoảng trống từ 8 giây, 5 giây cuối hiện sẵn câu đó cùng số đếm.
-
-## Cấu trúc
-
-```text
-karaoke/
-  access.py      # thư mục được phép đọc
-  server.py      # API cho giao diện, chỉ trên 127.0.0.1
-  pipeline.py    # kiểm tra file, căn lời, rồi xuất khi người dùng xác nhận
-  align.py       # căn lyrics lên vocal.wav, kéo chữ bị đẩy sang khoảng nhạc
-  lyrics.py      # bỏ dòng ghi chú, so khớp tên bài
-  media.py       # ảnh bìa, thumbnail, thời lượng, tìm file UVR
-  render.py      # dựng hình, đếm ngược, chữ và hai file MP4
-web/
-  src/app        # trang Next.js
-  src/components/maker-form.tsx
-  src/components/timing-editor.tsx
-  src/components/image-cards.tsx
-requirements-karaoke.txt
-```
-
-`server.py` giữ việc đang chạy trong bộ nhớ và trả nhật ký cho trang web hỏi mỗi giây. Một việc tại một thời điểm là đủ cho máy cá nhân. Tắt server là mất nhật ký của việc đang xem, file đã xuất vẫn còn trong thư mục.
-
-## Bước tiếp theo
-
-Bản này nhận ba file audio có sẵn. Bước sau là gọi code tách giọng của UVR từ `karaoke/`, chạy trong môi trường `.venv` hiện tại, rồi đưa `vocal.wav` và `instrumental.wav` sang pipeline này. Phần dựng video không phụ thuộc giao diện UVR.
