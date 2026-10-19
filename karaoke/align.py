@@ -219,6 +219,8 @@ def fit_lines_to_voice(lines: list[dict], vocal_path: Path, log=None) -> list[di
         note(f"{vocal_path.name} không phải WAV 16-bit. Đang chuyển tạm để đo tiếng hát.")
     levels, hop = _vocal_rms(vocal_path)
     fitted: list[dict] = []
+    quiet = 0
+    short = 0
     for index, line in enumerate(lines):
         words = line.get("words") or []
         if not words:
@@ -226,17 +228,14 @@ def fit_lines_to_voice(lines: list[dict], vocal_path: Path, log=None) -> list[di
         next_start = lines[index + 1]["start"] if index + 1 < len(lines) else words[0]["start"] + 12
         bounds = _voice_bounds(levels, hop, words[0]["start"], min(next_start - 0.04, words[0]["start"] + 12))
         if bounds is None:
-            note(
-                f"Câu {index + 1}: giữ nguyên thời gian vì không thấy đoạn hát đủ lớn quanh {words[0]['start']:.1f}s "
-                "(ngưỡng peak 80, tỉ lệ 0,12)."
-            )
+            quiet += 1
             fitted.append(line)
             continue
         active_start, active_end, threshold = bounds
         if fitted:
             active_start = max(active_start, fitted[-1]["end"])
         if active_end - active_start < 0.18 * len(words):
-            note(f"Câu {index + 1}: giữ nguyên thời gian vì đoạn hát ngắn hơn số chữ.")
+            short += 1
             fitted.append(line)
             continue
         outside = any(word["start"] > active_end + 0.25 for word in words)
@@ -249,6 +248,13 @@ def fit_lines_to_voice(lines: list[dict], vocal_path: Path, log=None) -> list[di
             if active_end > words[-1]["end"] + 0.22:
                 words[-1] = _word_dict(words[-1]["text"], words[-1]["start"], min(active_end, words[-1]["end"] + 2.5))
         fitted.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
+    parts: list[str] = []
+    if quiet:
+        parts.append(f"{quiet} câu vì không thấy đoạn hát đủ lớn")
+    if short:
+        parts.append(f"{short} câu vì đoạn hát ngắn hơn số chữ")
+    if parts:
+        note("Giữ nguyên " + ", ".join(parts) + ".")
     return fitted
 
 

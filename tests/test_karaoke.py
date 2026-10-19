@@ -172,10 +172,13 @@ class VoiceFitTests(unittest.TestCase):
             vocal = Path(folder) / "quiet.wav"
             self._tone(vocal, [])
             notes: list[str] = []
-            line = {"text": "một", "start": 0.4, "end": 0.8, "words": [{"text": "một", "start": 0.4, "end": 0.8}]}
-            fitted = fit_lines_to_voice([line], vocal, notes.append)
+            lines = [
+                {"text": "một", "start": 0.4, "end": 0.8, "words": [{"text": "một", "start": 0.4, "end": 0.8}]},
+                {"text": "hai", "start": 1.2, "end": 1.6, "words": [{"text": "hai", "start": 1.2, "end": 1.6}]},
+            ]
+            fitted = fit_lines_to_voice(lines, vocal, notes.append)
             self.assertEqual(fitted[0]["end"], 0.8)
-            self.assertTrue(any("giữ nguyên" in note for note in notes))
+            self.assertEqual(notes, ["Giữ nguyên 2 câu vì không thấy đoạn hát đủ lớn."])
 
     def test_measures_a_vocal_that_is_not_pcm16(self):
         if shutil.which("ffmpeg") is None:
@@ -298,6 +301,7 @@ class TimingFileTests(unittest.TestCase):
                 lambda _message: None,
             )
         self.assertIn("audio gốc", str(caught.exception))
+        self.assertIn("mở lại bản đã sửa", str(caught.exception))
 
     def test_render_writes_the_opened_timing_file(self):
         with tempfile.TemporaryDirectory() as folder:

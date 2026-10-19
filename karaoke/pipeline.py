@@ -281,7 +281,7 @@ def _images_for_render(prepared: dict) -> tuple[Path, list[Path]]:
     if cover is not None and not images:
         images = [cover]
     if cover is None:
-        raise JobError("Chưa xuất được. Hãy chọn thêm: ảnh bìa hoặc ảnh nền.")
+        raise JobError("Chưa xuất được vì còn thiếu ảnh bìa hoặc ảnh nền. Chọn đủ file rồi mở lại bản đã sửa.")
     return cover, images
 
 
@@ -289,7 +289,9 @@ def render_job(prepared: dict, lines: list[dict], log) -> dict:
     lines = normalize_edited_lines(lines)
     gaps = export_gaps(prepared)
     if gaps:
-        raise JobError("Chưa xuất được. Hãy chọn thêm: " + ", ".join(gaps) + ".")
+        raise JobError(
+            "Chưa xuất được vì còn thiếu " + ", ".join(gaps) + ". Chọn đủ file rồi mở lại bản đã sửa."
+        )
     output_dir = Path(prepared["output_dir"])
     title = prepared["title"]
     stem = safe_title(title)

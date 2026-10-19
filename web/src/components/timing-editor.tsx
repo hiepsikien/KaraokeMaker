@@ -366,7 +366,7 @@ export function TimingEditor({
         </button>
         {exportGaps.length > 0 && (
           <p className="w-full text-sm text-[var(--muted)]">
-            Chưa xuất được. Quay lại phần chọn file và chọn thêm: {exportGaps.join(", ")}.
+            Chưa xuất được vì còn thiếu {exportGaps.join(", ")}. Chọn đủ file rồi mở lại bản đã sửa.
           </p>
         )}
         {outputs && (
