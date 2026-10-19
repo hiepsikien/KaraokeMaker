@@ -74,9 +74,9 @@ Mười tám con người dưới cờ Lũng Nhai
 
 Chỉ dòng thứ ba được căn giờ và hiện trên video.
 
-Căn lời dùng file vocal. Whisper nghe vocal trước và lấy thời điểm từ bản nghe được. Lời đã nhập là chuẩn từ ngữ ở những câu khớp. Câu Whisper nghe được mà lời chưa có, như hát bè hoặc đoạn kết, được thêm vào và đánh dấu trên trang sửa. Một khoảng im lặng dài trước câu hát không kéo câu đó về đầu bài. Model mặc định là `small`, chạy trên CPU. Có thể chọn `tiny`, `base`, `small` hoặc `medium`, và chuyển sang GPU Apple (MPS). Lần đầu máy tải model Whisper về, các lần sau dùng lại bản đã tải.
+Căn lời dùng file vocal. Trước khi chạy, chọn model Whisper (`tiny`, `base`, `small`, `medium`, `large-v2`, `large` — bản v3), thiết bị CPU hoặc GPU Apple, ngưỡng không-lời, và có thử lại khi câu bị lặp hay không. Máy chưa có model thì tải về lúc bắt đầu. Whisper nghe và ghi lại đúng chữ cùng thời gian nó nghe được. Lời đã nhập không tham gia lần căn này; lời đó để sửa chính tả sau.
 
-Sau khi đối chiếu, thời gian từng chữ được kéo về đoạn đang hát, kể cả tiếng ngân. Việc này chạy một lần trong lúc căn. Mở dự án đã có không căn lại, để giữ các chỗ đã sửa tay. Vocal không phải WAV 16-bit, kể cả mp3 và flac, được chuyển tạm trước khi đo tiếng hát. Câu không đo được thì giữ nguyên thời gian, và tiến trình ghi một dòng tóm tắt.
+Việc này chạy một lần trong lúc căn. Mở dự án đã có không căn lại, trừ khi bấm **Ghép chữ lại**. Vocal không phải WAV 16-bit, kể cả mp3 và flac, được chuyển tạm trước khi đo tiếng hát.
 
 ## Video xuất ra
 

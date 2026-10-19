@@ -27,6 +27,7 @@ from karaoke.pipeline import (
     render_job,
     save_timing_file,
     timing_path_for,
+    whisper_options,
 )
 from karaoke.project import (
     assert_project_path_available,
@@ -78,7 +79,16 @@ class ProjectFieldsRequest(BaseModel):
     language: str = "vi"
     model_name: str = "small"
     device: str = "cpu"
+    no_speech_threshold: float | None = None
+    whisper_retry: bool = True
     project_path: str = ""
+
+
+class AlignRequest(BaseModel):
+    model_name: str = "small"
+    device: str = "cpu"
+    no_speech_threshold: float | None = None
+    whisper_retry: bool = True
 
 
 CreateJobRequest = ProjectFieldsRequest
@@ -464,6 +474,8 @@ def project_session(body: ProjectFieldsRequest):
             "language",
             "model_name",
             "device",
+            "no_speech_threshold",
+            "whisper_retry",
         ):
             if key in payload:
                 prepared[key] = payload[key]
@@ -656,6 +668,59 @@ def job_audio(job_id: str):
     return FileResponse(path, media_type=media_type, filename=path.name)
 
 
+@app.post("/api/jobs/{job_id}/realign")
+def realign_job(job_id: str, body: AlignRequest):
+    """Run Whisper alignment again and replace the timing currently being edited."""
+    try:
+        options = whisper_options(body.model_dump())
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Không thấy việc này.")
+        if record["status"] in {"running", "rendering", "separating"}:
+            raise HTTPException(status_code=409, detail="Việc này đang chạy.")
+        prepared = record["prepared"]
+        if not str(prepared.get("vocal_audio") or "").strip():
+            raise HTTPException(status_code=400, detail="Cần file vocal để ghép chữ lại.")
+        prepared.update(options)
+        record["status"] = "running"
+        record["error"] = ""
+        record["log"].append(
+            f"Ghép chữ lại bằng {options['model_name']} trên {options['device']}. Timing đang sửa sẽ được thay khi nghe xong."
+        )
+
+    def log(message: str) -> None:
+        with _lock:
+            record["log"].append(message)
+
+    def worker() -> None:
+        try:
+            lines = align_job(prepared, log)
+            project_path = sync_project_file(prepared, lines=lines, status="aligned")
+            prepared["project_path"] = str(project_path)
+            saved_project, saved_path = load_project(Path(project_path))
+            with _lock:
+                record["prepared"] = prepared
+                record["lines"] = lines
+                record["duration"] = prepared.get("vocal_duration") or record.get("duration") or 0
+                record["project"] = public_project(saved_project, saved_path)
+                record["log"].append("Ghép lại xong. Timing mới đã thay bản đang sửa.")
+                record["status"] = "editing"
+        except JobError as error:
+            with _lock:
+                record["status"] = "error"
+                record["error"] = str(error)
+        except Exception as error:
+            with _lock:
+                record["status"] = "error"
+                record["error"] = str(error)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"id": job_id}
+
+
 @app.post("/api/jobs/{job_id}/fit")
 def fit_job(job_id: str):
     """Manual re-fit. Alignment already fitted once; the editor does not call this on open."""
@@ -812,6 +877,8 @@ def _restore_record(project: dict, path: Path) -> dict:
         "language": project.get("language") or "vi",
         "model_name": project.get("model_name") or "small",
         "device": project.get("device") or "cpu",
+        "no_speech_threshold": project.get("no_speech_threshold"),
+        "whisper_retry": bool(project.get("whisper_retry", True)),
         "project_path": str(path),
         "restore": restore,
     }

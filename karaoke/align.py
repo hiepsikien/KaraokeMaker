@@ -543,6 +543,39 @@ def _allow_mps_alignment() -> None:
     timing.dtw = dtw
 
 
+def _log_model_cache(model_name: str, log) -> None:
+    import os
+
+    import whisper
+
+    url = whisper._MODELS.get(model_name)
+    if not url:
+        return
+    cached = os.path.join(os.path.expanduser("~"), ".cache", "whisper", os.path.basename(url))
+    if os.path.isfile(cached):
+        log(f"Đã có model {model_name} trên máy.")
+        return
+    log(f"Chưa có model {model_name}. Đang tải về trước khi ghép chữ.")
+
+
+def lines_from_transcript(segments: list[dict]) -> list[dict]:
+    """Keep Whisper's own words and timestamps. Typed lyrics are not applied here."""
+    lines: list[dict] = []
+    for segment in segments:
+        words = [
+            _word_dict(word["text"], word["start"], word["end"])
+            for word in segment.get("words") or []
+            if str(word.get("text", "")).strip()
+        ]
+        if not words:
+            continue
+        text = " ".join(word["text"] for word in words)
+        lines.append(_line_from_words(text, words))
+    if not lines:
+        raise AlignError("Whisper không nghe thấy lời nào trong file vocal.")
+    return lines
+
+
 def align_lyrics(
     vocal_path: Path,
     lyrics: str,
@@ -550,13 +583,14 @@ def align_lyrics(
     model_name: str,
     device: str,
     log,
+    no_speech_threshold: float | None = None,
+    whisper_retry: bool = True,
 ) -> list[dict]:
-    lines = extract_sung_lines(lyrics)
-    if not lines:
-        raise AlignError("Không còn câu hát nào sau khi bỏ các dòng ghi chú trong [ngoặc].")
-
-    log(f"Có {len(lines)} câu hát. Đang tải model {model_name} ({device}).")
-    log("Lần đầu máy sẽ tải model về, có thể mất vài phút.")
+    typed = extract_sung_lines(lyrics)
+    if typed:
+        log(f"Lời đã nhập có {len(typed)} câu. Lần này không dùng để căn giờ; sẽ dùng khi sửa chính tả.")
+    _log_model_cache(model_name, log)
+    log(f"Đang tải model {model_name} ({device}).")
 
     import stable_whisper
 
@@ -570,35 +604,34 @@ def align_lyrics(
             raise AlignError(f"Không tải được model căn lời: {error}") from error
 
     _allow_mps_alignment()
-    prompt = " ".join(lines)[:220]
-    log("Đang nghe vocal bằng Whisper, rồi đối chiếu với lời đã nhập.")
+    temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if whisper_retry else 0.0
+    if whisper_retry:
+        log("Nếu một câu bị lặp, Whisper sẽ thử lại với nhiệt độ cao hơn.")
+    else:
+        log("Khóa nhiệt độ 0: không thử lại khi câu bị lặp.")
+    if no_speech_threshold is None:
+        log("Không lọc đoạn Whisper cho là không có lời.")
+    else:
+        log(f"Lọc đoạn không lời với ngưỡng {no_speech_threshold:.2f}.")
+    transcribe_options = {
+        "language": language or None,
+        "verbose": None,
+        "word_timestamps": True,
+        "temperature": temperature,
+        "condition_on_previous_text": False,
+        "no_speech_threshold": no_speech_threshold,
+        "regroup": True,
+    }
+    log("Đang nghe vocal bằng Whisper. Thời gian và chữ lấy đúng bản nghe được.")
     try:
-        result = model.transcribe(
-            str(vocal_path),
-            language=language or None,
-            verbose=None,
-            word_timestamps=True,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            initial_prompt=prompt or None,
-            regroup=True,
-        )
+        result = model.transcribe(str(vocal_path), **transcribe_options)
     except Exception as error:
         if device == "cpu":
             raise AlignError(f"Nghe vocal thất bại: {error}") from error
         log(f"GPU Apple không nghe được ({error}). Đang nghe lại trên CPU.")
         model = stable_whisper.load_model(model_name, device="cpu")
         try:
-            result = model.transcribe(
-                str(vocal_path),
-                language=language or None,
-                verbose=None,
-                word_timestamps=True,
-                temperature=0.0,
-                condition_on_previous_text=False,
-                initial_prompt=prompt or None,
-                regroup=True,
-            )
+            result = model.transcribe(str(vocal_path), **transcribe_options)
         except Exception as cpu_error:
             raise AlignError(f"Nghe vocal thất bại: {cpu_error}") from cpu_error
 
@@ -610,23 +643,7 @@ def align_lyrics(
         words = _words_from_segment(segment)
         if words:
             heard_segments.append({"words": words})
-    try:
-        matched = reconcile_lyrics_with_transcript(lines, heard_segments)
-    except AlignError:
-        raise
-    except Exception as error:
-        raise AlignError(f"Không đối chiếu được lời với bản nghe: {error}") from error
-
-    try:
-        matched = fit_lines_to_voice(matched, vocal_path, log)
-    except (AlignError, wave.Error, EOFError) as error:
-        log(f"Không chỉnh được câu theo tiếng hát ({error}). Giữ thời gian đã đối chiếu.")
-    added = [line["text"] for line in matched if line.get("supplemented")]
-    if added:
-        log(f"Đã thêm {len(added)} câu Whisper nghe được mà lời nhập chưa có, để khít hát bè hoặc đoạn kết.")
-    unsure = [line["text"] for line in matched if line.get("uncertain") and not line.get("supplemented")]
-    if unsure:
-        log(f"{len(unsure)} câu khớp chưa chắc. Trên trang sửa, những câu đó được đánh dấu để nghe lại.")
+    matched = lines_from_transcript(heard_segments)
 
     log(
         f"Căn xong. Câu đầu lúc {matched[0]['start']:.1f}s, "

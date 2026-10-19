@@ -81,6 +81,8 @@ def empty_project() -> dict:
         "language": "vi",
         "model_name": "small",
         "device": "cpu",
+        "no_speech_threshold": None,
+        "whisper_retry": True,
         "lines": [],
         "outputs": None,
         "restore": {
@@ -124,8 +126,9 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     except (TypeError, ValueError) as error:
         raise JobError("Thời lượng phải là số giây.") from error
     project["language"] = str(payload.get("language") or "vi").strip() or "vi"
-    project["model_name"] = str(payload.get("model_name") or "small").strip() or "small"
-    project["device"] = str(payload.get("device") or "cpu").strip() or "cpu"
+    from karaoke.pipeline import whisper_options
+
+    project.update(whisper_options(payload))
     if status not in STATUSES:
         raise JobError("Trạng thái dự án không hợp lệ.")
     project["status"] = status
@@ -160,6 +163,8 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "language": project.get("language") or "vi",
         "model_name": project.get("model_name") or "small",
         "device": project.get("device") or "cpu",
+        "no_speech_threshold": project.get("no_speech_threshold"),
+        "whisper_retry": bool(project.get("whisper_retry", True)),
         "lines": list(project.get("lines") or []),
         "outputs": project.get("outputs"),
         "restore": restore_from_payload(project),
@@ -274,6 +279,8 @@ def prepared_from_project(project: dict) -> dict:
         "language": project.get("language") or "vi",
         "model_name": project.get("model_name") or "small",
         "device": project.get("device") or "cpu",
+        "no_speech_threshold": project.get("no_speech_threshold"),
+        "whisper_retry": bool(project.get("whisper_retry", True)),
         "project_path": str(project.get("path") or ""),
         "timing_path": str(project.get("timing_path") or ""),
         "restore": restore_from_payload(project),

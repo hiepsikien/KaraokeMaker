@@ -45,7 +45,6 @@ export function ProjectSetup({
   busyBrowse,
   aligning,
   hasLines,
-  showAlignOptions,
   onBrowse,
   onContinue,
   onAlign,
@@ -58,7 +57,6 @@ export function ProjectSetup({
   busyBrowse: string;
   aligning: boolean;
   hasLines: boolean;
-  showAlignOptions: boolean;
   onBrowse: (kind: BrowseKind) => void;
   onContinue: (event: FormEvent) => void;
   onAlign: () => void;
@@ -207,34 +205,17 @@ export function ProjectSetup({
           </div>
         </section>
 
-        {showAlignOptions && (
-          <section className="grid gap-4 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-[var(--muted)]">Model căn lời</span>
-              <select
-                className={fieldClass}
-                value={fields.model_name}
-                onChange={(event) => setFields((current) => ({ ...current, model_name: event.target.value }))}
-              >
-                <option value="tiny">Tiny, nhanh</option>
-                <option value="base">Base</option>
-                <option value="small">Small, cân bằng</option>
-                <option value="medium">Medium, chậm hơn</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-[var(--muted)]">Thiết bị</span>
-              <select
-                className={fieldClass}
-                value={fields.device}
-                onChange={(event) => setFields((current) => ({ ...current, device: event.target.value }))}
-              >
-                <option value="cpu">CPU</option>
-                <option value="mps">GPU Apple</option>
-              </select>
-            </label>
-          </section>
-        )}
+        <label className="block">
+          <span className="mb-1.5 block text-sm text-[var(--muted)]">Thiết bị tách giọng</span>
+          <select
+            className={fieldClass}
+            value={fields.device}
+            onChange={(event) => setFields((current) => ({ ...current, device: event.target.value }))}
+          >
+            <option value="cpu">CPU</option>
+            <option value="mps">GPU Apple</option>
+          </select>
+        </label>
 
         <div>
           <PathField

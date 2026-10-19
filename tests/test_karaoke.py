@@ -11,6 +11,7 @@ from unittest.mock import patch
 from karaoke.access import AccessError, audio_root, clear_grants, ensure_allowed, grant
 from karaoke.align import (
     _segments_match_lines,
+    lines_from_transcript,
     reconcile_lyrics_with_transcript,
     _vocal_rms,
     fit_lines_to_voice,
@@ -242,6 +243,24 @@ class SegmentMatchTests(unittest.TestCase):
         self.assertEqual([word["text"] for word in matched[0]["words"]], ["một", "hai"])
         self.assertEqual(matched[0]["words"][0]["start"], 1.0)
         self.assertEqual(matched[0]["words"][1]["end"], 1.8)
+
+
+class TranscriptLineTests(unittest.TestCase):
+    def test_keeps_whisper_words_and_times_without_using_typed_lyrics(self):
+        segments = [
+            {
+                "words": [
+                    {"text": "Hà", "start": 54.0, "end": 54.4},
+                    {"text": "Nội", "start": 54.4, "end": 54.9},
+                ]
+            }
+        ]
+        lines = lines_from_transcript(segments)
+        self.assertEqual(lines[0]["text"], "Hà Nội")
+        self.assertEqual(lines[0]["start"], 54.0)
+        self.assertEqual(lines[0]["end"], 54.9)
+        self.assertNotIn("uncertain", lines[0])
+        self.assertNotIn("supplemented", lines[0])
 
 
 class TranscriptReconcileTests(unittest.TestCase):
@@ -830,6 +849,32 @@ class MixRestoreTests(unittest.TestCase):
             )
             self.assertTrue(destination.is_file())
             self.assertGreater(destination.stat().st_size, 44)
+
+
+class WhisperOptionTests(unittest.TestCase):
+    def test_large_is_allowed_and_retry_defaults_on(self):
+        from karaoke.pipeline import whisper_options
+
+        options = whisper_options({"model_name": "large"})
+        self.assertEqual(options["model_name"], "large")
+        self.assertIsNone(options["no_speech_threshold"])
+        self.assertTrue(options["whisper_retry"])
+
+    def test_rejects_an_unknown_model_and_a_bad_threshold(self):
+        from karaoke.pipeline import whisper_options
+
+        with self.assertRaises(JobError):
+            whisper_options({"model_name": "huge"})
+        with self.assertRaises(JobError):
+            whisper_options({"no_speech_threshold": 1.4})
+
+    def test_project_stores_the_align_options(self):
+        project = project_from_fields(
+            {"title": "Bài", "model_name": "large-v2", "whisper_retry": False, "no_speech_threshold": 0.2}
+        )
+        self.assertEqual(project["model_name"], "large-v2")
+        self.assertFalse(project["whisper_retry"])
+        self.assertEqual(project["no_speech_threshold"], 0.2)
 
 
 if __name__ == "__main__":

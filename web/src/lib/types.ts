@@ -43,6 +43,8 @@ export type Project = {
   language: string;
   model_name: string;
   device: string;
+  no_speech_threshold?: number | null;
+  whisper_retry?: boolean;
   lines: TimedLine[];
   outputs: Outputs | null;
   restore?: RestoreSettings | null;
@@ -78,6 +80,8 @@ export type ProjectFields = {
   image_duration: string;
   model_name: string;
   device: string;
+  no_speech_threshold: string;
+  whisper_retry: boolean;
   project_path: string;
 };
 
@@ -97,6 +101,8 @@ export function emptyFields(outputDir = ""): ProjectFields {
     image_duration: "8",
     model_name: "small",
     device: "cpu",
+    no_speech_threshold: "",
+    whisper_retry: true,
     project_path: "",
   };
 }
@@ -117,6 +123,9 @@ export function fieldsFromProject(project: Project): ProjectFields {
     image_duration: String(project.image_duration ?? 8),
     model_name: project.model_name || "small",
     device: project.device || "cpu",
+    no_speech_threshold:
+      project.no_speech_threshold == null ? "" : String(project.no_speech_threshold),
+    whisper_retry: project.whisper_retry !== false,
     project_path: project.path || "",
   };
 }
@@ -138,6 +147,8 @@ export function fieldsPayload(fields: ProjectFields) {
     language: "vi",
     model_name: fields.model_name,
     device: fields.device,
+    no_speech_threshold: fields.no_speech_threshold.trim() === "" ? null : Number(fields.no_speech_threshold),
+    whisper_retry: fields.whisper_retry,
     project_path: fields.project_path,
   };
 }
