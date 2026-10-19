@@ -429,23 +429,40 @@ def create_project(body: ProjectFieldsRequest):
 
 @app.post("/api/projects/session")
 def project_session(body: ProjectFieldsRequest):
-    """Update project fields from the setup form and reopen an editing job when possible."""
+    """Update project fields from setup; relocate the .karaoke.json when title/output_dir change."""
     payload = body.model_dump()
     path_text = str(payload.get("project_path") or "").strip()
     if not path_text:
         raise HTTPException(status_code=400, detail="Thiếu đường dẫn dự án.")
     try:
-        _prepared, lines, existing = open_project_file(path_text)
-        merged = {**existing, **payload}
-        merged["lines"] = lines
-        merged["background_images"] = payload.get("background_images") or []
-        status = "aligned" if lines else "draft"
-        if existing.get("outputs"):
-            merged["outputs"] = existing["outputs"]
-        project = project_from_fields(merged, lines=lines or None, status=status)
-        if existing.get("outputs"):
-            project["outputs"] = existing["outputs"]
-        saved = save_project(Path(path_text).expanduser(), project)
+        prepared, lines, existing = open_project_file(path_text)
+        for key in (
+            "title",
+            "artist",
+            "cover_line",
+            "lyrics",
+            "original_audio",
+            "vocal_audio",
+            "instrumental_audio",
+            "cover_image",
+            "output_dir",
+            "cover_duration",
+            "image_duration",
+            "language",
+            "model_name",
+            "device",
+        ):
+            if key in payload:
+                prepared[key] = payload[key]
+        prepared["background_images"] = list(payload.get("background_images") or [])
+        prepared["project_path"] = path_text
+        # status=None keeps exported (same rule as sync_project_file for timing saves).
+        saved = sync_project_file(
+            prepared,
+            lines=lines or None,
+            status=None,
+            outputs=existing.get("outputs"),
+        )
         prepared, lines, project = open_project_file(str(saved))
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -454,12 +471,18 @@ def project_session(body: ProjectFieldsRequest):
     if not lines or not prepared.get("vocal_audio"):
         return {"phase": "setup", "project": project_public, "job": None}
 
+    moved = str(Path(path_text).expanduser().resolve()) != str(Path(prepared["project_path"]).resolve())
+    log_line = (
+        f"Đã cập nhật khai báo và chuyển dự án sang {Path(prepared['project_path']).name}."
+        if moved
+        else "Đã cập nhật khai báo dự án."
+    )
     job_id = uuid.uuid4().hex
     record = {
         "id": job_id,
         "status": "editing",
         "created": time.time(),
-        "log": ["Đã cập nhật khai báo dự án."],
+        "log": [log_line],
         "error": "",
         "outputs": project.get("outputs"),
         "lines": lines,

@@ -555,6 +555,43 @@ class ProjectFileTests(unittest.TestCase):
             self.assertEqual(path, again)
             self.assertEqual(loaded["status"], "exported")
 
+    def test_session_style_sync_relocates_and_keeps_exported(self):
+        """Khai báo → Lưu must use sync (status=None), not save_project on the old path."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            prepared = {
+                "title": "Cũ",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            old = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="exported",
+                outputs={"directory": str(root), "vocal": "a.mp4", "instrumental": "b.mp4"},
+            )
+            prepared["title"] = "Mới"
+            prepared["project_path"] = str(old)
+            new = sync_project_file(prepared, status=None)
+            self.assertEqual(new.name, "Mới.karaoke.json")
+            self.assertFalse(old.exists())
+            loaded, _ = load_project(new)
+            self.assertEqual(loaded["status"], "exported")
+            self.assertEqual(loaded["title"], "Mới")
+            self.assertEqual(loaded["outputs"]["vocal"], "a.mp4")
+
     def test_sync_refuses_to_overwrite_another_project_file(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
