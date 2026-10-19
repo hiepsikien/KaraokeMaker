@@ -313,6 +313,31 @@ class TranscriptReconcileTests(unittest.TestCase):
         self.assertGreater(matched[0]["start"], 2870)
         self.assertLess(matched[0]["end"], matched[1]["start"])
 
+    def test_short_gap_shrinks_the_guess_instead_of_covering_the_match(self):
+        lyrics = [
+            "Màn sương buông",
+            "một hai ba bốn năm sáu bảy tám",
+            "Màn sương buông",
+        ]
+
+        def phrase(start):
+            return [
+                {"text": "màn", "start": start, "end": start + 0.4},
+                {"text": "sương", "start": start + 0.4, "end": start + 0.8},
+                {"text": "buông", "start": start + 0.8, "end": start + 1.2},
+            ]
+
+        matched = reconcile_lyrics_with_transcript(
+            lyrics,
+            [{"words": phrase(10.0)}, {"words": phrase(11.7)}],
+        )
+        sung = [line for line in matched if not line.get("supplemented")]
+        guessed = sung[1]
+        self.assertTrue(guessed["uncertain"])
+        self.assertGreaterEqual(guessed["start"], sung[0]["end"])
+        self.assertLessEqual(guessed["end"], sung[2]["start"])
+        self.assertLess(guessed["end"] - guessed["start"], 2.8)
+
     def test_repeated_lines_take_successive_hearings(self):
         lyrics = ["Màn sương buông", "Màn sương buông"]
 

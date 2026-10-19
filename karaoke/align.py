@@ -424,6 +424,50 @@ def _find_heard_window(tokens: list[str], words: list[dict], cursor: int, thresh
     return None
 
 
+def _fit_unheard_spans(durations: list[float], previous_end: float, next_start: float | None) -> list[tuple[float, float]]:
+    """Estimated spans for unmatched lines. A following match is a hard end."""
+    between = 0.15
+    count = len(durations)
+    if next_start is None:
+        cursor = previous_end + 0.4
+        spans: list[tuple[float, float]] = []
+        for duration in durations:
+            spans.append((cursor, cursor + duration))
+            cursor += duration + between
+        return spans
+
+    lead = 0.15
+    tail = 0.2
+    window_start = previous_end + lead
+    window_end = next_start - tail
+    if window_end - window_start < 0.05 * count:
+        window_start = previous_end
+        window_end = next_start
+    available = window_end - window_start
+    if available <= 0:
+        available = 0.05 * count
+        window_end = next_start
+        window_start = window_end - available
+    gaps = between * max(0, count - 1)
+    total = sum(durations) + gaps
+    fitted = list(durations)
+    if total > available and total > 0:
+        scale = available / total
+        fitted = [item * scale for item in durations]
+        between *= scale
+        total = available
+    cursor = max(window_start, window_end - total)
+    spans = []
+    for duration in fitted:
+        end = min(cursor + duration, next_start)
+        if end <= cursor:
+            end = next_start
+            cursor = end - max(duration, 1e-3)
+        spans.append((cursor, end))
+        cursor = end + between
+    return spans
+
+
 def _place_unheard(lines: list[str], placed: list[dict | None]) -> list[dict]:
     """Keep lyric lines Whisper did not match, just before the next line that did match."""
     index = 0
@@ -437,16 +481,14 @@ def _place_unheard(lines: list[str], placed: list[dict | None]) -> list[dict]:
         previous_end = placed[index - 1]["end"] if index and placed[index - 1] is not None else 0.0
         next_start = placed[run_end]["start"] if run_end < len(lines) and placed[run_end] is not None else None
         durations = [max(0.35 * max(1, len(lines[item].split())), 0.8) for item in range(index, run_end)]
-        total = sum(durations) + 0.15 * max(0, len(durations) - 1)
-        cursor = previous_end + 0.4 if next_start is None else max(previous_end + 0.15, next_start - total - 0.2)
-        for offset, duration in enumerate(durations):
+        spans = _fit_unheard_spans(durations, previous_end, next_start)
+        for offset, (start, end) in enumerate(spans):
             tokens = lines[index + offset].split()
             placed[index + offset] = _line_from_words(
                 lines[index + offset],
-                _spread_tokens(tokens, cursor, cursor + duration),
+                _spread_tokens(tokens, start, end),
                 uncertain=True,
             )
-            cursor += duration + 0.15
         index = run_end
     return [line for line in placed if line is not None]
 
