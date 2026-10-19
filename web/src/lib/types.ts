@@ -1,6 +1,14 @@
 import type { TimedLine } from "@/lib/cue";
 
-export type Phase = "home" | "setup" | "align" | "edit" | "export";
+export type Phase = "home" | "setup" | "restore" | "align" | "edit" | "export";
+
+export type RestoreSettings = {
+  instrumental_stem: string;
+  high_hz: number;
+  low_hz: number;
+  high_volume: number;
+  low_volume: number;
+};
 
 export function sungCount(lyrics: string) {
   return lyrics
@@ -37,12 +45,13 @@ export type Project = {
   device: string;
   lines: TimedLine[];
   outputs: Outputs | null;
+  restore?: RestoreSettings | null;
   path: string;
 };
 
 export type Job = {
   id: string;
-  status: "running" | "editing" | "rendering" | "done" | "error";
+  status: "running" | "editing" | "rendering" | "done" | "error" | "needs_split" | "separating" | "ready";
   log: string[];
   error: string;
   outputs: Outputs | null;
@@ -51,6 +60,7 @@ export type Job = {
   export_gaps?: string[];
   project_path?: string;
   project?: Project | null;
+  restore?: RestoreSettings | null;
 };
 
 export type ProjectFields = {

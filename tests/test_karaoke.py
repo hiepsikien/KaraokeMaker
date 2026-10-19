@@ -17,6 +17,8 @@ from karaoke.align import (
     repair_stretched_words,
 )
 from karaoke.lyrics import extract_sung_lines
+from karaoke.mix import JobError as MixJobError
+from karaoke.mix import mix_filtergraph, parse_mix_settings, render_mix
 from karaoke.pipeline import (
     JobError,
     export_gaps,
@@ -685,6 +687,73 @@ class LyricLayoutTests(unittest.TestCase):
     def test_wrap_keeps_a_short_line_on_one_row(self):
         rows = _wrap_word_rows([40.0, 40.0, 40.0], 10.0, MAX_LYRIC_WIDTH)
         self.assertEqual(rows, [[0, 1, 2]])
+
+
+def _tone(path: Path, frequency: float, seconds: float = 0.4) -> None:
+    rate = 44100
+    count = int(rate * seconds)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        frames = bytearray()
+        for index in range(count):
+            sample = int(16000 * math.sin(2 * math.pi * frequency * index / rate))
+            frames += struct.pack("<hh", sample, sample)
+        handle.writeframes(frames)
+
+
+class MixRestoreTests(unittest.TestCase):
+    def test_accepts_default_band_settings(self):
+        settings = parse_mix_settings({})
+        self.assertEqual(settings["low_hz"], 120)
+        self.assertEqual(settings["high_hz"], 8000)
+        self.assertEqual(settings["high_volume"], 50)
+        graph = mix_filtergraph(settings)
+        self.assertIn("highpass=f=8000", graph)
+        self.assertIn("lowpass=f=120", graph)
+        self.assertIn("volume=0.5", graph)
+        self.assertIn("amix=inputs=3:normalize=0:duration=longest", graph)
+
+    def test_rejects_cutoff_and_volume_outside_range(self):
+        with self.assertRaises(MixJobError):
+            parse_mix_settings({"low_hz": 10, "high_hz": 8000})
+        with self.assertRaises(MixJobError):
+            parse_mix_settings({"low_hz": 120, "high_hz": 100})
+        with self.assertRaises(MixJobError):
+            parse_mix_settings({"high_volume": 140})
+
+    def test_project_keeps_the_instrumental_stem(self):
+        project = project_from_fields(
+            {
+                "title": "Bài",
+                "artist": "Tác",
+                "restore": {"instrumental_stem": "/tmp/song_(Instrumental).wav", "low_hz": 90, "high_volume": 40},
+            }
+        )
+        self.assertEqual(project["restore"]["instrumental_stem"], "/tmp/song_(Instrumental).wav")
+        self.assertEqual(project["restore"]["low_hz"], 90)
+        self.assertEqual(project["restore"]["high_volume"], 40)
+        self.assertEqual(project["restore"]["high_hz"], 8000)
+
+    def test_render_mix_writes_a_wav(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            original = root / "gốc.wav"
+            instrumental = root / "inst.wav"
+            _tone(original, 100)
+            _tone(instrumental, 8000)
+            destination = root / "nền.wav"
+            render_mix(
+                instrumental,
+                original,
+                destination,
+                {"high_hz": 4000, "low_hz": 150, "high_volume": 50, "low_volume": 50},
+            )
+            self.assertTrue(destination.is_file())
+            self.assertGreater(destination.stat().st_size, 44)
 
 
 if __name__ == "__main__":

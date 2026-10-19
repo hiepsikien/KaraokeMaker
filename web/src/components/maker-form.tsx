@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 
+import { AudioRestore } from "@/components/audio-restore";
 import { HomeGate } from "@/components/home-gate";
 import { PhaseStepper } from "@/components/phase-stepper";
 import { ProjectSetup } from "@/components/project-setup";
@@ -16,6 +17,7 @@ import {
   type Phase,
   type Project,
   type ProjectFields,
+  type RestoreSettings,
 } from "@/lib/types";
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project";
@@ -192,29 +194,57 @@ export function MakerForm() {
     }
   }
 
-  async function submitAlign(event: FormEvent) {
-    event.preventDefault();
-    setNotice("");
+  function setupReady(requireStems: boolean) {
     if (!fields.title.trim() || !fields.artist.trim()) {
       setNotice("Nhập tên bài hát và tác giả.");
-      return;
+      return false;
     }
-    if (!fields.original_audio || !fields.vocal_audio || !fields.instrumental_audio) {
-      setNotice("Chọn đủ audio gốc, vocal và instrumental.");
-      return;
+    if (!fields.original_audio || (requireStems && (!fields.vocal_audio || !fields.instrumental_audio))) {
+      setNotice(requireStems ? "Chọn đủ audio gốc, vocal và instrumental." : "Chọn audio gốc.");
+      return false;
     }
     if (sungCount(fields.lyrics) === 0) {
       setNotice("Nhập lời hát. Dòng nằm trọn trong [ngoặc] sẽ được bỏ.");
-      return;
+      return false;
     }
     if (!fields.cover_image && fields.background_images.length === 0) {
       setNotice("Chọn ảnh bìa hoặc ít nhất một ảnh nền.");
-      return;
+      return false;
     }
     if (!fields.output_dir) {
       setNotice("Chọn thư mục xuất.");
-      return;
+      return false;
     }
+    return true;
+  }
+
+  async function continueRestore(event: FormEvent) {
+    event.preventDefault();
+    setNotice("");
+    if (!setupReady(false)) return;
+    try {
+      const response = await fetch("/api/restore/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fieldsPayload(fields)),
+      });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { project: Project; job: Job };
+      setFields(fieldsFromProject(data.project));
+      setJob(data.job);
+      setPhase("restore");
+    } catch {
+      setNotice("Không mở được bước tách và trộn. Server Python chưa chạy.");
+    }
+  }
+
+  async function submitAlign(event?: FormEvent) {
+    event?.preventDefault();
+    setNotice("");
+    if (!setupReady(true)) return;
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
@@ -333,12 +363,77 @@ export function MakerForm() {
           hasLines={hasLines}
           showAlignOptions={!hasLines}
           onBrowse={browseSetup}
+          onContinue={continueRestore}
           onAlign={submitAlign}
           onResumeEdit={resumeEdit}
           onBackHome={() => {
             setJob(null);
             setPhase("home");
             setNotice("");
+          }}
+        />
+      )}
+
+      {phase === "restore" && job && (
+        <AudioRestore
+          job={job}
+          notice={notice}
+          onJob={(next) => {
+            setJob(next);
+            if (next.project) setFields(fieldsFromProject(next.project));
+          }}
+          onSeparate={async () => {
+            setNotice("");
+            const response = await fetch(`/api/restore/${job.id}/separate`, { method: "POST" });
+            if (!response.ok) {
+              setNotice(await readError(response));
+              return;
+            }
+            setJob((current) => (current ? { ...current, status: "separating", error: "" } : current));
+          }}
+          onPreview={async (settings: RestoreSettings) => {
+            setNotice("");
+            const response = await fetch(`/api/restore/${job.id}/preview`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(settings),
+            });
+            if (!response.ok) {
+              setNotice(await readError(response));
+              return false;
+            }
+            return true;
+          }}
+          onExport={async (settings: RestoreSettings, format: string) => {
+            setNotice("");
+            const response = await fetch(`/api/restore/${job.id}/export`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...settings, format }),
+            });
+            if (!response.ok) {
+              setNotice(await readError(response));
+              return false;
+            }
+            const data = (await response.json()) as { project: Project };
+            setFields(fieldsFromProject(data.project));
+            setJob((current) =>
+              current
+                ? {
+                    ...current,
+                    project: data.project,
+                    restore: data.project.restore,
+                    status: "ready",
+                    log: [...current.log, `Đã xuất nhạc nền.`],
+                  }
+                : current,
+            );
+            return true;
+          }}
+          onAlign={() => submitAlign()}
+          onBack={() => {
+            setNotice("");
+            setPhase("setup");
           }}
         />
       )}

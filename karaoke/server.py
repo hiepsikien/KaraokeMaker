@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
-from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
+from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
+from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
+from karaoke.separate_runner import separate_kim2
 from karaoke.align import fit_lines_to_voice
 from karaoke.pipeline import (
     JobError,
@@ -28,9 +30,11 @@ from karaoke.pipeline import (
 )
 from karaoke.project import (
     assert_project_path_available,
+    load_project,
     project_from_fields,
     project_path_for,
     public_project,
+    restore_from_payload,
     save_project,
     sync_project_file,
 )
@@ -119,6 +123,14 @@ class LineIn(BaseModel):
     end: float = 0
     uncertain: bool = False
     words: list[WordIn] = Field(default_factory=list)
+
+
+class MixRequest(BaseModel):
+    high_hz: float = 8000
+    low_hz: float = 120
+    high_volume: float = 50
+    low_volume: float = 50
+    format: str = "wav"
 
 
 class RenderRequest(BaseModel):
@@ -382,6 +394,7 @@ def _public_job(record: dict) -> dict:
         "export_gaps": export_gaps(prepared) if prepared else [],
         "project_path": prepared.get("project_path") or "",
         "project": record.get("project"),
+        "restore": record.get("restore"),
     }
 
 
@@ -733,6 +746,251 @@ def start_render(job_id: str, body: RenderRequest):
 
     threading.Thread(target=worker, daemon=True).start()
     return {"id": job_id}
+
+
+def _save_project_fields(payload: dict) -> tuple[dict, Path]:
+    previous_text = str(payload.get("project_path") or "").strip()
+    existing: dict = {}
+    if previous_text:
+        try:
+            existing, _source = load_project(Path(previous_text))
+        except JobError:
+            existing = {}
+    status = str(existing.get("status") or "draft")
+    if status not in {"draft", "aligned", "exported"}:
+        status = "draft"
+    project = project_from_fields({**existing, **payload}, status=status)
+    if not project["title"]:
+        raise JobError("Hãy nhập tên bài hát.")
+    if not project["output_dir"]:
+        raise JobError("Hãy chọn thư mục xuất.")
+    original = Path(project["original_audio"]).expanduser()
+    if not original.is_file():
+        raise JobError(f"Không thấy audio gốc: {original}")
+    try:
+        original = ensure_allowed(original)
+        output = ensure_allowed(Path(project["output_dir"]).expanduser())
+    except AccessError as error:
+        raise JobError(str(error)) from error
+    output.mkdir(parents=True, exist_ok=True)
+    grant(output)
+    grant(original)
+    project["original_audio"] = str(original)
+    project["output_dir"] = str(output)
+    target = project_path_for(output, project["title"])
+    previous = Path(previous_text).expanduser() if previous_text else None
+    assert_project_path_available(target, previous)
+    saved = save_project(target, project)
+    if previous is not None:
+        try:
+            if previous.resolve() != saved.resolve() and previous.is_file():
+                previous.unlink()
+        except OSError:
+            pass
+    project["path"] = str(saved)
+    return project, saved
+
+
+def _restore_record(project: dict, path: Path) -> dict:
+    restore = restore_from_payload(project)
+    vocal = Path(str(project.get("vocal_audio") or ""))
+    stem = Path(restore["instrumental_stem"]) if restore["instrumental_stem"] else None
+    ready = vocal.is_file() and stem is not None and stem.is_file()
+    prepared = {
+        "title": project.get("title") or "",
+        "artist": project.get("artist") or "",
+        "cover_line": project.get("cover_line") or "",
+        "lyrics": project.get("lyrics") or "",
+        "original_audio": project.get("original_audio") or "",
+        "vocal_audio": project.get("vocal_audio") or "",
+        "instrumental_audio": project.get("instrumental_audio") or "",
+        "background_images": list(project.get("background_images") or []),
+        "cover_image": project.get("cover_image") or "",
+        "output_dir": project.get("output_dir") or "",
+        "cover_duration": project.get("cover_duration") or 5,
+        "image_duration": project.get("image_duration") or 8,
+        "language": project.get("language") or "vi",
+        "model_name": project.get("model_name") or "small",
+        "device": project.get("device") or "cpu",
+        "project_path": str(path),
+        "restore": restore,
+    }
+    job_id = uuid.uuid4().hex
+    return {
+        "id": job_id,
+        "status": "ready" if ready else "needs_split",
+        "created": time.time(),
+        "log": ["Đã mở bước tách và trộn." if ready else "Chưa tách giọng. Bấm Tách để chạy Kim Vocal 2."],
+        "error": "",
+        "outputs": project.get("outputs"),
+        "lines": project.get("lines") or None,
+        "duration": 0,
+        "prepared": prepared,
+        "project": public_project(project, path),
+        "restore": restore,
+        "preview_path": "",
+    }
+
+
+def _require_restore_job(job_id: str) -> dict:
+    with _lock:
+        record = _jobs.get(job_id)
+    if record is None or record.get("prepared") is None:
+        raise HTTPException(status_code=404, detail="Không thấy bước tách và trộn.")
+    if record["status"] == "separating":
+        raise HTTPException(status_code=409, detail="Đang tách giọng. Hãy đợi xong rồi nghe thử.")
+    return record
+
+
+@app.post("/api/restore/session")
+def restore_session(body: ProjectFieldsRequest):
+    try:
+        project, path = _save_project_fields(body.model_dump())
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "project": public_project(project, path),
+        "job": _store_job(_restore_record(project, path)),
+    }
+
+
+@app.post("/api/restore/{job_id}/separate")
+def restore_separate(job_id: str):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or record.get("prepared") is None:
+            raise HTTPException(status_code=404, detail="Không thấy bước tách và trộn.")
+        if record["status"] == "separating":
+            raise HTTPException(status_code=409, detail="Đang tách giọng.")
+        record["status"] = "separating"
+        record["error"] = ""
+        prepared = record["prepared"]
+        audio = Path(prepared["original_audio"])
+        output_dir = Path(prepared["output_dir"])
+        device = str(prepared.get("device") or "cpu")
+
+    def log(message: str) -> None:
+        with _lock:
+            record["log"].append(message)
+
+    def worker() -> None:
+        try:
+            last_step = {"value": -1}
+
+            def on_progress(fraction: float) -> None:
+                step = int(max(0.0, min(1.0, fraction)) * 10)
+                if step == last_step["value"]:
+                    return
+                last_step["value"] = step
+                log(f"Đang tách Kim Vocal 2… {step * 10}%")
+
+            log("Kim Vocal 2, overlap 25%, segment 512.")
+            paths = separate_kim2(audio, output_dir, device=device, on_progress=on_progress)
+            restore = dict(prepared.get("restore") or {})
+            restore["instrumental_stem"] = paths["instrumental"]
+            prepared["vocal_audio"] = paths["vocal"]
+            prepared["restore"] = restore
+            project_path = sync_project_file(prepared, status=None)
+            prepared["project_path"] = str(project_path)
+            saved_project, saved_path = load_project(Path(project_path))
+            with _lock:
+                record["restore"] = restore
+                record["prepared"] = prepared
+                record["project"] = public_project(saved_project, saved_path)
+                record["log"].append("Đã tách vocal và instrumental. Chỉnh dải tần rồi nghe thử.")
+                record["status"] = "ready"
+        except JobError as error:
+            with _lock:
+                record["status"] = "error"
+                record["error"] = str(error)
+        except Exception as error:
+            with _lock:
+                record["status"] = "error"
+                record["error"] = str(error)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"id": job_id}
+
+
+@app.post("/api/restore/{job_id}/preview")
+def restore_preview(job_id: str, body: MixRequest):
+    record = _require_restore_job(job_id)
+    prepared = record["prepared"]
+    try:
+        settings = parse_mix_settings(body.model_dump())
+        stem = Path(str((prepared.get("restore") or {}).get("instrumental_stem") or ""))
+        original = _reject_closed(Path(prepared["original_audio"]))
+        if not stem.is_file():
+            raise JobError("Hãy tách giọng trước khi nghe thử.")
+        stem = _reject_closed(stem)
+        output = _reject_closed(Path(prepared["output_dir"]))
+        destination = output / f".{safe_title(prepared['title'])} nghe thử.wav"
+        render_mix(stem, original, destination, settings)
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    restore = {**(prepared.get("restore") or {}), **settings, "instrumental_stem": str(stem)}
+    prepared["restore"] = restore
+    try:
+        project_path = sync_project_file(prepared, status=None)
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with _lock:
+        if _jobs.get(job_id) is record:
+            record["preview_path"] = str(destination)
+            record["restore"] = restore
+            record["prepared"]["restore"] = restore
+            record["prepared"]["project_path"] = str(project_path)
+            record["log"].append("Đã dựng bản nghe thử.")
+    return {"ok": True}
+
+
+@app.get("/api/restore/{job_id}/preview")
+def restore_preview_audio(job_id: str):
+    with _lock:
+        record = _jobs.get(job_id)
+        preview = str(record.get("preview_path") or "") if record else ""
+    if not preview:
+        raise HTTPException(status_code=404, detail="Chưa có bản nghe thử. Bấm Nghe thử trước.")
+    path = _reject_closed(Path(preview))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy file nghe thử.")
+    return FileResponse(path, media_type="audio/wav", filename=path.name.lstrip("."))
+
+
+@app.post("/api/restore/{job_id}/export")
+def restore_export(job_id: str, body: MixRequest):
+    record = _require_restore_job(job_id)
+    prepared = record["prepared"]
+    try:
+        settings = parse_mix_settings(body.model_dump())
+        fmt = normalize_mix_format(body.format)
+        stem = Path(str((prepared.get("restore") or {}).get("instrumental_stem") or ""))
+        if not stem.is_file():
+            raise JobError("Hãy tách giọng trước khi xuất.")
+        stem = _reject_closed(stem)
+        original = _reject_closed(Path(prepared["original_audio"]))
+        output = _reject_closed(Path(prepared["output_dir"]))
+        destination = output / f"{safe_title(prepared['title'])} (nhạc nền).{fmt}"
+        render_mix(stem, original, destination, settings)
+        restore = {**(prepared.get("restore") or {}), **settings, "instrumental_stem": str(stem)}
+        prepared["restore"] = restore
+        prepared["instrumental_audio"] = str(destination)
+        vocal_text = str(prepared.get("vocal_audio") or "").strip()
+        if vocal_text:
+            prepared["vocal_audio"] = str(_reject_closed(Path(vocal_text)))
+        project_path = sync_project_file(prepared, status=None)
+        saved_project, saved_path = load_project(Path(project_path))
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    project = public_project(saved_project, saved_path)
+    with _lock:
+        if _jobs.get(job_id) is record:
+            record["restore"] = restore
+            record["prepared"] = prepared
+            record["project"] = project
+            record["status"] = "ready"
+            record["log"].append(f"Đã xuất {destination.name}.")
+    return {"project": project, "instrumental": str(destination), "vocal": prepared["vocal_audio"]}
 
 
 @app.post("/api/reveal")

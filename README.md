@@ -4,7 +4,7 @@ KaraokeMaker căn lời vào file vocal, cho sửa thời gian từng chữ, r�
 
 Giao diện là ứng dụng web. Phần căn lời và dựng video chạy bằng Python. Ứng dụng viết cho macOS: hộp thoại chọn file dùng AppleScript, mở thư mục dùng Finder, chữ Việt dùng font Arial Unicode, và GPU căn lời là Apple MPS.
 
-Mã tách giọng của [Ultimate Vocal Remover GUI](https://github.com/anjok07/ultimatevocalremovergui) vẫn nằm trong repo này. KaraokeMaker dùng các file vocal và instrumental đã tách sẵn, và không tự gọi UVR.
+Mã tách giọng của [Ultimate Vocal Remover GUI](https://github.com/anjok07/ultimatevocalremovergui) vẫn nằm trong repo này. Bước **Tách và trộn** gọi Kim Vocal 2 bằng môi trường `.venv` của UVR. Có thể bỏ qua bước đó nếu vocal và instrumental đã có sẵn.
 
 ## Chạy
 
@@ -47,15 +47,16 @@ Sau khi sửa code Python, tắt server bằng Ctrl+C rồi chạy lại `.venv-
 
 ## Cách dùng
 
-Luồng gồm bốn bước: **Khai báo → Ghép chữ → Biên tập → Xuất**.
+Luồng gồm năm bước: **Khai báo → Tách và trộn → Ghép chữ → Biên tập → Xuất**.
 
 1. Trên màn hình đầu, chọn **Tạo dự án mới** hoặc **Mở dự án đã có** (file `.karaoke.json`; bản `timing.json` cũ vẫn mở được và sẽ được chuyển sang file dự án).
-2. Với dự án mới: nhập tên bài và tác giả, chọn audio gốc / vocal / instrumental, dán lời, chọn ảnh, chọn thư mục xuất, rồi bấm **Căn lời và vào biên tập**.
-3. Khi căn xong, sửa trên timeline: sóng âm ở trên, câu hát ở dưới. Kéo cả câu để dời. Kéo mép để đổi chỗ bắt đầu và kết thúc. Bấm một câu để sửa từng chữ. **Phát** và **Tạm dừng** nằm trên timeline.
-4. **Thêm câu** chèn một câu mới sau câu đang chọn. **Chia câu** cắt câu đang chọn thành hai, tại chữ đang chọn hoặc tại vạch phát.
-5. **Lưu dự án** ghi file `.karaoke.json` (và `timing.json` kèm theo), không cần đợi xuất video.
-6. Lần sau: **Mở dự án đã có** — vào thẳng biên tập, Whisper không chạy lại. Nếu thiếu file để xuất, bấm **Bổ sung file trong khai báo**.
-7. **Xuất hai video** cần audio gốc, instrumental, và ảnh bìa hoặc ảnh nền.
+2. Với dự án mới: nhập tên bài và tác giả, chọn audio gốc, dán lời, chọn ảnh, chọn thư mục xuất, rồi bấm **Tiếp tục tách và trộn**. Nếu đã có sẵn vocal và instrumental, có thể **Bỏ qua, căn lời với file đã có**.
+3. **Tách** chạy Kim Vocal 2 (overlap 25%, segment 512) trong môi trường `.venv` của UVR và ghi vocal cùng instrumental. Bản nhạc nền cộng instrumental với dải cao của file gốc (mặc định từ 8000 Hz, 50%) và dải thấp (mặc định dưới 120 Hz, 50%). Cutoff và volume sửa được. **Nghe thử** phát bản trộn trước khi **Xuất nhạc nền** (WAV, FLAC hoặc MP3). File xuất trở thành instrumental của video không lời. Đổi cutoff hoặc volume không chạy lại model. Sau đó bấm **Căn lời và vào biên tập**. Thiết bị tách giọng dùng lựa chọn CPU hoặc GPU Apple ở bước khai báo.
+4. Khi căn xong, sửa trên timeline: sóng âm ở trên, câu hát ở dưới. Kéo cả câu để dời. Kéo mép để đổi chỗ bắt đầu và kết thúc. Bấm một câu để sửa từng chữ. **Phát** và **Tạm dừng** nằm trên timeline.
+5. **Thêm câu** chèn một câu mới sau câu đang chọn. **Chia câu** cắt câu đang chọn thành hai, tại chữ đang chọn hoặc tại vạch phát.
+6. **Lưu dự án** ghi file `.karaoke.json` (và `timing.json` kèm theo), không cần đợi xuất video.
+7. Lần sau: **Mở dự án đã có** — vào thẳng biên tập, Whisper không chạy lại. Nếu thiếu file để xuất, bấm **Bổ sung file trong khai báo**.
+8. **Xuất hai video** cần audio gốc, instrumental, và ảnh bìa hoặc ảnh nền.
 
 Chọn file vocal hoặc instrumental dạng `1_Tên bài_(Vocals).wav` thì ứng dụng tự điền file còn lại trong cùng thư mục, và tìm bài gốc cùng tên trong thư mục `Songs`. Chọn thẳng bài gốc thì ứng dụng lấy cặp vocal và instrumental mới nhất trong `Separated`.
 
@@ -100,6 +101,8 @@ karaoke/
   server.py      # API, chỉ trên 127.0.0.1
   project.py     # đọc/ghi file .karaoke.json
   pipeline.py    # kiểm tra file, mở dự án, căn lời, xuất video
+  mix.py         # trộn instrumental với hai dải tần của file gốc
+  separate_runner.py  # gọi Kim Vocal 2 trong .venv của UVR
   align.py       # căn lời vào vocal và kéo chữ về đoạn đang hát
   lyrics.py      # bỏ dòng ghi chú, so khớp tên bài
   media.py       # ảnh, thời lượng, chuyển vocal sang WAV
@@ -118,7 +121,7 @@ Việc đang chạy được giữ trong bộ nhớ. Tắt server là mất phi�
 
 ## Tách giọng bằng UVR
 
-Khi cần tách vocal và instrumental, dùng môi trường `.venv` của UVR, không dùng `.venv-karaoke`:
+Bước tách trong ứng dụng đã gọi `.venv`. Khi cần mở giao diện UVR đầy đủ, dùng cùng môi trường đó, không dùng `.venv-karaoke`:
 
 ```bash
 source .venv/bin/activate
