@@ -7,6 +7,7 @@ from typing import Any
 from karaoke.access import AccessError, ensure_allowed, grant
 from karaoke.errors import JobError
 from karaoke.media import safe_title
+from karaoke.mix import default_mix_settings, parse_mix_settings
 
 
 def _normalize_lines(lines: list[dict]) -> list[dict]:
@@ -80,9 +81,31 @@ def empty_project() -> dict:
         "language": "vi",
         "model_name": "small",
         "device": "cpu",
+        "no_speech_threshold": None,
+        "whisper_retry": True,
         "lines": [],
         "outputs": None,
+        "restore": {
+            "instrumental_stem": "",
+            **default_mix_settings(),
+        },
     }
+
+
+def restore_from_payload(payload: dict) -> dict:
+    raw = payload.get("restore")
+    data = raw if isinstance(raw, dict) else {}
+    # Mix numbers may also be sent at the top level by the restore form.
+    merged = {**data}
+    for key in ("high_hz", "low_hz", "high_volume", "low_volume"):
+        if key in payload and key not in data:
+            merged[key] = payload[key]
+    try:
+        settings = parse_mix_settings(merged)
+    except JobError:
+        settings = default_mix_settings()
+    stem = str(data.get("instrumental_stem") or "").strip()
+    return {"instrumental_stem": stem, **settings}
 
 
 def project_from_fields(payload: dict, *, lines: list[dict] | None = None, status: str = "draft") -> dict:
@@ -103,8 +126,9 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     except (TypeError, ValueError) as error:
         raise JobError("Thời lượng phải là số giây.") from error
     project["language"] = str(payload.get("language") or "vi").strip() or "vi"
-    project["model_name"] = str(payload.get("model_name") or "small").strip() or "small"
-    project["device"] = str(payload.get("device") or "cpu").strip() or "cpu"
+    from karaoke.pipeline import whisper_options
+
+    project.update(whisper_options(payload))
     if status not in STATUSES:
         raise JobError("Trạng thái dự án không hợp lệ.")
     project["status"] = status
@@ -116,6 +140,7 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
         project["lines"] = _normalize_lines(payload["lines"])
     if isinstance(payload.get("outputs"), dict):
         project["outputs"] = payload["outputs"]
+    project["restore"] = restore_from_payload(payload)
     return project
 
 
@@ -138,8 +163,11 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "language": project.get("language") or "vi",
         "model_name": project.get("model_name") or "small",
         "device": project.get("device") or "cpu",
+        "no_speech_threshold": project.get("no_speech_threshold"),
+        "whisper_retry": bool(project.get("whisper_retry", True)),
         "lines": list(project.get("lines") or []),
         "outputs": project.get("outputs"),
+        "restore": restore_from_payload(project),
         "path": str(path) if path else str(project.get("path") or ""),
     }
     return data
@@ -251,8 +279,11 @@ def prepared_from_project(project: dict) -> dict:
         "language": project.get("language") or "vi",
         "model_name": project.get("model_name") or "small",
         "device": project.get("device") or "cpu",
+        "no_speech_threshold": project.get("no_speech_threshold"),
+        "whisper_retry": bool(project.get("whisper_retry", True)),
         "project_path": str(project.get("path") or ""),
         "timing_path": str(project.get("timing_path") or ""),
+        "restore": restore_from_payload(project),
     }
 
 

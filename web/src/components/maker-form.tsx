@@ -2,6 +2,8 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 
+import { AlignOptions } from "@/components/align-options";
+import { AudioRestore } from "@/components/audio-restore";
 import { HomeGate } from "@/components/home-gate";
 import { PhaseStepper } from "@/components/phase-stepper";
 import { ProjectSetup } from "@/components/project-setup";
@@ -16,6 +18,7 @@ import {
   type Phase,
   type Project,
   type ProjectFields,
+  type RestoreSettings,
 } from "@/lib/types";
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project";
@@ -36,6 +39,7 @@ export function MakerForm() {
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
+  const [alignReturn, setAlignReturn] = useState<Phase>("setup");
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
@@ -192,31 +196,36 @@ export function MakerForm() {
     }
   }
 
-  async function submitAlign(event: FormEvent) {
-    event.preventDefault();
-    setNotice("");
+  function setupReady(requireStems: boolean) {
     if (!fields.title.trim() || !fields.artist.trim()) {
       setNotice("Nhập tên bài hát và tác giả.");
-      return;
+      return false;
     }
-    if (!fields.original_audio || !fields.vocal_audio || !fields.instrumental_audio) {
-      setNotice("Chọn đủ audio gốc, vocal và instrumental.");
-      return;
+    if (!fields.original_audio || (requireStems && (!fields.vocal_audio || !fields.instrumental_audio))) {
+      setNotice(requireStems ? "Chọn đủ audio gốc, vocal và instrumental." : "Chọn audio gốc.");
+      return false;
     }
     if (sungCount(fields.lyrics) === 0) {
       setNotice("Nhập lời hát. Dòng nằm trọn trong [ngoặc] sẽ được bỏ.");
-      return;
+      return false;
     }
     if (!fields.cover_image && fields.background_images.length === 0) {
       setNotice("Chọn ảnh bìa hoặc ít nhất một ảnh nền.");
-      return;
+      return false;
     }
     if (!fields.output_dir) {
       setNotice("Chọn thư mục xuất.");
-      return;
+      return false;
     }
+    return true;
+  }
+
+  async function continueRestore(event: FormEvent) {
+    event.preventDefault();
+    setNotice("");
+    if (!setupReady(false)) return;
     try {
-      const response = await fetch("/api/jobs", {
+      const response = await fetch("/api/restore/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(fieldsPayload(fields)),
@@ -225,12 +234,72 @@ export function MakerForm() {
         setNotice(await readError(response));
         return;
       }
+      const data = (await response.json()) as { project: Project; job: Job };
+      setFields(fieldsFromProject(data.project));
+      setJob(data.job);
+      setPhase("restore");
+    } catch {
+      setNotice("Không mở được bước tách và trộn. Server Python chưa chạy.");
+    }
+  }
+
+  function openAlign(back: Phase) {
+    setNotice("");
+    if (back !== "edit" && !setupReady(true)) return;
+    setAlignReturn(back);
+    setPhase("align");
+  }
+
+  async function startAlign() {
+    setNotice("");
+    const threshold = fields.no_speech_threshold.trim();
+    if (threshold !== "" && (Number.isNaN(Number(threshold)) || Number(threshold) < 0 || Number(threshold) > 1)) {
+      setNotice("Ngưỡng không-lời phải từ 0 đến 1, hoặc để trống.");
+      return;
+    }
+    const payload = fieldsPayload(fields);
+    try {
+      if (alignReturn === "edit" && job) {
+        const response = await fetch(`/api/jobs/${job.id}/realign`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model_name: payload.model_name,
+            device: payload.device,
+            no_speech_threshold: payload.no_speech_threshold,
+            whisper_retry: payload.whisper_retry,
+          }),
+        });
+        if (!response.ok) {
+          setNotice(await readError(response));
+          return;
+        }
+        setJob((current) =>
+          current
+            ? {
+                ...current,
+                status: "running",
+                error: "",
+                log: [...current.log, `Đã gửi lệnh ghép chữ lại bằng ${payload.model_name}.`],
+              }
+            : current,
+        );
+        return;
+      }
+      const response = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
       const data = await response.json();
-      setPhase("align");
       setJob({
         id: data.id,
         status: "running",
-        log: ["Đã gửi việc căn lời."],
+        log: [`Đã gửi việc căn lời bằng ${payload.model_name}.`],
         error: "",
         outputs: null,
         lines: null,
@@ -331,9 +400,9 @@ export function MakerForm() {
           busyBrowse={busyBrowse}
           aligning={aligning}
           hasLines={hasLines}
-          showAlignOptions={!hasLines}
           onBrowse={browseSetup}
-          onAlign={submitAlign}
+          onContinue={continueRestore}
+          onAlign={() => openAlign("setup")}
           onResumeEdit={resumeEdit}
           onBackHome={() => {
             setJob(null);
@@ -343,7 +412,85 @@ export function MakerForm() {
         />
       )}
 
-      {phase === "align" && job && (
+      {phase === "restore" && job && (
+        <AudioRestore
+          job={job}
+          notice={notice}
+          onJob={(next) => {
+            setJob(next);
+            if (next.project) setFields(fieldsFromProject(next.project));
+          }}
+          onSeparate={async () => {
+            setNotice("");
+            const response = await fetch(`/api/restore/${job.id}/separate`, { method: "POST" });
+            if (!response.ok) {
+              setNotice(await readError(response));
+              return;
+            }
+            setJob((current) => (current ? { ...current, status: "separating", error: "" } : current));
+          }}
+          onPreview={async (settings: RestoreSettings) => {
+            setNotice("");
+            const response = await fetch(`/api/restore/${job.id}/preview`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(settings),
+            });
+            if (!response.ok) {
+              setNotice(await readError(response));
+              return false;
+            }
+            return true;
+          }}
+          onExport={async (settings: RestoreSettings, format: string) => {
+            setNotice("");
+            const response = await fetch(`/api/restore/${job.id}/export`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...settings, format }),
+            });
+            if (!response.ok) {
+              setNotice(await readError(response));
+              return false;
+            }
+            const data = (await response.json()) as { project: Project };
+            setFields(fieldsFromProject(data.project));
+            setJob((current) =>
+              current
+                ? {
+                    ...current,
+                    project: data.project,
+                    restore: data.project.restore,
+                    status: "ready",
+                    log: [...current.log, `Đã xuất nhạc nền.`],
+                  }
+                : current,
+            );
+            return true;
+          }}
+          onAlign={() => openAlign("restore")}
+          onBack={() => {
+            setNotice("");
+            setPhase("setup");
+          }}
+        />
+      )}
+
+      {phase === "align" && job?.status !== "running" && job?.status !== "error" && (
+        <AlignOptions
+          fields={fields}
+          setFields={setFields}
+          replacesEdits={alignReturn === "edit"}
+          notice={notice}
+          onStart={startAlign}
+          onBack={() => {
+            setNotice("");
+            setPhase(alignReturn);
+          }}
+        />
+      )}
+
+      {phase === "align" && (job?.status === "running" || job?.status === "error") && (
         <section className="mx-auto max-w-2xl rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-6">
           <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Ghép chữ</p>
           <h2 className="mt-2 text-xl font-semibold">Đang căn lời vào vocal…</h2>
@@ -355,13 +502,37 @@ export function MakerForm() {
           {job.status === "error" && (
             <div className="mt-4 space-y-3">
               <p className="text-sm text-red-200">{job.error}</p>
-              <button
-                type="button"
-                onClick={() => setPhase("setup")}
-                className="rounded-2xl border border-[var(--gold)] px-4 py-2 text-sm text-[var(--gold)]"
-              >
-                Quay lại khai báo
-              </button>
+              <div className="flex flex-wrap gap-2">
+                {job.lines && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setJob((current) => (current ? { ...current, status: "editing", error: "" } : current));
+                      setPhase("edit");
+                    }}
+                    className="rounded-2xl bg-[var(--gold)] px-4 py-2 text-sm font-semibold text-[#1a1206]"
+                  >
+                    Giữ timing cũ
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNotice(job.error);
+                    setJob((current) => (current ? { ...current, status: "ready", error: "" } : current));
+                  }}
+                  className="rounded-2xl border border-[var(--gold)] px-4 py-2 text-sm text-[var(--gold)]"
+                >
+                  Chọn lại model
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPhase(alignReturn)}
+                  className="rounded-2xl border border-[var(--line)] px-4 py-2 text-sm text-[var(--muted)]"
+                >
+                  Quay lại
+                </button>
+              </div>
             </div>
           )}
         </section>
@@ -382,6 +553,7 @@ export function MakerForm() {
           onReveal={reveal}
           onResumeEditing={resumeEditing}
           onBrowseOutput={browseExportDir}
+          onRealign={() => openAlign("edit")}
           onBack={() => {
             setNotice("");
             setPhase("setup");

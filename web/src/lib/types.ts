@@ -1,6 +1,14 @@
 import type { TimedLine } from "@/lib/cue";
 
-export type Phase = "home" | "setup" | "align" | "edit" | "export";
+export type Phase = "home" | "setup" | "restore" | "align" | "edit" | "export";
+
+export type RestoreSettings = {
+  instrumental_stem: string;
+  high_hz: number;
+  low_hz: number;
+  high_volume: number;
+  low_volume: number;
+};
 
 export function sungCount(lyrics: string) {
   return lyrics
@@ -35,14 +43,17 @@ export type Project = {
   language: string;
   model_name: string;
   device: string;
+  no_speech_threshold?: number | null;
+  whisper_retry?: boolean;
   lines: TimedLine[];
   outputs: Outputs | null;
+  restore?: RestoreSettings | null;
   path: string;
 };
 
 export type Job = {
   id: string;
-  status: "running" | "editing" | "rendering" | "done" | "error";
+  status: "running" | "editing" | "rendering" | "done" | "error" | "needs_split" | "separating" | "ready";
   log: string[];
   error: string;
   outputs: Outputs | null;
@@ -51,6 +62,7 @@ export type Job = {
   export_gaps?: string[];
   project_path?: string;
   project?: Project | null;
+  restore?: RestoreSettings | null;
 };
 
 export type ProjectFields = {
@@ -68,6 +80,8 @@ export type ProjectFields = {
   image_duration: string;
   model_name: string;
   device: string;
+  no_speech_threshold: string;
+  whisper_retry: boolean;
   project_path: string;
 };
 
@@ -87,6 +101,8 @@ export function emptyFields(outputDir = ""): ProjectFields {
     image_duration: "8",
     model_name: "small",
     device: "cpu",
+    no_speech_threshold: "",
+    whisper_retry: true,
     project_path: "",
   };
 }
@@ -107,6 +123,9 @@ export function fieldsFromProject(project: Project): ProjectFields {
     image_duration: String(project.image_duration ?? 8),
     model_name: project.model_name || "small",
     device: project.device || "cpu",
+    no_speech_threshold:
+      project.no_speech_threshold == null ? "" : String(project.no_speech_threshold),
+    whisper_retry: project.whisper_retry !== false,
     project_path: project.path || "",
   };
 }
@@ -128,6 +147,8 @@ export function fieldsPayload(fields: ProjectFields) {
     language: "vi",
     model_name: fields.model_name,
     device: fields.device,
+    no_speech_threshold: fields.no_speech_threshold.trim() === "" ? null : Number(fields.no_speech_threshold),
+    whisper_retry: fields.whisper_retry,
     project_path: fields.project_path,
   };
 }

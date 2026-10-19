@@ -19,6 +19,7 @@ from karaoke.media import (
 from karaoke.render import render_videos
 
 EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
+WHISPER_MODELS = frozenset({"tiny", "base", "small", "medium", "large-v2", "large"})
 
 
 def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
@@ -62,6 +63,8 @@ def normalize_edited_lines(lines: list[dict]) -> list[dict]:
         }
         if line.get("uncertain"):
             cleaned_line["uncertain"] = True
+        if line.get("supplemented"):
+            cleaned_line["supplemented"] = True
         cleaned.append(cleaned_line)
     if not cleaned:
         raise JobError("Không còn chữ nào để xuất.")
@@ -115,12 +118,7 @@ def prepare_job(payload: dict, log) -> dict:
         raise JobError("Thời lượng ảnh phải lớn hơn 0. Thời lượng bìa có thể bằng 0.")
 
     language = str(payload.get("language") or "vi").strip() or "vi"
-    model_name = str(payload.get("model_name") or "small").strip() or "small"
-    device = str(payload.get("device") or "cpu").strip() or "cpu"
-    if device not in {"cpu", "mps"}:
-        device = "cpu"
-    if model_name not in {"tiny", "base", "small", "medium"}:
-        raise JobError("Model căn lời không hợp lệ.")
+    whisper = whisper_options(payload)
 
     try:
         original_length = probe_duration(original)
@@ -149,8 +147,10 @@ def prepare_job(payload: dict, log) -> dict:
         "cover_duration": cover_duration,
         "image_duration": image_duration,
         "language": language,
-        "model_name": model_name,
-        "device": device,
+        "model_name": whisper["model_name"],
+        "device": whisper["device"],
+        "no_speech_threshold": whisper["no_speech_threshold"],
+        "whisper_retry": whisper["whisper_retry"],
         "vocal_duration": vocal_length,
     }
 
@@ -337,6 +337,36 @@ def open_project_file(path_text: str) -> tuple[dict, list[dict], dict]:
     return prepared, lines, project
 
 
+def whisper_options(payload: dict) -> dict:
+    model_name = str(payload.get("model_name") or "small").strip() or "small"
+    device = str(payload.get("device") or "cpu").strip() or "cpu"
+    if device not in {"cpu", "mps"}:
+        device = "cpu"
+    if model_name not in WHISPER_MODELS:
+        raise JobError("Model Whisper không hợp lệ.")
+    raw_threshold = payload.get("no_speech_threshold")
+    if raw_threshold is None or raw_threshold == "":
+        no_speech_threshold = None
+    else:
+        try:
+            no_speech_threshold = float(raw_threshold)
+        except (TypeError, ValueError) as error:
+            raise JobError("Ngưỡng không-lời phải là số từ 0 đến 1, hoặc để trống.") from error
+        if not 0 <= no_speech_threshold <= 1:
+            raise JobError("Ngưỡng không-lời phải từ 0 đến 1.")
+    retry = payload.get("whisper_retry", True)
+    if isinstance(retry, str):
+        whisper_retry = retry.strip().lower() not in {"0", "false", "no"}
+    else:
+        whisper_retry = bool(retry)
+    return {
+        "model_name": model_name,
+        "device": device,
+        "no_speech_threshold": no_speech_threshold,
+        "whisper_retry": whisper_retry,
+    }
+
+
 def align_job(prepared: dict, log) -> list[dict]:
     try:
         return align_lyrics(
@@ -346,6 +376,8 @@ def align_job(prepared: dict, log) -> list[dict]:
             prepared["model_name"],
             prepared["device"],
             log,
+            no_speech_threshold=prepared.get("no_speech_threshold"),
+            whisper_retry=prepared.get("whisper_retry", True),
         )
     except AlignError as error:
         raise JobError(str(error)) from error

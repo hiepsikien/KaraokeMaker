@@ -63,6 +63,7 @@ export function TimingEditor({
   onResumeEditing,
   onBrowseOutput,
   onBack,
+  onRealign,
   onFillGaps,
   exportGaps = [],
 }: {
@@ -79,6 +80,7 @@ export function TimingEditor({
   onResumeEditing?: () => void;
   onBrowseOutput?: () => Promise<string | null>;
   onBack: () => void;
+  onRealign?: () => void;
   onFillGaps?: () => void;
   exportGaps?: string[];
 }) {
@@ -306,9 +308,21 @@ export function TimingEditor({
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
             <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
           </div>
-          <button type="button" onClick={onBack} className="text-sm text-[var(--muted)] hover:text-white">
-            Khai báo dự án
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            {onRealign && (
+              <button
+                type="button"
+                disabled={locked}
+                onClick={onRealign}
+                className="text-sm text-[var(--gold)] disabled:opacity-40"
+              >
+                Ghép chữ lại
+              </button>
+            )}
+            <button type="button" onClick={onBack} className="text-sm text-[var(--muted)] hover:text-white">
+              Khai báo dự án
+            </button>
+          </div>
         </div>
         {(exported || outputs) && (
           <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
@@ -352,7 +366,12 @@ export function TimingEditor({
             onClick={() => chooseLine(lineIndex)}
             className={`cursor-pointer rounded-3xl border bg-[var(--panel)] p-4 sm:p-5 ${selectedLine === lineIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
           >
-            {line.uncertain && (
+            {line.supplemented && (
+              <p className="mb-3 rounded-xl bg-sky-950/50 px-3 py-2 text-xs leading-5 text-sky-100">
+                Whisper nghe được câu này, nhưng lời bạn nhập chưa có. Sửa chữ nếu đó là hát bè hoặc đoạn kết.
+              </p>
+            )}
+            {line.uncertain && !line.supplemented && (
               <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
                 Câu này được ghép ước lượng. Hãy nghe và kéo lại từng chữ.
               </p>

@@ -2,6 +2,7 @@ import type { Phase } from "@/lib/types";
 
 const STEPS: { id: Phase; label: string }[] = [
   { id: "setup", label: "Khai báo" },
+  { id: "restore", label: "Tách và trộn" },
   { id: "align", label: "Ghép chữ" },
   { id: "edit", label: "Biên tập" },
   { id: "export", label: "Xuất" },
@@ -9,7 +10,7 @@ const STEPS: { id: Phase; label: string }[] = [
 
 function stepIndex(phase: Phase) {
   if (phase === "home") return -1;
-  if (phase === "export") return 3;
+  if (phase === "export") return STEPS.length - 1;
   return STEPS.findIndex((step) => step.id === phase);
 }
 

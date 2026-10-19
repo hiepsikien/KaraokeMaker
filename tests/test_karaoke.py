@@ -11,12 +11,16 @@ from unittest.mock import patch
 from karaoke.access import AccessError, audio_root, clear_grants, ensure_allowed, grant
 from karaoke.align import (
     _segments_match_lines,
+    lines_from_transcript,
+    reconcile_lyrics_with_transcript,
     _vocal_rms,
     fit_lines_to_voice,
     loosen_against_next_line,
     repair_stretched_words,
 )
 from karaoke.lyrics import extract_sung_lines
+from karaoke.mix import JobError as MixJobError
+from karaoke.mix import mix_filtergraph, parse_mix_settings, render_mix
 from karaoke.pipeline import (
     JobError,
     export_gaps,
@@ -239,6 +243,124 @@ class SegmentMatchTests(unittest.TestCase):
         self.assertEqual([word["text"] for word in matched[0]["words"]], ["một", "hai"])
         self.assertEqual(matched[0]["words"][0]["start"], 1.0)
         self.assertEqual(matched[0]["words"][1]["end"], 1.8)
+
+
+class TranscriptLineTests(unittest.TestCase):
+    def test_keeps_whisper_words_and_times_without_using_typed_lyrics(self):
+        segments = [
+            {
+                "words": [
+                    {"text": "Hà", "start": 54.0, "end": 54.4},
+                    {"text": "Nội", "start": 54.4, "end": 54.9},
+                ]
+            }
+        ]
+        lines = lines_from_transcript(segments)
+        self.assertEqual(lines[0]["text"], "Hà Nội")
+        self.assertEqual(lines[0]["start"], 54.0)
+        self.assertEqual(lines[0]["end"], 54.9)
+        self.assertNotIn("uncertain", lines[0])
+        self.assertNotIn("supplemented", lines[0])
+
+
+class TranscriptReconcileTests(unittest.TestCase):
+    def test_keeps_the_verse_at_the_heard_minute_after_a_long_intro(self):
+        lyrics = ["Màn sương buông vương lối phố rêu phong"]
+        early = [
+            {"text": word, "start": 8 + index * 0.4, "end": 8.3 + index * 0.4}
+            for index, word in enumerate("la la la".split())
+        ]
+        heard = "man suong buong vuong loi pho reu phong".split()
+        verse = [
+            {"text": word, "start": 2880 + index * 0.4, "end": 2880.35 + index * 0.4}
+            for index, word in enumerate(heard)
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": early}, {"words": verse}])
+        lyric = next(line for line in matched if not line.get("supplemented"))
+        self.assertGreater(lyric["start"], 2800)
+        self.assertEqual(lyric["words"][0]["text"], "Màn")
+        self.assertTrue(all(line.get("supplemented") for line in matched if line["start"] < 100))
+
+    def test_adds_a_heard_ending_the_lyrics_omitted(self):
+        lyrics = ["Màn sương buông"]
+        lead = [
+            {"text": "màn", "start": 10, "end": 10.4},
+            {"text": "sương", "start": 10.4, "end": 10.8},
+            {"text": "buông", "start": 10.8, "end": 11.2},
+        ]
+        ending = [
+            {"text": "hát", "start": 40, "end": 40.4},
+            {"text": "bè", "start": 40.4, "end": 40.9},
+            {"text": "cuối", "start": 40.9, "end": 41.4},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": lead}, {"words": ending}])
+        added = [line for line in matched if line.get("supplemented")]
+        self.assertEqual([line["text"] for line in added], ["hát bè cuối"])
+        self.assertGreater(added[0]["start"], 30)
+        self.assertEqual(matched[0]["words"][0]["text"], "Màn")
+        self.assertEqual(matched[0]["start"], 10)
+
+    def test_puts_an_unmatched_lyric_just_before_the_next_heard_line(self):
+        lyrics = ["câu chưa nghe thấy gì cả", "Màn sương buông"]
+        lead = [
+            {"text": "màn", "start": 2880, "end": 2880.4},
+            {"text": "sương", "start": 2880.4, "end": 2880.8},
+            {"text": "buông", "start": 2880.8, "end": 2881.2},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": lead}])
+        self.assertEqual(matched[0]["text"], lyrics[0])
+        self.assertTrue(matched[0]["uncertain"])
+        self.assertGreater(matched[0]["start"], 2870)
+        self.assertLess(matched[0]["end"], matched[1]["start"])
+
+    def test_short_gap_shrinks_the_guess_instead_of_covering_the_match(self):
+        lyrics = [
+            "Màn sương buông",
+            "một hai ba bốn năm sáu bảy tám",
+            "Màn sương buông",
+        ]
+
+        def phrase(start):
+            return [
+                {"text": "màn", "start": start, "end": start + 0.4},
+                {"text": "sương", "start": start + 0.4, "end": start + 0.8},
+                {"text": "buông", "start": start + 0.8, "end": start + 1.2},
+            ]
+
+        matched = reconcile_lyrics_with_transcript(
+            lyrics,
+            [{"words": phrase(10.0)}, {"words": phrase(11.7)}],
+        )
+        sung = [line for line in matched if not line.get("supplemented")]
+        guessed = sung[1]
+        self.assertTrue(guessed["uncertain"])
+        self.assertGreaterEqual(guessed["start"], sung[0]["end"])
+        self.assertLessEqual(guessed["end"], sung[2]["start"])
+        self.assertLess(guessed["end"] - guessed["start"], 2.8)
+
+    def test_repeated_lines_take_successive_hearings(self):
+        lyrics = ["Màn sương buông", "Màn sương buông"]
+
+        def phrase(start):
+            return [
+                {"text": "màn", "start": start, "end": start + 0.4},
+                {"text": "sương", "start": start + 0.4, "end": start + 0.8},
+                {"text": "buông", "start": start + 0.8, "end": start + 1.2},
+            ]
+
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": phrase(100)}, {"words": phrase(200)}])
+        sung = [line for line in matched if not line.get("supplemented")]
+        self.assertEqual(sung[0]["start"], 100)
+        self.assertEqual(sung[1]["start"], 200)
+
+    def test_rejects_lyrics_that_match_nothing_that_was_heard(self):
+        from karaoke.align import AlignError
+
+        with self.assertRaises(AlignError):
+            reconcile_lyrics_with_transcript(
+                ["hoàn toàn khác biệt"],
+                [{"words": [{"text": "một", "start": 1, "end": 1.4}, {"text": "hai", "start": 1.4, "end": 1.8}]}],
+            )
 
 
 class AccessTests(unittest.TestCase):
@@ -685,6 +807,138 @@ class LyricLayoutTests(unittest.TestCase):
     def test_wrap_keeps_a_short_line_on_one_row(self):
         rows = _wrap_word_rows([40.0, 40.0, 40.0], 10.0, MAX_LYRIC_WIDTH)
         self.assertEqual(rows, [[0, 1, 2]])
+
+
+def _tone(path: Path, frequency: float, seconds: float = 0.4) -> None:
+    rate = 44100
+    count = int(rate * seconds)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        frames = bytearray()
+        for index in range(count):
+            sample = int(16000 * math.sin(2 * math.pi * frequency * index / rate))
+            frames += struct.pack("<hh", sample, sample)
+        handle.writeframes(frames)
+
+
+class MixRestoreTests(unittest.TestCase):
+    def test_accepts_default_band_settings(self):
+        settings = parse_mix_settings({})
+        self.assertEqual(settings["low_hz"], 120)
+        self.assertEqual(settings["high_hz"], 8000)
+        self.assertEqual(settings["high_volume"], 50)
+        graph = mix_filtergraph(settings)
+        self.assertIn("highpass=f=8000", graph)
+        self.assertIn("lowpass=f=120", graph)
+        self.assertIn("volume=0.5", graph)
+        self.assertIn("amix=inputs=3:normalize=0:duration=longest", graph)
+
+    def test_rejects_cutoff_and_volume_outside_range(self):
+        with self.assertRaises(MixJobError):
+            parse_mix_settings({"low_hz": 10, "high_hz": 8000})
+        with self.assertRaises(MixJobError):
+            parse_mix_settings({"low_hz": 120, "high_hz": 100})
+        with self.assertRaises(MixJobError):
+            parse_mix_settings({"high_volume": 140})
+
+    def test_project_keeps_the_instrumental_stem(self):
+        project = project_from_fields(
+            {
+                "title": "Bài",
+                "artist": "Tác",
+                "restore": {"instrumental_stem": "/tmp/song_(Instrumental).wav", "low_hz": 90, "high_volume": 40},
+            }
+        )
+        self.assertEqual(project["restore"]["instrumental_stem"], "/tmp/song_(Instrumental).wav")
+        self.assertEqual(project["restore"]["low_hz"], 90)
+        self.assertEqual(project["restore"]["high_volume"], 40)
+        self.assertEqual(project["restore"]["high_hz"], 8000)
+
+    def test_render_mix_writes_a_wav(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            original = root / "gốc.wav"
+            instrumental = root / "inst.wav"
+            _tone(original, 100)
+            _tone(instrumental, 8000)
+            destination = root / "nền.wav"
+            render_mix(
+                instrumental,
+                original,
+                destination,
+                {"high_hz": 4000, "low_hz": 150, "high_volume": 50, "low_volume": 50},
+            )
+            self.assertTrue(destination.is_file())
+            self.assertGreater(destination.stat().st_size, 44)
+
+
+class SeparateStreamTests(unittest.TestCase):
+    def test_stderr_flood_does_not_block_the_result_line(self):
+        import subprocess
+        import sys
+        import threading
+
+        from karaoke.separate_runner import _read_separation
+
+        script = (
+            "import sys\n"
+            "sys.stderr.write('x' * 200000)\n"
+            "sys.stderr.flush()\n"
+            "print('PROGRESS 0.5', flush=True)\n"
+            'print(\'RESULT {"vocal": "v", "instrumental": "i"}\', flush=True)\n'
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        holder: dict = {}
+
+        def run() -> None:
+            holder["value"] = _read_separation(process, None)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(5)
+        if worker.is_alive():
+            process.kill()
+            worker.join(2)
+            self.fail("Reading stdout stalled while stderr filled the pipe.")
+        code, result, stderr = holder["value"]
+        self.assertEqual(code, 0)
+        self.assertEqual(result, {"vocal": "v", "instrumental": "i"})
+        self.assertGreater(len(stderr), 100000)
+
+
+class WhisperOptionTests(unittest.TestCase):
+    def test_large_is_allowed_and_retry_defaults_on(self):
+        from karaoke.pipeline import whisper_options
+
+        options = whisper_options({"model_name": "large"})
+        self.assertEqual(options["model_name"], "large")
+        self.assertIsNone(options["no_speech_threshold"])
+        self.assertTrue(options["whisper_retry"])
+
+    def test_rejects_an_unknown_model_and_a_bad_threshold(self):
+        from karaoke.pipeline import whisper_options
+
+        with self.assertRaises(JobError):
+            whisper_options({"model_name": "huge"})
+        with self.assertRaises(JobError):
+            whisper_options({"no_speech_threshold": 1.4})
+
+    def test_project_stores_the_align_options(self):
+        project = project_from_fields(
+            {"title": "Bài", "model_name": "large-v2", "whisper_retry": False, "no_speech_threshold": 0.2}
+        )
+        self.assertEqual(project["model_name"], "large-v2")
+        self.assertFalse(project["whisper_retry"])
+        self.assertEqual(project["no_speech_threshold"], 0.2)
 
 
 if __name__ == "__main__":

@@ -45,8 +45,8 @@ export function ProjectSetup({
   busyBrowse,
   aligning,
   hasLines,
-  showAlignOptions,
   onBrowse,
+  onContinue,
   onAlign,
   onResumeEdit,
   onBackHome,
@@ -57,9 +57,9 @@ export function ProjectSetup({
   busyBrowse: string;
   aligning: boolean;
   hasLines: boolean;
-  showAlignOptions: boolean;
   onBrowse: (kind: BrowseKind) => void;
-  onAlign: (event: FormEvent) => void;
+  onContinue: (event: FormEvent) => void;
+  onAlign: () => void;
   onResumeEdit: () => void;
   onBackHome: () => void;
 }) {
@@ -67,7 +67,7 @@ export function ProjectSetup({
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
-      <form onSubmit={onAlign} className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
+      <form onSubmit={onContinue} className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Khai báo</p>
@@ -205,34 +205,17 @@ export function ProjectSetup({
           </div>
         </section>
 
-        {showAlignOptions && (
-          <section className="grid gap-4 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-[var(--muted)]">Model căn lời</span>
-              <select
-                className={fieldClass}
-                value={fields.model_name}
-                onChange={(event) => setFields((current) => ({ ...current, model_name: event.target.value }))}
-              >
-                <option value="tiny">Tiny, nhanh</option>
-                <option value="base">Base</option>
-                <option value="small">Small, cân bằng</option>
-                <option value="medium">Medium, chậm hơn</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-[var(--muted)]">Thiết bị</span>
-              <select
-                className={fieldClass}
-                value={fields.device}
-                onChange={(event) => setFields((current) => ({ ...current, device: event.target.value }))}
-              >
-                <option value="cpu">CPU</option>
-                <option value="mps">GPU Apple</option>
-              </select>
-            </label>
-          </section>
-        )}
+        <label className="block">
+          <span className="mb-1.5 block text-sm text-[var(--muted)]">Thiết bị tách giọng</span>
+          <select
+            className={fieldClass}
+            value={fields.device}
+            onChange={(event) => setFields((current) => ({ ...current, device: event.target.value }))}
+          >
+            <option value="cpu">CPU</option>
+            <option value="mps">GPU Apple</option>
+          </select>
+        </label>
 
         <div>
           <PathField
@@ -261,13 +244,25 @@ export function ProjectSetup({
             Lưu khai báo và vào biên tập
           </button>
         ) : (
-          <button
-            type="submit"
-            disabled={aligning}
-            className="w-full rounded-2xl bg-[var(--gold)] px-4 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
-          >
-            {aligning ? "Đang căn lời…" : "Căn lời và vào biên tập"}
-          </button>
+          <div className="space-y-2">
+            <button
+              type="submit"
+              disabled={aligning}
+              className="w-full rounded-2xl bg-[var(--gold)] px-4 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
+            >
+              Tiếp tục tách và trộn
+            </button>
+            {fields.vocal_audio && fields.instrumental_audio && (
+              <button
+                type="button"
+                disabled={aligning}
+                onClick={() => onAlign()}
+                className="w-full rounded-2xl border border-[var(--gold)] px-4 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
+              >
+                Bỏ qua, căn lời với file đã có
+              </button>
+            )}
+          </div>
         )}
       </form>
 
@@ -276,9 +271,10 @@ export function ProjectSetup({
           <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Luồng</h2>
           <ol className="mt-4 space-y-2 text-sm leading-6 text-[var(--muted)]">
             <li>1. Khai báo audio, lời, ảnh</li>
-            <li>2. Căn / ghép chữ (dự án mới)</li>
-            <li>3. Biên tập timing</li>
-            <li>4. Xuất hai video</li>
+            <li>2. Tách Kim Vocal 2 và trộn nhạc nền</li>
+            <li>3. Căn / ghép chữ</li>
+            <li>4. Biên tập timing</li>
+            <li>5. Xuất hai video</li>
           </ol>
         </section>
       </aside>
