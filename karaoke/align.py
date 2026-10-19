@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import array
 import math
 import wave
 from pathlib import Path
 
+import numpy as np
+
 from karaoke.lyrics import extract_sung_lines, normalize_token
+from karaoke.media import MediaError, is_pcm16_wav, pcm16_wav
 
 
 class AlignError(RuntimeError):
@@ -104,26 +106,28 @@ def _loosen_packed(words: list[dict], limit: float | None = None) -> list[dict]:
 
 
 def _vocal_rms(vocal_path: Path, hop: float = 0.03) -> tuple[list[float], float]:
-    with wave.open(str(vocal_path), "rb") as handle:
-        channels = handle.getnchannels()
-        width = handle.getsampwidth()
-        rate = handle.getframerate()
-        frames = handle.readframes(handle.getnframes())
+    try:
+        with pcm16_wav(vocal_path) as wav_path:
+            with wave.open(str(wav_path), "rb") as handle:
+                channels = handle.getnchannels()
+                width = handle.getsampwidth()
+                rate = handle.getframerate()
+                frames = handle.readframes(handle.getnframes())
+    except MediaError as error:
+        raise AlignError(str(error)) from error
     if width != 2 or rate <= 0 or channels <= 0:
         raise AlignError("File vocal không phải WAV 16-bit.")
-    samples = array.array("h")
-    samples.frombytes(frames)
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float64)
+    if channels > 1:
+        usable = (samples.size // channels) * channels
+        samples = samples[:usable].reshape(-1, channels).mean(axis=1)
     hop_count = max(1, int(hop * rate))
-    total = len(samples) // channels
-    levels: list[float] = []
-    for start in range(0, max(0, total - hop_count), hop_count):
-        total_square = 0.0
-        for index in range(hop_count):
-            base = (start + index) * channels
-            mixed = sum(samples[base + channel] for channel in range(channels)) / channels
-            total_square += mixed * mixed
-        levels.append(math.sqrt(total_square / hop_count))
-    return levels, hop
+    window_count = max(0, samples.size // hop_count - 1)
+    if window_count == 0:
+        return [], hop
+    windowed = samples[: window_count * hop_count].reshape(window_count, hop_count)
+    levels = np.sqrt(np.mean(windowed * windowed, axis=1))
+    return levels.tolist(), hop
 
 
 def _voice_bounds(levels: list[float], hop: float, origin: float, limit: float) -> tuple[float, float, float] | None:
@@ -204,8 +208,15 @@ def _absorb_voiced_gaps(words: list[dict], levels: list[float], hop: float, thre
     return [_word_dict(word["text"], word["start"], word["end"]) for word in adjusted]
 
 
-def fit_lines_to_voice(lines: list[dict], vocal_path: Path) -> list[dict]:
+def fit_lines_to_voice(lines: list[dict], vocal_path: Path, log=None) -> list[dict]:
     """Keep each lyric on screen for the note that is actually being sung."""
+
+    def note(message: str) -> None:
+        if log is not None:
+            log(message)
+
+    if not is_pcm16_wav(vocal_path):
+        note(f"{vocal_path.name} không phải WAV 16-bit. Đang chuyển tạm để đo tiếng hát.")
     levels, hop = _vocal_rms(vocal_path)
     fitted: list[dict] = []
     for index, line in enumerate(lines):
@@ -215,12 +226,17 @@ def fit_lines_to_voice(lines: list[dict], vocal_path: Path) -> list[dict]:
         next_start = lines[index + 1]["start"] if index + 1 < len(lines) else words[0]["start"] + 12
         bounds = _voice_bounds(levels, hop, words[0]["start"], min(next_start - 0.04, words[0]["start"] + 12))
         if bounds is None:
+            note(
+                f"Câu {index + 1}: giữ nguyên thời gian vì không thấy đoạn hát đủ lớn quanh {words[0]['start']:.1f}s "
+                "(ngưỡng peak 80, tỉ lệ 0,12)."
+            )
             fitted.append(line)
             continue
         active_start, active_end, threshold = bounds
         if fitted:
             active_start = max(active_start, fitted[-1]["end"])
         if active_end - active_start < 0.18 * len(words):
+            note(f"Câu {index + 1}: giữ nguyên thời gian vì đoạn hát ngắn hơn số chữ.")
             fitted.append(line)
             continue
         outside = any(word["start"] > active_end + 0.25 for word in words)
@@ -414,7 +430,7 @@ def align_lyrics(
             repaired.append(repaired_line)
     matched = loosen_against_next_line(repaired)
     try:
-        matched = fit_lines_to_voice(matched, vocal_path)
+        matched = fit_lines_to_voice(matched, vocal_path, log)
     except (AlignError, wave.Error, EOFError) as error:
         log(f"Không chỉnh được câu theo tiếng hát ({error}). Giữ thời gian căn được.")
     if moved:

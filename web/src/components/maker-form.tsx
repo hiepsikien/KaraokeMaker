@@ -21,6 +21,7 @@ type Job = {
   outputs: Outputs | null;
   lines: TimedLine[] | null;
   duration: number;
+  export_gaps?: string[];
 };
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "timing";
@@ -96,7 +97,6 @@ export function MakerForm() {
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [hideEditor, setHideEditor] = useState(false);
-  const [keepTiming, setKeepTiming] = useState(false);
 
   const lines = useMemo(() => sungCount(lyrics), [lyrics]);
   const aligning = job?.status === "running";
@@ -234,7 +234,6 @@ export function MakerForm() {
         return;
       }
       const data = await response.json();
-      setKeepTiming(false);
       setHideEditor(false);
       setJob({
         id: data.id,
@@ -293,7 +292,6 @@ export function MakerForm() {
         return;
       }
       const data = await response.json();
-      setKeepTiming(true);
       setHideEditor(false);
       setJob({
         id: data.id,
@@ -303,6 +301,7 @@ export function MakerForm() {
         outputs: null,
         lines: data.lines,
         duration: data.duration || 0,
+        export_gaps: data.export_gaps || [],
       });
     } catch {
       setNotice("Không mở được bản đã sửa. Server Python chưa chạy bản mới.");
@@ -343,7 +342,7 @@ export function MakerForm() {
         onRender={renderVideos}
         onReveal={reveal}
         onBack={() => setHideEditor(true)}
-        keepTiming={keepTiming}
+        exportGaps={job.export_gaps || []}
       />
     );
   }

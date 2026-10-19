@@ -167,6 +167,10 @@ def load_timing_file(path: Path) -> list[dict]:
 
 def save_timing_file(path: Path, lines: list[dict]) -> Path:
     cleaned = normalize_edited_lines(lines)
+    try:
+        path = ensure_allowed(path)
+    except AccessError as error:
+        raise JobError(str(error)) from error
     path.parent.mkdir(parents=True, exist_ok=True)
     grant(path.parent)
     write_timing(path, cleaned)
@@ -247,22 +251,59 @@ def align_job(prepared: dict, log) -> list[dict]:
         raise JobError(f"Căn lời thất bại: {error}") from error
 
 
+def _present_file(raw) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    return path if path.is_file() else None
+
+
+def export_gaps(prepared: dict) -> list[str]:
+    """Files still required before a video can be built. Editing can proceed without them."""
+    gaps: list[str] = []
+    if _present_file(prepared.get("original_audio")) is None:
+        gaps.append("audio gốc")
+    if _present_file(prepared.get("instrumental_audio")) is None:
+        gaps.append("file instrumental")
+    cover = _present_file(prepared.get("cover_image"))
+    images = [path for path in (prepared.get("background_images") or []) if _present_file(path)]
+    if cover is None and not images:
+        gaps.append("ảnh bìa hoặc ảnh nền")
+    return gaps
+
+
+def _images_for_render(prepared: dict) -> tuple[Path, list[Path]]:
+    cover = _present_file(prepared.get("cover_image"))
+    images = [path for path in (prepared.get("background_images") or []) if _present_file(path)]
+    if cover is None and images:
+        cover = images[0]
+    if cover is not None and not images:
+        images = [cover]
+    if cover is None:
+        raise JobError("Chưa xuất được. Hãy chọn thêm: ảnh bìa hoặc ảnh nền.")
+    return cover, images
+
+
 def render_job(prepared: dict, lines: list[dict], log) -> dict:
     lines = normalize_edited_lines(lines)
+    gaps = export_gaps(prepared)
+    if gaps:
+        raise JobError("Chưa xuất được. Hãy chọn thêm: " + ", ".join(gaps) + ".")
     output_dir = Path(prepared["output_dir"])
     title = prepared["title"]
     stem = safe_title(title)
-    timing_path = output_dir / f"{stem} timing.json"
+    cover, images = _images_for_render(prepared)
     try:
-        write_timing(timing_path, lines)
-        log(f"Đã lưu thời gian từng chữ vào {timing_path.name}.")
+        timing_path = save_timing_file(timing_path_for(prepared), lines)
+        log(f"Đã lưu thời gian từng chữ vào {timing_path}.")
         vocal_out, instrumental_out = render_videos(
             lines=lines,
             title=title,
             artist=prepared["artist"],
             cover_line=prepared["cover_line"],
-            cover_photo=Path(prepared["cover_image"]),
-            background_images=[Path(path) for path in prepared["background_images"]],
+            cover_photo=cover,
+            background_images=images,
             original_audio=Path(prepared["original_audio"]),
             instrumental_audio=Path(prepared["instrumental_audio"]),
             output_dir=output_dir,

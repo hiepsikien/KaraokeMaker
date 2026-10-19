@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import subprocess
+import tempfile
 import unicodedata
+import wave
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
@@ -28,6 +32,57 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
     if not FONT_PATH.is_file():
         raise MediaError(f"Không thấy font tiếng Việt tại {FONT_PATH}.")
     return ImageFont.truetype(str(FONT_PATH), size=size)
+
+
+def is_pcm16_wav(path: Path) -> bool:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            return (
+                handle.getsampwidth() == 2
+                and handle.getcomptype() == "NONE"
+                and handle.getframerate() > 0
+                and handle.getnchannels() > 0
+            )
+    except (wave.Error, EOFError, OSError):
+        return False
+
+
+@contextmanager
+def pcm16_wav(path: Path):
+    """Yield a 16-bit PCM wav. Other audio is converted with ffmpeg for the vocal fit."""
+    if is_pcm16_wav(path):
+        yield path
+        return
+    if shutil.which("ffmpeg") is None:
+        raise MediaError(f"{path.name} không phải WAV 16-bit và chưa có ffmpeg để chuyển.")
+    temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    temp.close()
+    destination = Path(temp.name)
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(destination),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0 or not destination.is_file():
+            detail = result.stderr.strip().splitlines()
+            raise MediaError(detail[-1] if detail else f"Không chuyển được {path.name} sang WAV 16-bit.")
+        yield destination
+    finally:
+        destination.unlink(missing_ok=True)
 
 
 def probe_duration(path: Path) -> float:

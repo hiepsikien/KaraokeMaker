@@ -15,7 +15,16 @@ from karaoke.access import AccessError, audio_root, ensure_allowed, grant
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
 from karaoke.align import fit_lines_to_voice
-from karaoke.pipeline import JobError, align_job, open_saved, prepare_job, render_job, save_timing_file, timing_path_for
+from karaoke.pipeline import (
+    JobError,
+    align_job,
+    export_gaps,
+    open_saved,
+    prepare_job,
+    render_job,
+    save_timing_file,
+    timing_path_for,
+)
 
 app = FastAPI(title="KaraokeMaker")
 app.add_middleware(
@@ -332,6 +341,7 @@ def _public_job(record: dict) -> dict:
         "outputs": record["outputs"],
         "lines": record["lines"],
         "duration": record["duration"],
+        "export_gaps": export_gaps(record["prepared"]) if record.get("prepared") else [],
     }
 
 
@@ -428,15 +438,20 @@ def job_audio(job_id: str):
 
 @app.post("/api/jobs/{job_id}/fit")
 def fit_job(job_id: str):
-    """Pull lyric times onto the vocal note, including the sustain."""
+    """Manual re-fit. Alignment already fitted once; the editor does not call this on open."""
     with _lock:
         record = _jobs.get(job_id)
         if record is None or not record.get("lines") or not record.get("prepared"):
             raise HTTPException(status_code=404, detail="Chưa có lời để chỉnh.")
         vocal = Path(record["prepared"]["vocal_audio"])
         lines = record["lines"]
+
+    def log(message: str) -> None:
+        with _lock:
+            record["log"].append(message)
+
     try:
-        fitted = fit_lines_to_voice(lines, vocal)
+        fitted = fit_lines_to_voice(lines, vocal, log)
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"Không chỉnh được theo tiếng hát: {error}") from error
     with _lock:

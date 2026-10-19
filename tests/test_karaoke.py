@@ -1,16 +1,23 @@
+import math
 import os
+import shutil
+import struct
 import tempfile
 import unittest
+import wave
 from pathlib import Path
+from unittest.mock import patch
 
 from karaoke.access import AccessError, audio_root, clear_grants, ensure_allowed, grant
-import math
-import struct
-import wave
-
-from karaoke.align import _segments_match_lines, fit_lines_to_voice, loosen_against_next_line, repair_stretched_words
+from karaoke.align import (
+    _segments_match_lines,
+    _vocal_rms,
+    fit_lines_to_voice,
+    loosen_against_next_line,
+    repair_stretched_words,
+)
 from karaoke.lyrics import extract_sung_lines
-from karaoke.pipeline import JobError, load_timing_file, save_timing_file
+from karaoke.pipeline import JobError, export_gaps, load_timing_file, render_job, save_timing_file
 from karaoke.render import COUNTDOWN, LONG_GAP, cue_at
 
 
@@ -160,6 +167,34 @@ class VoiceFitTests(unittest.TestCase):
             self.assertGreater(fitted[0]["end"], 1.15)
             self.assertLess(fitted[0]["end"], 1.45)
 
+    def test_logs_when_the_phrase_is_too_quiet_to_move(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "quiet.wav"
+            self._tone(vocal, [])
+            notes: list[str] = []
+            line = {"text": "một", "start": 0.4, "end": 0.8, "words": [{"text": "một", "start": 0.4, "end": 0.8}]}
+            fitted = fit_lines_to_voice([line], vocal, notes.append)
+            self.assertEqual(fitted[0]["end"], 0.8)
+            self.assertTrue(any("giữ nguyên" in note for note in notes))
+
+    def test_measures_a_vocal_that_is_not_pcm16(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("cần ffmpeg để chuyển vocal")
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "narrow.wav"
+            rate = 8000
+            with wave.open(str(vocal), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(1)
+                handle.setframerate(rate)
+                frames = bytearray()
+                for index in range(rate * 2):
+                    moment = index / rate
+                    frames.append(220 if 0.4 <= moment < 1.2 else 128)
+                handle.writeframes(frames)
+            levels, _hop = _vocal_rms(vocal)
+            self.assertGreater(max(levels), 80)
+
 
 class SegmentMatchTests(unittest.TestCase):
     def test_marks_a_line_when_the_word_count_differs(self):
@@ -216,23 +251,90 @@ class AccessTests(unittest.TestCase):
 class TimingFileTests(unittest.TestCase):
     def test_saves_and_reloads_edited_lines(self):
         with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "Hào Khí timing.json"
-            save_timing_file(
-                path,
-                [
-                    {
-                        "text": "một hai",
-                        "words": [
-                            {"text": "một", "start": 1, "end": 1.2},
-                            {"text": "hai", "start": 1.2, "end": 1.5},
-                        ],
-                    }
-                ],
+            root = Path(folder)
+            grant(root)
+            try:
+                path = root / "Hào Khí timing.json"
+                save_timing_file(
+                    path,
+                    [
+                        {
+                            "text": "một hai",
+                            "words": [
+                                {"text": "một", "start": 1, "end": 1.2},
+                                {"text": "hai", "start": 1.2, "end": 1.5},
+                            ],
+                        }
+                    ],
+                )
+                loaded = load_timing_file(path)
+                self.assertEqual(loaded[0]["text"], "một hai")
+                self.assertEqual(loaded[0]["end"], 1.5)
+            finally:
+                clear_grants()
+
+    def test_names_files_still_needed_before_export(self):
+        gaps = export_gaps(
+            {"original_audio": "", "instrumental_audio": "", "cover_image": "", "background_images": []}
+        )
+        self.assertEqual(gaps, ["audio gốc", "file instrumental", "ảnh bìa hoặc ảnh nền"])
+
+    def test_render_stops_before_ffmpeg_when_files_are_missing(self):
+        with self.assertRaises(JobError) as caught:
+            render_job(
+                {
+                    "title": "Bài",
+                    "artist": "",
+                    "cover_line": "",
+                    "original_audio": "",
+                    "instrumental_audio": "",
+                    "cover_image": "",
+                    "background_images": [],
+                    "output_dir": "/tmp",
+                    "cover_duration": 0,
+                    "image_duration": 8,
+                },
+                [{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                lambda _message: None,
             )
-            loaded = load_timing_file(path)
-            self.assertEqual(loaded[0]["text"], "một hai")
-            self.assertEqual(loaded[0]["end"], 1.5)
-            clear_grants()
+        self.assertIn("audio gốc", str(caught.exception))
+
+    def test_render_writes_the_opened_timing_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            try:
+                for name in ("gốc.wav", "đệm.wav"):
+                    (root / name).write_bytes(b"not-audio")
+                (root / "ảnh.jpg").write_bytes(b"not-image")
+                opened = root / "V4" / "Hào Khí timing.json"
+                opened.parent.mkdir()
+                prepared = {
+                    "title": "Tên khác",
+                    "artist": "Ai đó",
+                    "cover_line": "",
+                    "original_audio": str(root / "gốc.wav"),
+                    "instrumental_audio": str(root / "đệm.wav"),
+                    "vocal_audio": str(root / "gốc.wav"),
+                    "cover_image": str(root / "ảnh.jpg"),
+                    "background_images": [],
+                    "output_dir": str(root / "ra"),
+                    "cover_duration": 0,
+                    "image_duration": 8,
+                    "timing_path": str(opened),
+                }
+                (root / "ra").mkdir()
+                with patch("karaoke.pipeline.render_videos", return_value=(root / "a.mp4", root / "b.mp4")):
+                    result = render_job(
+                        prepared,
+                        [{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.4}]}],
+                        lambda _message: None,
+                    )
+                self.assertEqual(Path(result["timing"]), opened.resolve())
+                self.assertTrue(opened.is_file())
+                self.assertFalse((root / "ra" / "Tên khác timing.json").exists())
+            finally:
+                clear_grants()
 
     def test_rejects_a_timing_file_that_is_not_a_list(self):
         with tempfile.TemporaryDirectory() as folder:

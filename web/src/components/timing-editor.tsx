@@ -54,7 +54,7 @@ export function TimingEditor({
   onRender,
   onReveal,
   onBack,
-  keepTiming = false,
+  exportGaps = [],
 }: {
   jobId: string;
   initialLines: TimedLine[];
@@ -65,10 +65,9 @@ export function TimingEditor({
   onRender: (lines: TimedLine[]) => void;
   onReveal: (path: string) => void;
   onBack: () => void;
-  keepTiming?: boolean;
+  exportGaps?: string[];
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const dirty = useRef(false);
   const [lines, setLines] = useState(() => cloneLines(initialLines));
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -78,24 +77,6 @@ export function TimingEditor({
   const [savedPath, setSavedPath] = useState("");
   const [saveError, setSaveError] = useState("");
   const cue = cueAt(lines, time);
-
-  useEffect(() => {
-    if (keepTiming) return;
-    let cancelled = false;
-    fetch(`/api/jobs/${jobId}/fit`, { method: "POST" })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return response.json();
-      })
-      .then((body: { lines?: TimedLine[] } | null) => {
-        if (cancelled || dirty.current || !body?.lines?.length) return;
-        setLines(cloneLines(body.lines));
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [jobId, keepTiming]);
 
   useEffect(() => {
     let frame = 0;
@@ -109,7 +90,6 @@ export function TimingEditor({
   }, []);
 
   function replaceLine(index: number, line: TimedLine) {
-    dirty.current = true;
     setLines((current) => current.map((item, itemIndex) => (itemIndex === index ? line : item)));
   }
 
@@ -131,7 +111,6 @@ export function TimingEditor({
     const line = lines[lineIndex];
     const words = line.words.filter((_, index) => index !== wordIndex);
     if (words.length === 0) {
-      dirty.current = true;
       setLines((current) => current.filter((_, index) => index !== lineIndex));
       return;
     }
@@ -184,7 +163,6 @@ export function TimingEditor({
       end,
       words: [{ text: "chữ", start, end }],
     });
-    dirty.current = true;
     setLines((current) => {
       const next = [...current];
       next.splice(index + 1, 0, line);
@@ -200,7 +178,6 @@ export function TimingEditor({
     if (!line || selectedWord >= line.words.length) return;
     const head = syncLine({ ...line, words: line.words.slice(0, selectedWord) });
     const tail = syncLine({ ...line, words: line.words.slice(selectedWord) });
-    dirty.current = true;
     setLines((current) => {
       const next = [...current];
       next.splice(selectedLine, 1, head, tail);
@@ -381,12 +358,17 @@ export function TimingEditor({
         </button>
         <button
           type="button"
-          disabled={locked || lines.length === 0}
+          disabled={locked || lines.length === 0 || exportGaps.length > 0}
           onClick={() => onRender(lines)}
           className="rounded-2xl bg-[var(--gold)] px-5 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
         >
           {locked ? "Đang xuất video…" : "Xuất hai video"}
         </button>
+        {exportGaps.length > 0 && (
+          <p className="w-full text-sm text-[var(--muted)]">
+            Chưa xuất được. Quay lại phần chọn file và chọn thêm: {exportGaps.join(", ")}.
+          </p>
+        )}
         {outputs && (
           <>
             <button type="button" className="text-sm hover:text-[var(--gold)]" onClick={() => onReveal(outputs.vocal)}>
