@@ -47,16 +47,15 @@ Sau khi sửa code Python, tắt server bằng Ctrl+C rồi chạy lại `.venv-
 
 ## Cách dùng
 
-1. Nhập tên bài hát và tác giả. Dòng phụ trên bìa là tùy chọn.
-2. Chọn audio gốc, file vocal và file instrumental.
-3. Dán lời bài hát.
-4. Chọn ảnh bìa hoặc ảnh nền. Khung video là 1920×1080. Ảnh đúng tỉ lệ này đầy khung. Ảnh khác tỉ lệ nằm giữa và có viền tối hai bên.
-5. Chọn thư mục xuất, rồi bấm **Căn lời**.
-6. Khi căn xong, sửa trên timeline: sóng âm ở trên, câu hát ở dưới. Kéo cả câu để dời. Kéo mép để đổi chỗ bắt đầu và kết thúc. Bấm một câu để sửa từng chữ. **Phát** và **Tạm dừng** nằm trên timeline. Bấm một câu hoặc một chữ thì nghe từ chỗ đó.
-7. **Thêm câu** chèn một câu mới sau câu đang chọn. **Chia câu** cắt câu đang chọn thành hai, tại chữ đang chọn hoặc tại vạch phát.
-8. **Lưu bản sửa** ghi ngay file thời gian, không cần đợi xuất video.
-9. Lần sau, chọn file vocal rồi bấm **Mở bản đã sửa** và chọn file `timing.json`. Trang sửa mở lại đúng thời gian đã lưu. Whisper không chạy lại.
-10. **Xuất hai video** cần audio gốc, instrumental, và ảnh bìa hoặc ảnh nền. Nếu còn thiếu, nút xuất bị khóa. Hãy chọn đủ file rồi mở lại bản đã sửa.
+Luồng gồm bốn bước: **Khai báo → Ghép chữ → Biên tập → Xuất**.
+
+1. Trên màn hình đầu, chọn **Tạo dự án mới** hoặc **Mở dự án đã có** (file `.karaoke.json`; bản `timing.json` cũ vẫn mở được và sẽ được chuyển sang file dự án).
+2. Với dự án mới: nhập tên bài và tác giả, chọn audio gốc / vocal / instrumental, dán lời, chọn ảnh, chọn thư mục xuất, rồi bấm **Căn lời và vào biên tập**.
+3. Khi căn xong, sửa trên timeline: sóng âm ở trên, câu hát ở dưới. Kéo cả câu để dời. Kéo mép để đổi chỗ bắt đầu và kết thúc. Bấm một câu để sửa từng chữ. **Phát** và **Tạm dừng** nằm trên timeline.
+4. **Thêm câu** chèn một câu mới sau câu đang chọn. **Chia câu** cắt câu đang chọn thành hai, tại chữ đang chọn hoặc tại vạch phát.
+5. **Lưu dự án** ghi file `.karaoke.json` (và `timing.json` kèm theo), không cần đợi xuất video.
+6. Lần sau: **Mở dự án đã có** — vào thẳng biên tập, Whisper không chạy lại. Nếu thiếu file để xuất, bấm **Bổ sung file trong khai báo**.
+7. **Xuất hai video** cần audio gốc, instrumental, và ảnh bìa hoặc ảnh nền.
 
 Chọn file vocal hoặc instrumental dạng `1_Tên bài_(Vocals).wav` thì ứng dụng tự điền file còn lại trong cùng thư mục, và tìm bài gốc cùng tên trong thư mục `Songs`. Chọn thẳng bài gốc thì ứng dụng lấy cặp vocal và instrumental mới nhất trong `Separated`.
 
@@ -76,17 +75,18 @@ Chỉ dòng thứ ba được căn giờ và hiện trên video.
 
 Căn lời dùng file vocal. Model mặc định là `small`, chạy trên CPU. Có thể chọn `tiny`, `base`, `small` hoặc `medium`, và chuyển sang GPU Apple (MPS). Lần đầu máy tải model Whisper về, các lần sau dùng lại bản đã tải.
 
-Sau khi căn, thời gian từng chữ được kéo về đoạn đang hát, kể cả tiếng ngân. Việc này chạy một lần trong lúc căn. Mở bản đã sửa không căn lại, để giữ các chỗ đã sửa tay. Vocal không phải WAV 16-bit, kể cả mp3 và flac, được chuyển tạm trước khi đo tiếng hát. Câu không đo được thì giữ nguyên thời gian, và tiến trình ghi một dòng tóm tắt.
+Sau khi căn, thời gian từng chữ được kéo về đoạn đang hát, kể cả tiếng ngân. Việc này chạy một lần trong lúc căn. Mở dự án đã có không căn lại, để giữ các chỗ đã sửa tay. Vocal không phải WAV 16-bit, kể cả mp3 và flac, được chuyển tạm trước khi đo tiếng hát. Câu không đo được thì giữ nguyên thời gian, và tiến trình ghi một dòng tóm tắt.
 
 ## Video xuất ra
 
 Với bài tên `Bình Ngô Đại Cáo`, thư mục xuất có:
 
+- `Bình Ngô Đại Cáo.karaoke.json` là file dự án (metadata + timing)
 - `Bình Ngô Đại Cáo (có giọng).mp4` dùng audio gốc
 - `Bình Ngô Đại Cáo (không lời).mp4` dùng instrumental
-- `Bình Ngô Đại Cáo timing.json` là thời điểm từng chữ
+- `Bình Ngô Đại Cáo timing.json` là bản timing kèm theo (tương thích cũ)
 
-Nếu bản sửa được mở từ một file thời gian có sẵn, lần lưu và lần xuất đều ghi vào file đó.
+Lưu và xuất đều ghi lại vào cùng file dự án.
 
 Trang bìa hiện trước, mặc định 5 giây, với ảnh bìa, tên bài và tác giả. Tiếng được lùi đúng bằng thời lượng bìa, nên chữ bắt đầu đổi màu khi bài hát bắt đầu. Ảnh nền đổi lần lượt, mặc định mỗi ảnh 8 giây. Nếu không chọn ảnh nền, ảnh bìa được dùng làm nền.
 
@@ -98,20 +98,23 @@ Câu hát nằm ở cuối khung hình. Chữ chưa hát màu trắng, chữ đa
 karaoke/
   access.py      # thư mục được phép đọc
   server.py      # API, chỉ trên 127.0.0.1
-  pipeline.py    # kiểm tra file, mở bản đã sửa, căn lời, xuất video
+  project.py     # đọc/ghi file .karaoke.json
+  pipeline.py    # kiểm tra file, mở dự án, căn lời, xuất video
   align.py       # căn lời vào vocal và kéo chữ về đoạn đang hát
   lyrics.py      # bỏ dòng ghi chú, so khớp tên bài
   media.py       # ảnh, thời lượng, chuyển vocal sang WAV
   render.py      # dựng hình, đếm ngược, chữ và hai file MP4
 web/
   src/app        # trang Next.js
-  src/components/maker-form.tsx
+  src/components/maker-form.tsx      # điều phối các bước
+  src/components/home-gate.tsx       # tạo mới / mở dự án
+  src/components/project-setup.tsx   # khai báo
   src/components/timing-editor.tsx
   src/components/align-timeline.tsx
 requirements-karaoke.txt
 ```
 
-Việc đang chạy được giữ trong bộ nhớ. Tắt server là mất trang sửa đang mở. File thời gian và video đã ghi vẫn còn trên đĩa.
+Việc đang chạy được giữ trong bộ nhớ. Tắt server là mất phiên đang mở. File dự án và video đã ghi vẫn còn trên đĩa.
 
 ## Tách giọng bằng UVR
 

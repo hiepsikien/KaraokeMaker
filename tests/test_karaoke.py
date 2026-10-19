@@ -17,7 +17,8 @@ from karaoke.align import (
     repair_stretched_words,
 )
 from karaoke.lyrics import extract_sung_lines
-from karaoke.pipeline import JobError, export_gaps, load_timing_file, render_job, save_timing_file
+from karaoke.pipeline import JobError, export_gaps, load_timing_file, open_project_file, render_job, save_timing_file
+from karaoke.project import load_project, project_from_fields, project_path_for, save_project, sync_project_file
 from karaoke.render import COUNTDOWN, LONG_GAP, cue_at
 
 
@@ -301,7 +302,7 @@ class TimingFileTests(unittest.TestCase):
                 lambda _message: None,
             )
         self.assertIn("audio gốc", str(caught.exception))
-        self.assertIn("mở lại bản đã sửa", str(caught.exception))
+        self.assertIn("khai báo", str(caught.exception))
 
     def test_render_writes_the_opened_timing_file(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -346,6 +347,81 @@ class TimingFileTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             with self.assertRaises(JobError):
                 load_timing_file(path)
+
+
+class ProjectFileTests(unittest.TestCase):
+    def tearDown(self):
+        clear_grants()
+
+    def test_saves_and_reloads_a_project_with_embedded_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            path = project_path_for(root, "Hào Khí")
+            project = project_from_fields(
+                {
+                    "title": "Hào Khí",
+                    "artist": "Ai đó",
+                    "vocal_audio": str(root / "v.wav"),
+                    "output_dir": str(root),
+                },
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.3}]}],
+                status="aligned",
+            )
+            saved = save_project(path, project)
+            loaded, loaded_path = load_project(saved)
+            self.assertEqual(loaded_path, saved.resolve())
+            self.assertEqual(loaded["title"], "Hào Khí")
+            self.assertEqual(loaded["status"], "aligned")
+            self.assertEqual(loaded["lines"][0]["text"], "một")
+
+    def test_migrates_legacy_timing_json_on_open(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            vocal = root / "vocal.wav"
+            vocal.write_bytes(b"")
+            timing = root / "Hào Khí timing.json"
+            timing.write_text(
+                '[{"text":"một","words":[{"text":"một","start":0,"end":0.2}]}]',
+                encoding="utf-8",
+            )
+            # open_project_file needs a real audio duration — mock probe
+            with patch("karaoke.pipeline.probe_duration", return_value=12.0):
+                prepared, lines, project = open_project_file(str(timing))
+            self.assertEqual(lines[0]["text"], "một")
+            self.assertTrue(Path(prepared["project_path"]).name.endswith(".karaoke.json"))
+            self.assertTrue(Path(prepared["project_path"]).is_file())
+            self.assertEqual(project["title"], "Hào Khí")
+
+    def test_sync_project_file_writes_beside_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            prepared = {
+                "title": "Bài",
+                "artist": "A",
+                "cover_line": "",
+                "lyrics": "một",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+            }
+            path = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            self.assertEqual(path.name, "Bài.karaoke.json")
+            self.assertEqual(prepared["project_path"], str(path))
 
 
 if __name__ == "__main__":

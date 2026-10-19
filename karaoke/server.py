@@ -19,11 +19,19 @@ from karaoke.pipeline import (
     JobError,
     align_job,
     export_gaps,
+    open_project_file,
     open_saved,
     prepare_job,
     render_job,
     save_timing_file,
     timing_path_for,
+)
+from karaoke.project import (
+    project_from_fields,
+    project_path_for,
+    public_project,
+    save_project,
+    sync_project_file,
 )
 
 app = FastAPI(title="KaraokeMaker")
@@ -65,6 +73,30 @@ class CreateJobRequest(BaseModel):
     language: str = "vi"
     model_name: str = "small"
     device: str = "cpu"
+    project_path: str = ""
+
+
+class ProjectFieldsRequest(BaseModel):
+    title: str = ""
+    artist: str = ""
+    cover_line: str = ""
+    original_audio: str = ""
+    vocal_audio: str = ""
+    instrumental_audio: str = ""
+    lyrics: str = ""
+    background_images: list[str] = Field(default_factory=list)
+    cover_image: str = ""
+    output_dir: str = ""
+    cover_duration: float = 5
+    image_duration: float = 8
+    language: str = "vi"
+    model_name: str = "small"
+    device: str = "cpu"
+    project_path: str = ""
+
+
+class OpenProjectRequest(BaseModel):
+    path: str = ""
 
 
 class OpenSavedRequest(BaseModel):
@@ -145,7 +177,7 @@ def _default_dir(kind: str, requested: str) -> str:
         return str(songs)
     if kind in {"vocal", "instrumental"} and separated.is_dir():
         return str(separated)
-    if kind in {"output", "timing"}:
+    if kind in {"output", "timing", "project"}:
         karaoke = root / "Karaoke"
         if root.is_dir():
             return str(karaoke if karaoke.is_dir() else root)
@@ -186,6 +218,7 @@ def _browse_script(kind: str, directory: str) -> str:
         "images": "Chọn ảnh nền",
         "output": "Chọn thư mục xuất",
         "timing": "Chọn file thời gian đã lưu",
+        "project": "Chọn file dự án KaraokeMaker",
     }.get(kind, "Chọn file")
     if kind == "output":
         return f'''
@@ -333,6 +366,7 @@ def inspect_images(body: ImageInspectRequest):
 
 
 def _public_job(record: dict) -> dict:
+    prepared = record.get("prepared") or {}
     return {
         "id": record["id"],
         "status": record["status"],
@@ -341,13 +375,145 @@ def _public_job(record: dict) -> dict:
         "outputs": record["outputs"],
         "lines": record["lines"],
         "duration": record["duration"],
-        "export_gaps": export_gaps(record["prepared"]) if record.get("prepared") else [],
+        "export_gaps": export_gaps(prepared) if prepared else [],
+        "project_path": prepared.get("project_path") or "",
+        "project": record.get("project"),
+    }
+
+
+def _store_job(record: dict) -> dict:
+    with _lock:
+        _prune_jobs()
+        _jobs[record["id"]] = record
+    return _public_job(record)
+
+
+@app.post("/api/projects")
+def create_project(body: ProjectFieldsRequest):
+    """Save a draft project file without aligning."""
+    payload = body.model_dump()
+    try:
+        project = project_from_fields(payload, status="draft")
+        if not project["title"]:
+            raise JobError("Hãy nhập tên bài hát.")
+        if not project["output_dir"]:
+            raise JobError("Hãy chọn thư mục xuất.")
+        output = Path(project["output_dir"]).expanduser()
+        try:
+            output = ensure_allowed(output)
+        except AccessError as error:
+            raise JobError(str(error)) from error
+        output.mkdir(parents=True, exist_ok=True)
+        grant(output)
+        project["output_dir"] = str(output)
+        if payload.get("project_path"):
+            target = Path(payload["project_path"]).expanduser()
+            try:
+                ensure_allowed(target.parent)
+            except AccessError as error:
+                raise JobError(str(error)) from error
+            grant(target.parent)
+        else:
+            target = project_path_for(output, project["title"])
+        saved = save_project(target, project)
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    return public_project(project, saved)
+
+
+@app.post("/api/projects/session")
+def project_session(body: ProjectFieldsRequest):
+    """Update project fields from the setup form and reopen an editing job when possible."""
+    payload = body.model_dump()
+    path_text = str(payload.get("project_path") or "").strip()
+    if not path_text:
+        raise HTTPException(status_code=400, detail="Thiếu đường dẫn dự án.")
+    try:
+        _prepared, lines, existing = open_project_file(path_text)
+        merged = {**existing, **payload}
+        merged["lines"] = lines
+        merged["background_images"] = payload.get("background_images") or []
+        status = "aligned" if lines else "draft"
+        if existing.get("outputs"):
+            merged["outputs"] = existing["outputs"]
+        project = project_from_fields(merged, lines=lines or None, status=status)
+        if existing.get("outputs"):
+            project["outputs"] = existing["outputs"]
+        saved = save_project(Path(path_text).expanduser(), project)
+        prepared, lines, project = open_project_file(str(saved))
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    project_public = public_project(project, Path(prepared["project_path"]))
+    if not lines or not prepared.get("vocal_audio"):
+        return {"phase": "setup", "project": project_public, "job": None}
+
+    job_id = uuid.uuid4().hex
+    record = {
+        "id": job_id,
+        "status": "editing",
+        "created": time.time(),
+        "log": ["Đã cập nhật khai báo dự án."],
+        "error": "",
+        "outputs": project.get("outputs"),
+        "lines": lines,
+        "duration": prepared.get("vocal_duration") or 0,
+        "prepared": prepared,
+        "project": project_public,
+    }
+    return {"phase": "edit", "project": project_public, "job": _store_job(record)}
+
+
+@app.post("/api/projects/open")
+def open_project(body: OpenProjectRequest):
+    """Open a project file (or migrate legacy timing.json) into a job when lines exist."""
+    try:
+        prepared, lines, project = open_project_file(body.path)
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    project_public = public_project(project, Path(prepared["project_path"]))
+    if not lines:
+        return {
+            "phase": "setup",
+            "project": project_public,
+            "job": None,
+        }
+
+    if not prepared.get("vocal_audio"):
+        return {
+            "phase": "setup",
+            "project": project_public,
+            "job": None,
+            "notice": "Dự án đã có lời căn sẵn nhưng thiếu file vocal. Hãy chọn lại vocal rồi vào biên tập.",
+        }
+
+    job_id = uuid.uuid4().hex
+    record = {
+        "id": job_id,
+        "status": "editing",
+        "created": time.time(),
+        "log": [f"Đã mở dự án {Path(prepared['project_path']).name}. Không căn lại."],
+        "error": "",
+        "outputs": project.get("outputs"),
+        "lines": lines,
+        "duration": prepared.get("vocal_duration") or 0,
+        "prepared": prepared,
+        "project": project_public,
+    }
+    return {
+        "phase": "edit",
+        "project": project_public,
+        "job": _store_job(record),
     }
 
 
 @app.post("/api/jobs")
 def create_job(body: CreateJobRequest):
     job_id = uuid.uuid4().hex
+    payload = body.model_dump()
     record = {
         "id": job_id,
         "status": "running",
@@ -358,6 +524,7 @@ def create_job(body: CreateJobRequest):
         "lines": None,
         "duration": 0,
         "prepared": None,
+        "project": None,
     }
     with _lock:
         _prune_jobs()
@@ -369,12 +536,21 @@ def create_job(body: CreateJobRequest):
 
     def worker() -> None:
         try:
-            prepared = prepare_job(body.model_dump(), log)
+            prepared = prepare_job(payload, log)
+            if payload.get("project_path"):
+                prepared["project_path"] = payload["project_path"]
+            project_path = sync_project_file(prepared, status="draft")
+            log(f"Đã lưu dự án {Path(project_path).name}.")
             lines = align_job(prepared, log)
+            project_path = sync_project_file(prepared, lines=lines, status="aligned")
             with _lock:
                 record["prepared"] = prepared
                 record["lines"] = lines
                 record["duration"] = prepared["vocal_duration"]
+                record["project"] = public_project(
+                    project_from_fields({**prepared, "lines": lines}, lines=lines, status="aligned"),
+                    Path(project_path),
+                )
                 record["log"].append("Căn xong. Hãy sửa chữ và thời gian, rồi xuất video.")
                 record["status"] = "editing"
         except JobError as error:
@@ -392,26 +568,30 @@ def create_job(body: CreateJobRequest):
 
 @app.post("/api/jobs/open")
 def open_job(body: OpenSavedRequest):
+    """Legacy open for timing.json + form fields. Prefer /api/projects/open."""
     job_id = uuid.uuid4().hex
     try:
         prepared, lines = open_saved(body.model_dump())
+        project_path = sync_project_file(prepared, lines=lines, status="aligned")
+        prepared["project_path"] = str(project_path)
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     record = {
         "id": job_id,
         "status": "editing",
         "created": time.time(),
-        "log": [f"Đã mở {Path(prepared['timing_path']).name}. Không căn lại bằng Whisper."],
+        "log": [f"Đã mở {Path(prepared.get('timing_path') or project_path).name}. Không căn lại."],
         "error": "",
         "outputs": None,
         "lines": lines,
         "duration": prepared["vocal_duration"],
         "prepared": prepared,
+        "project": public_project(
+            project_from_fields({**prepared, "lines": lines}, lines=lines, status="aligned"),
+            Path(project_path),
+        ),
     }
-    with _lock:
-        _prune_jobs()
-        _jobs[job_id] = record
-    return _public_job(record)
+    return _store_job(record)
 
 
 @app.get("/api/jobs/{job_id}")
@@ -470,14 +650,21 @@ def save_job_timing(job_id: str, body: RenderRequest):
         lines = [line.model_dump() for line in body.lines]
     try:
         path = save_timing_file(timing_path_for(prepared), lines)
+        prepared["timing_path"] = str(path)
+        project_path = sync_project_file(prepared, lines=lines, status="aligned")
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     with _lock:
         if _jobs.get(job_id) is record:
             record["prepared"]["timing_path"] = str(path)
+            record["prepared"]["project_path"] = str(project_path)
             record["lines"] = lines
-            record["log"].append(f"Đã lưu {path.name}.")
-    return {"path": str(path)}
+            record["project"] = public_project(
+                project_from_fields({**prepared, "lines": lines}, lines=lines, status="aligned"),
+                Path(project_path),
+            )
+            record["log"].append(f"Đã lưu dự án {Path(project_path).name}.")
+    return {"path": str(project_path), "timing": str(path)}
 
 
 @app.post("/api/jobs/{job_id}/render")

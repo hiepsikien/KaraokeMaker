@@ -54,6 +54,7 @@ export function TimingEditor({
   onRender,
   onReveal,
   onBack,
+  onFillGaps,
   exportGaps = [],
 }: {
   jobId: string;
@@ -65,6 +66,7 @@ export function TimingEditor({
   onRender: (lines: TimedLine[]) => void;
   onReveal: (path: string) => void;
   onBack: () => void;
+  onFillGaps?: () => void;
   exportGaps?: string[];
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -249,7 +251,7 @@ export function TimingEditor({
             <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
           </div>
           <button type="button" onClick={onBack} className="text-sm text-[var(--muted)] hover:text-white">
-            Quay lại phần chọn file
+            Khai báo dự án
           </button>
         </div>
         <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl bg-black/45 px-4 py-5">
@@ -367,7 +369,7 @@ export function TimingEditor({
           onClick={saveTiming}
           className="rounded-2xl border border-[var(--gold)] px-5 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
         >
-          Lưu bản sửa
+          Lưu dự án
         </button>
         <button
           type="button"
@@ -379,7 +381,14 @@ export function TimingEditor({
         </button>
         {exportGaps.length > 0 && (
           <p className="w-full text-sm text-[var(--muted)]">
-            Chưa xuất được vì còn thiếu {exportGaps.join(", ")}. Chọn đủ file rồi mở lại bản đã sửa.
+            Chưa xuất được vì còn thiếu {exportGaps.join(", ")}.{" "}
+            {onFillGaps ? (
+              <button type="button" className="text-[var(--gold)]" onClick={onFillGaps}>
+                Bổ sung file trong khai báo
+              </button>
+            ) : (
+              "Hãy bổ sung file trong phần khai báo."
+            )}
           </p>
         )}
         {outputs && (
