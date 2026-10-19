@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -47,6 +48,35 @@ def separate_kim2(
         stderr=subprocess.PIPE,
         text=True,
     )
+    try:
+        code, result, stderr = _read_separation(process, on_progress)
+    except JobError:
+        process.kill()
+        process.wait()
+        raise
+    if code != 0 or result is None:
+        detail = stderr.strip().splitlines()
+        message = detail[-1] if detail else "Tách giọng Kim Vocal 2 thất bại."
+        if message.startswith("ERROR "):
+            message = message[6:]
+        raise JobError(message)
+    if not result["vocal"] or not result["instrumental"]:
+        raise JobError("Tách giọng không ghi đủ file vocal và instrumental.")
+    return result
+
+
+def _read_separation(process: subprocess.Popen[str], on_progress: Callable[[float], None] | None) -> tuple[int, dict[str, str] | None, str]:
+    """Read stdout and stderr together so a full stderr pipe cannot stall the split."""
+    stderr_lines: list[str] = []
+
+    def drain_stderr() -> None:
+        if process.stderr is None:
+            return
+        for line in process.stderr:
+            stderr_lines.append(line)
+
+    drain = threading.Thread(target=drain_stderr, daemon=True)
+    drain.start()
     result: dict[str, str] | None = None
     assert process.stdout is not None
     for line in process.stdout:
@@ -60,20 +90,13 @@ def separate_kim2(
             try:
                 payload = json.loads(text.split(" ", 1)[1])
             except json.JSONDecodeError as error:
-                process.kill()
                 raise JobError("Script tách giọng trả về kết quả không đọc được.") from error
             if isinstance(payload, dict):
                 result = {"vocal": str(payload.get("vocal") or ""), "instrumental": str(payload.get("instrumental") or "")}
-    stderr = ""
-    if process.stderr is not None:
-        stderr = process.stderr.read()
     code = process.wait()
-    if code != 0 or result is None:
-        detail = stderr.strip().splitlines()
-        message = detail[-1] if detail else "Tách giọng Kim Vocal 2 thất bại."
-        if message.startswith("ERROR "):
-            message = message[6:]
-        raise JobError(message)
-    if not result["vocal"] or not result["instrumental"]:
-        raise JobError("Tách giọng không ghi đủ file vocal và instrumental.")
-    return result
+    drain.join()
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
+    return code, result, "".join(stderr_lines)

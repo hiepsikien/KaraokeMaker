@@ -92,8 +92,9 @@ export function AudioRestore({
       </div>
 
       <p className="text-sm leading-6 text-[var(--muted)]">
-        Kim Vocal 2 tách vocal và instrumental (overlap 25%, segment 512). Bản nhạc nền là instrumental cộng thêm
-        dải cao và dải thấp của file gốc. Vocal không được trộn vào.
+        Kim Vocal 2 tách vocal và instrumental (overlap 25%, segment 512). Bản nhạc nền là instrumental cộng dải
+        cao và dải thấp lấy từ file gốc, nên hơi giọng và tiếng trầm của vocal vẫn có thể lọt vào. Hạ volume hai
+        dải, hoặc đẩy cutoff cao lên và cutoff thấp xuống, nếu muốn bản không lời sạch hơn.
       </p>
 
       <div className="flex flex-wrap gap-2">

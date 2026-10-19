@@ -588,7 +588,10 @@ def align_lyrics(
 ) -> list[dict]:
     typed = extract_sung_lines(lyrics)
     if typed:
-        log(f"Lời đã nhập có {len(typed)} câu. Lần này không dùng để căn giờ; sẽ dùng khi sửa chính tả.")
+        log(
+            f"Lời đã nhập có {len(typed)} câu. "
+            "Chỗ khớp sẽ hiện lời này; đoạn chỉ nghe được sẽ được thêm như câu bổ sung."
+        )
     _log_model_cache(model_name, log)
     log(f"Đang tải model {model_name} ({device}).")
 
@@ -622,7 +625,7 @@ def align_lyrics(
         "no_speech_threshold": no_speech_threshold,
         "regroup": True,
     }
-    log("Đang nghe vocal bằng Whisper. Thời gian và chữ lấy đúng bản nghe được.")
+    log("Đang nghe vocal bằng Whisper để lấy mốc thời gian.")
     try:
         result = model.transcribe(str(vocal_path), **transcribe_options)
     except Exception as error:
@@ -643,7 +646,14 @@ def align_lyrics(
         words = _words_from_segment(segment)
         if words:
             heard_segments.append({"words": words})
-    matched = lines_from_transcript(heard_segments)
+    if typed:
+        matched = reconcile_lyrics_with_transcript(typed, heard_segments)
+        added = sum(1 for line in matched if line.get("supplemented"))
+        if added:
+            log(f"Đã thêm {added} câu Whisper nghe được nhưng không có trong lời đã nhập.")
+    else:
+        matched = lines_from_transcript(heard_segments)
+        log("Chưa có lời đã nhập, nên giữ nguyên chữ Whisper nghe được.")
 
     log(
         f"Căn xong. Câu đầu lúc {matched[0]['start']:.1f}s, "

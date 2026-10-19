@@ -851,6 +851,45 @@ class MixRestoreTests(unittest.TestCase):
             self.assertGreater(destination.stat().st_size, 44)
 
 
+class SeparateStreamTests(unittest.TestCase):
+    def test_stderr_flood_does_not_block_the_result_line(self):
+        import subprocess
+        import sys
+        import threading
+
+        from karaoke.separate_runner import _read_separation
+
+        script = (
+            "import sys\n"
+            "sys.stderr.write('x' * 200000)\n"
+            "sys.stderr.flush()\n"
+            "print('PROGRESS 0.5', flush=True)\n"
+            'print(\'RESULT {"vocal": "v", "instrumental": "i"}\', flush=True)\n'
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        holder: dict = {}
+
+        def run() -> None:
+            holder["value"] = _read_separation(process, None)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(5)
+        if worker.is_alive():
+            process.kill()
+            worker.join(2)
+            self.fail("Reading stdout stalled while stderr filled the pipe.")
+        code, result, stderr = holder["value"]
+        self.assertEqual(code, 0)
+        self.assertEqual(result, {"vocal": "v", "instrumental": "i"})
+        self.assertGreater(len(stderr), 100000)
+
+
 class WhisperOptionTests(unittest.TestCase):
     def test_large_is_allowed_and_retry_defaults_on(self):
         from karaoke.pipeline import whisper_options

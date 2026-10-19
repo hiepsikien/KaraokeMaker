@@ -4,7 +4,7 @@ KaraokeMaker căn lời vào file vocal, cho sửa thời gian từng chữ, r�
 
 Giao diện là ứng dụng web. Phần căn lời và dựng video chạy bằng Python. Ứng dụng viết cho macOS: hộp thoại chọn file dùng AppleScript, mở thư mục dùng Finder, chữ Việt dùng font Arial Unicode, và GPU căn lời là Apple MPS.
 
-Mã tách giọng của [Ultimate Vocal Remover GUI](https://github.com/anjok07/ultimatevocalremovergui) vẫn nằm trong repo này. Bước **Tách và trộn** gọi Kim Vocal 2 bằng môi trường `.venv` của UVR. Có thể bỏ qua bước đó nếu vocal và instrumental đã có sẵn.
+Mã tách giọng của [Ultimate Vocal Remover GUI](https://github.com/anjok07/ultimatevocalremovergui) vẫn nằm trong repo này. Bước **Tách và trộn** gọi Kim Vocal 2 bằng môi trường `.venv` của UVR. File model không nằm trong repo: tải [Kim_Vocal_2.onnx](https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx) vào `models/MDX_Net_Models/`. Thiếu file thì nút Tách báo không thấy model. Có thể bỏ qua bước đó nếu vocal và instrumental đã có sẵn.
 
 ## Chạy
 
@@ -51,7 +51,7 @@ Luồng gồm năm bước: **Khai báo → Tách và trộn → Ghép chữ →
 
 1. Trên màn hình đầu, chọn **Tạo dự án mới** hoặc **Mở dự án đã có** (file `.karaoke.json`; bản `timing.json` cũ vẫn mở được và sẽ được chuyển sang file dự án).
 2. Với dự án mới: nhập tên bài và tác giả, chọn audio gốc, dán lời, chọn ảnh, chọn thư mục xuất, rồi bấm **Tiếp tục tách và trộn**. Nếu đã có sẵn vocal và instrumental, có thể **Bỏ qua, căn lời với file đã có**.
-3. **Tách** chạy Kim Vocal 2 (overlap 25%, segment 512) trong môi trường `.venv` của UVR và ghi vocal cùng instrumental. Bản nhạc nền cộng instrumental với dải cao của file gốc (mặc định từ 8000 Hz, 50%) và dải thấp (mặc định dưới 120 Hz, 50%). Cutoff và volume sửa được. **Nghe thử** phát bản trộn trước khi **Xuất nhạc nền** (WAV, FLAC hoặc MP3). File xuất trở thành instrumental của video không lời. Đổi cutoff hoặc volume không chạy lại model. Sau đó bấm **Căn lời và vào biên tập**. Thiết bị tách giọng dùng lựa chọn CPU hoặc GPU Apple ở bước khai báo.
+3. **Tách** chạy Kim Vocal 2 (overlap 25%, segment 512) trong môi trường `.venv` của UVR và ghi vocal cùng instrumental. Cần file `models/MDX_Net_Models/Kim_Vocal_2.onnx`. Bản nhạc nền cộng instrumental với dải cao của file gốc (mặc định từ 8000 Hz, 50%) và dải thấp (mặc định dưới 120 Hz, 50%). Hai dải lấy từ bản gốc nên hơi giọng và tiếng trầm của vocal vẫn có thể lọt vào; hạ volume hoặc nới cutoff nếu muốn bản không lời sạch hơn. Cutoff và volume sửa được. **Nghe thử** và **Xuất nhạc nền** dựng file ngay trong request (WAV, FLAC hoặc MP3), nên bài dài sẽ đợi đến khi ffmpeg xong. File xuất trở thành instrumental của video không lời. Đổi cutoff hoặc volume không chạy lại model. Sau đó bấm **Căn lời và vào biên tập**. Thiết bị tách giọng dùng lựa chọn CPU hoặc GPU Apple ở bước khai báo.
 4. Khi căn xong, sửa trên timeline: sóng âm ở trên, câu hát ở dưới. Kéo cả câu để dời. Kéo mép để đổi chỗ bắt đầu và kết thúc. Bấm một câu để sửa từng chữ. **Phát** và **Tạm dừng** nằm trên timeline.
 5. **Thêm câu** chèn một câu mới sau câu đang chọn. **Chia câu** cắt câu đang chọn thành hai, tại chữ đang chọn hoặc tại vạch phát.
 6. **Lưu dự án** ghi file `.karaoke.json` (và `timing.json` kèm theo), không cần đợi xuất video.
@@ -74,7 +74,7 @@ Mười tám con người dưới cờ Lũng Nhai
 
 Chỉ dòng thứ ba được căn giờ và hiện trên video.
 
-Căn lời dùng file vocal. Trước khi chạy, chọn model Whisper (`tiny`, `base`, `small`, `medium`, `large-v2`, `large` — bản v3), thiết bị CPU hoặc GPU Apple, ngưỡng không-lời, và có thử lại khi câu bị lặp hay không. Máy chưa có model thì tải về lúc bắt đầu. Whisper nghe và ghi lại đúng chữ cùng thời gian nó nghe được. Lời đã nhập không tham gia lần căn này; lời đó để sửa chính tả sau.
+Căn lời dùng file vocal. Trước khi chạy, chọn model Whisper (`tiny`, `base`, `small`, `medium`, `large-v2`, `large` — bản v3), thiết bị CPU hoặc GPU Apple, ngưỡng không-lời, và có thử lại khi câu bị lặp hay không. Máy chưa có model thì tải về lúc bắt đầu. Whisper lấy mốc thời gian. Chỗ khớp với lời đã nhập thì chữ trên video là lời đó. Đoạn hát chỉ nghe được, không có trong lời, được thêm như câu bổ sung.
 
 Việc này chạy một lần trong lúc căn. Mở dự án đã có không căn lại, trừ khi bấm **Ghép chữ lại**. Vocal không phải WAV 16-bit, kể cả mp3 và flac, được chuyển tạm trước khi đo tiếng hát.
 
