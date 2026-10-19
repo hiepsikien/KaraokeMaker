@@ -29,13 +29,16 @@ def _words_from_segment(segment) -> list[dict]:
     return [_word_dict(text, segment.start, segment.end)]
 
 
-def _line_from_words(text: str, words: list[dict]) -> dict:
-    return {
+def _line_from_words(text: str, words: list[dict], uncertain: bool = False) -> dict:
+    line = {
         "text": text,
         "start": words[0]["start"],
         "end": words[-1]["end"],
         "words": words,
     }
+    if uncertain:
+        line["uncertain"] = True
+    return line
 
 
 _GAP_LIMIT = 1.5
@@ -91,8 +94,21 @@ def _match_lines(lines: list[str], timed_words: list[dict]) -> list[dict]:
             else:
                 words.append(_word_dict(token, 0.0, 0.12))
         if words:
-            matched.append(_line_from_words(line, words))
+            matched.append(_line_from_words(line, words, uncertain=True))
     return matched
+
+
+def _spread_tokens(tokens: list[str], start: float, end: float) -> list[dict]:
+    """Place the user's words evenly across the time Whisper gave the line."""
+    if not tokens:
+        return []
+    if end <= start:
+        end = start + 0.12 * len(tokens)
+    span = (end - start) / len(tokens)
+    return [
+        _word_dict(token, start + span * index, start + span * (index + 1))
+        for index, token in enumerate(tokens)
+    ]
 
 
 def _segments_match_lines(lines: list[str], segments) -> list[dict] | None:
@@ -102,6 +118,7 @@ def _segments_match_lines(lines: list[str], segments) -> list[dict] | None:
     for line, segment in zip(lines, segments):
         words = _words_from_segment(segment)
         tokens = line.split()
+        uncertain = False
         if len(words) == len(tokens) and all(
             normalize_token(word["text"]) == normalize_token(token)
             for word, token in zip(words, tokens)
@@ -115,9 +132,15 @@ def _segments_match_lines(lines: list[str], segments) -> list[dict] | None:
                 _word_dict(token, word["start"], word["end"])
                 for token, word in zip(tokens, words)
             ]
+            uncertain = True
+        else:
+            if not words:
+                return None
+            words = _spread_tokens(tokens, words[0]["start"], words[-1]["end"])
+            uncertain = True
         if not words:
             return None
-        matched.append(_line_from_words(line, words))
+        matched.append(_line_from_words(line, words, uncertain=uncertain))
     return matched
 
 
@@ -198,7 +221,7 @@ def align_lyrics(
     segments = list(result.segments or [])
     matched = _segments_match_lines(lines, segments)
     if matched is None:
-        log("Số đoạn căn được khác số câu hát, đang ghép theo từng chữ.")
+        log("Số đoạn căn được khác số câu hát. Đang ghép theo từng chữ, nên kiểm tra kỹ các câu được đánh dấu.")
         flat: list[dict] = []
         for segment in segments:
             flat.extend(_words_from_segment(segment))
@@ -213,10 +236,13 @@ def align_lyrics(
         words, count = repair_stretched_words(line["words"])
         moved += count
         if words:
-            repaired.append(_line_from_words(line["text"], words))
+            repaired.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
     matched = repaired
     if moved:
         log(f"Đã kéo {moved} chữ bị đặt vào khoảng nhạc về sát câu hát.")
+    unsure = [line["text"] for line in matched if line.get("uncertain")]
+    if unsure:
+        log(f"{len(unsure)} câu được ghép ước lượng. Trên trang sửa, những câu đó được đánh dấu để nghe lại.")
 
     log(
         f"Căn xong. Câu đầu lúc {matched[0]['start']:.1f}s, "

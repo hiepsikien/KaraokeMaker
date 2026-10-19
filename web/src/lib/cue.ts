@@ -1,3 +1,4 @@
+// Keep these in sync with karaoke/render.py (LONG_GAP, COUNTDOWN).
 export const LONG_GAP_SECONDS = 8;
 export const COUNTDOWN_SECONDS = 5;
 
@@ -11,6 +12,7 @@ export type TimedLine = {
   text: string;
   start: number;
   end: number;
+  uncertain?: boolean;
   words: TimedWord[];
 };
 

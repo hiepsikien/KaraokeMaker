@@ -9,13 +9,13 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
+from karaoke.access import audio_root
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 
 WIDTH = 1920
 HEIGHT = 1080
 STRIP_HEIGHT = 280
 FONT_PATH = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
-AUDIO_ROOT = Path("/Users/andynguyen/Downloads/Audio ")
 AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -204,7 +204,7 @@ def song_dirs_near(audio_path: Path) -> list[Path]:
         if cursor.parent == cursor:
             break
         cursor = cursor.parent
-    default = AUDIO_ROOT / "Songs"
+    default = audio_root() / "Songs"
     if default.is_dir() and default.resolve() not in {item.resolve() for item in found}:
         found.append(default)
     return found
@@ -213,7 +213,7 @@ def song_dirs_near(audio_path: Path) -> list[Path]:
 def find_stems(audio_path: Path) -> tuple[Path | None, Path | None]:
     key = song_key_from_stem(audio_path.name)
     pairs: dict[Path, dict[str, Path]] = {}
-    root = AUDIO_ROOT / "Separated"
+    root = audio_root() / "Separated"
     if not root.is_dir():
         return None, None
     for candidate in root.rglob("*"):

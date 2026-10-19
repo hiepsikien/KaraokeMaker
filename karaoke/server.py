@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -10,8 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from karaoke.access import AccessError, audio_root, ensure_allowed, grant
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
-from karaoke.media import AUDIO_ROOT, IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
+from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
 from karaoke.pipeline import JobError, align_job, prepare_job, render_job
 
 app = FastAPI(title="KaraokeMaker")
@@ -24,6 +26,8 @@ app.add_middleware(
 
 _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
+_JOB_LIMIT = 12
+_JOB_TTL_SECONDS = 6 * 60 * 60
 
 
 class BrowseRequest(BaseModel):
@@ -71,6 +75,7 @@ class LineIn(BaseModel):
     text: str = ""
     start: float = 0
     end: float = 0
+    uncertain: bool = False
     words: list[WordIn] = Field(default_factory=list)
 
 
@@ -108,19 +113,42 @@ def _run_osascript(script: str) -> str:
 def _default_dir(kind: str, requested: str) -> str:
     if requested and Path(requested).expanduser().is_dir():
         return str(Path(requested).expanduser())
-    songs = AUDIO_ROOT / "Songs"
-    separated = AUDIO_ROOT / "Separated" / "Kim2"
+    root = audio_root()
+    songs = root / "Songs"
+    separated = root / "Separated" / "Kim2"
     if kind == "original" and songs.is_dir():
         return str(songs)
     if kind in {"vocal", "instrumental"} and separated.is_dir():
         return str(separated)
     if kind == "output":
-        karaoke = AUDIO_ROOT / "Karaoke"
-        if AUDIO_ROOT.is_dir():
-            return str(karaoke if karaoke.is_dir() else AUDIO_ROOT)
-    if AUDIO_ROOT.is_dir():
-        return str(AUDIO_ROOT)
+        karaoke = root / "Karaoke"
+        if root.is_dir():
+            return str(karaoke if karaoke.is_dir() else root)
+    if root.is_dir():
+        return str(root)
     return str(Path.home())
+
+
+def _prune_jobs() -> None:
+    now = time.time()
+    stale = [
+        job_id
+        for job_id, record in _jobs.items()
+        if record["status"] in {"done", "error"} and now - record["created"] > _JOB_TTL_SECONDS
+    ]
+    for job_id in stale:
+        _jobs.pop(job_id, None)
+    if len(_jobs) <= _JOB_LIMIT:
+        return
+    finished = sorted(
+        (record["created"], job_id)
+        for job_id, record in _jobs.items()
+        if record["status"] in {"done", "error"}
+    )
+    for _created, job_id in finished:
+        if len(_jobs) <= _JOB_LIMIT:
+            break
+        _jobs.pop(job_id, None)
 
 
 def _browse_script(kind: str, directory: str) -> str:
@@ -160,9 +188,15 @@ def health():
 
 @app.get("/api/defaults")
 def defaults():
-    songs = AUDIO_ROOT / "Songs"
-    separated = AUDIO_ROOT / "Separated" / "Kim2"
-    output = AUDIO_ROOT / "Karaoke" if AUDIO_ROOT.is_dir() else Path.home() / "Karaoke"
+    root = audio_root()
+    songs = root / "Songs"
+    separated = root / "Separated" / "Kim2"
+    output = root / "Karaoke" if root.is_dir() else Path.home() / "Karaoke"
+    try:
+        output.mkdir(parents=True, exist_ok=True)
+        grant(output)
+    except OSError:
+        pass
     return {
         "songs_dir": str(songs) if songs.is_dir() else "",
         "separated_dir": str(separated) if separated.is_dir() else "",
@@ -177,12 +211,21 @@ def browse(body: BrowseRequest):
     paths = [line.strip() for line in raw.splitlines() if line.strip()]
     if body.kind != "images" and len(paths) > 1:
         paths = paths[:1]
+    for item in paths:
+        grant(Path(item))
     return {"paths": paths}
+
+
+def _reject_closed(path: Path) -> Path:
+    try:
+        return ensure_allowed(path)
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
 
 
 @app.post("/api/match")
 def match_audio(body: MatchRequest):
-    path = Path(body.path).expanduser()
+    path = _reject_closed(Path(body.path))
     if not path.is_file():
         raise HTTPException(status_code=400, detail="Không thấy file vừa chọn.")
     vocal = ""
@@ -218,7 +261,21 @@ def match_audio(body: MatchRequest):
 def inspect_images(body: ImageInspectRequest):
     facts = []
     for raw in body.paths[:24]:
-        path = Path(raw).expanduser()
+        try:
+            path = ensure_allowed(Path(raw))
+        except AccessError:
+            facts.append(
+                {
+                    "path": raw,
+                    "width": 0,
+                    "height": 0,
+                    "ratio": "",
+                    "fits_frame": False,
+                    "note": "Ảnh nằm ngoài thư mục được phép. Hãy chọn lại bằng hộp thoại.",
+                    "thumbnail": "",
+                }
+            )
+            continue
         if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
             facts.append(
                 {
@@ -267,6 +324,7 @@ def create_job(body: CreateJobRequest):
     record = {
         "id": job_id,
         "status": "running",
+        "created": time.time(),
         "log": ["Bắt đầu căn lời."],
         "error": "",
         "outputs": None,
@@ -275,6 +333,7 @@ def create_job(body: CreateJobRequest):
         "prepared": None,
     }
     with _lock:
+        _prune_jobs()
         _jobs[job_id] = record
 
     def log(message: str) -> None:
@@ -319,7 +378,7 @@ def job_audio(job_id: str):
         record = _jobs.get(job_id)
         if record is None or not record.get("prepared"):
             raise HTTPException(status_code=404, detail="Chưa có audio để nghe thử.")
-        path = Path(record["prepared"]["vocal_audio"])
+        path = _reject_closed(Path(record["prepared"]["vocal_audio"]))
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Không thấy file vocal.")
     media_type = _AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream")
@@ -367,7 +426,7 @@ def start_render(job_id: str, body: RenderRequest):
 
 @app.post("/api/reveal")
 def reveal(body: RevealRequest):
-    path = Path(body.path).expanduser()
+    path = _reject_closed(Path(body.path))
     if not path.exists():
         raise HTTPException(status_code=404, detail="Không thấy file để mở.")
     subprocess.run(["open", "-R", str(path)], check=False)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from karaoke.access import AccessError, ensure_allowed, grant
 from karaoke.align import AlignError, align_lyrics
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import (
@@ -25,7 +26,10 @@ def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
         raise JobError(f"Không thấy {label}: {path}")
     if path.suffix.lower() not in suffixes:
         raise JobError(f"{label} không phải định dạng hỗ trợ: {path.name}")
-    return path
+    try:
+        return ensure_allowed(path)
+    except AccessError as error:
+        raise JobError(str(error)) from error
 
 
 def normalize_edited_lines(lines: list[dict]) -> list[dict]:
@@ -49,14 +53,15 @@ def normalize_edited_lines(lines: list[dict]) -> list[dict]:
         if not words:
             continue
         words.sort(key=lambda item: item["start"])
-        cleaned.append(
-            {
-                "text": " ".join(word["text"] for word in words),
-                "start": words[0]["start"],
-                "end": words[-1]["end"],
-                "words": words,
-            }
-        )
+        cleaned_line = {
+            "text": " ".join(word["text"] for word in words),
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
+            "words": words,
+        }
+        if line.get("uncertain"):
+            cleaned_line["uncertain"] = True
+        cleaned.append(cleaned_line)
     if not cleaned:
         raise JobError("Không còn chữ nào để xuất.")
     return cleaned
@@ -93,7 +98,12 @@ def prepare_job(payload: dict, log) -> dict:
     output_dir = Path(str(payload.get("output_dir", "")).strip()).expanduser()
     if not str(output_dir):
         raise JobError("Hãy chọn thư mục xuất.")
+    try:
+        output_dir = ensure_allowed(output_dir)
+    except AccessError as error:
+        raise JobError(str(error)) from error
     output_dir.mkdir(parents=True, exist_ok=True)
+    grant(output_dir)
 
     try:
         cover_duration = float(payload.get("cover_duration", 5))
@@ -154,8 +164,8 @@ def align_job(prepared: dict, log) -> list[dict]:
             prepared["device"],
             log,
         )
-    except AlignError:
-        raise
+    except AlignError as error:
+        raise JobError(str(error)) from error
     except Exception as error:
         raise JobError(f"Căn lời thất bại: {error}") from error
 

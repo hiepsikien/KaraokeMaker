@@ -4,9 +4,11 @@ KaraokeMaker ghép một bài hát đã tách giọng thành hai video karaoke: 
 
 Giao diện là ứng dụng Next.js. Phần căn lời và dựng video chạy bằng Python, vì cần Whisper và FFmpeg.
 
+KaraokeMaker chạy trên macOS. Hộp thoại chọn file dùng AppleScript, nút mở thư mục dùng Finder, chữ Việt dùng font Arial Unicode của hệ thống, và GPU căn lời là Apple MPS. Bản này không dành cho Windows hay Linux.
+
 ## Chạy
 
-Cần hai terminal, cùng thư mục gốc của repo.
+Cần hai terminal, cùng thư mục gốc của repo. API chỉ nghe `127.0.0.1:8765`. Không đưa port 8765 hay 3000 ra mạng: API đọc file trong thư mục nhạc và các thư mục bạn đã chọn trong phiên này.
 
 ```bash
 .venv-karaoke/bin/python -m karaoke
@@ -17,17 +19,27 @@ cd web
 npm run dev
 ```
 
-Mở http://127.0.0.1:3000. API Python lắng nghe ở http://127.0.0.1:8765. Next.js chuyển các đường dẫn `/api/*` sang API đó.
+Mở http://127.0.0.1:3000. Next.js chuyển các đường dẫn `/api/*` sang API đó, kể cả file vocal dùng để nghe thử.
 
 Nếu chưa có môi trường Python:
 
 ```bash
-~/.pyenv/versions/3.11.15/bin/python3 -m venv .venv-karaoke
+python3 -m venv .venv-karaoke
 .venv-karaoke/bin/python -m pip install -r requirements-karaoke.txt
+ffmpeg -version
+ffprobe -version
 cd web && npm install
 ```
 
-Python này phải là bản pyenv đã được dựng với Tk không bắt buộc cho KaraokeMaker, nhưng phải là Python 3.11 đang dùng trong repo. FFmpeg và ffprobe cần có trong `PATH`.
+`requirements-karaoke.txt` gồm `stable-ts`, `torch`, Pillow, FastAPI và Uvicorn. `torch` là bản chạy Whisper, kể cả trên GPU Apple. Lần cài đầu có thể mất vài phút vì gói này lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
+
+Thư mục nhạc mặc định là `~/Downloads/Audio` nếu thư mục đó tồn tại (kể cả tên có một dấu cách ở cuối). Đổi bằng biến môi trường:
+
+```bash
+export KARAOKE_AUDIO_ROOT="$HOME/Music/Karaoke"
+```
+
+`KARAOKE_ALLOWED_ROOTS` là danh sách thư mục thêm, ngăn cách bằng dấu `:` . File nằm ngoài các thư mục này và ngoài thư mục bạn vừa chọn trong hộp thoại sẽ bị từ chối.
 
 Môi trường `.venv` của UVR và `.venv-karaoke` tách riêng. UVR khóa `numpy` 1.23.5, còn thư viện căn lời cần bản mới hơn.
 
@@ -43,11 +55,7 @@ Môi trường `.venv` của UVR và `.venv-karaoke` tách riêng. UVR khóa `nu
 
 Chọn file vocal hoặc instrumental dạng `1_Tên bài_(Vocals).wav` thì ứng dụng tự điền file còn lại trong cùng thư mục, và tìm bài gốc cùng tên trong thư mục `Songs`. Chọn thẳng bài gốc thì ứng dụng lấy cặp vocal và instrumental mới nhất trong `Separated`.
 
-Hộp thoại chọn file mở sẵn các thư mục này nếu chúng còn tồn tại:
-
-- `/Users/andynguyen/Downloads/Audio /Songs`
-- `/Users/andynguyen/Downloads/Audio /Separated/Kim2`
-- `/Users/andynguyen/Downloads/Audio /Karaoke`
+Hộp thoại chọn file mở sẵn `Songs`, `Separated/Kim2` và `Karaoke` bên trong thư mục nhạc, nếu các thư mục đó còn tồn tại.
 
 ## Lời bài hát
 
@@ -79,7 +87,8 @@ Câu hát nằm ở cuối khung hình. Chữ chưa hát màu trắng, chữ đa
 
 ```text
 karaoke/
-  server.py      # API cho giao diện
+  access.py      # thư mục được phép đọc
+  server.py      # API cho giao diện, chỉ trên 127.0.0.1
   pipeline.py    # kiểm tra file, căn lời, rồi xuất khi người dùng xác nhận
   align.py       # căn lyrics lên vocal.wav, kéo chữ bị đẩy sang khoảng nhạc
   lyrics.py      # bỏ dòng ghi chú, so khớp tên bài

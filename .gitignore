@@ -1,3 +1,4 @@
+# Local KaraokeMaker and Python caches. UVR model files stay untracked only when they are not already in git.
 .venv/
 .venv-karaoke/
 web/node_modules/

@@ -115,14 +115,15 @@ export function MakerForm() {
 
   useEffect(() => {
     if (!job || (job.status !== "running" && job.status !== "rendering")) return;
+    const jobId = job.id;
     const timer = setInterval(async () => {
-      const response = await fetch(`/api/jobs/${job.id}`);
+      const response = await fetch(`/api/jobs/${jobId}`);
       if (!response.ok) return;
       const next = (await response.json()) as Job;
       setJob(next);
     }, 1000);
     return () => clearInterval(timer);
-  }, [job]);
+  }, [job?.id, job?.status]);
 
   async function browse(kind: BrowseKind) {
     setNotice("");

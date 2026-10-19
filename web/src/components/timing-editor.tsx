@@ -69,15 +69,23 @@ function WordTrack({
     const origin = event.clientX;
     const duration = Math.max(0.08, line.words[index].end - line.words[index].start);
     const start0 = line.words[index].start;
-    let words = line.words.map((word) => ({ ...word }));
+    const neighbors = line.words.map((word) => ({ ...word }));
+    let words = neighbors.map((word) => ({ ...word }));
     let dragged = false;
     event.currentTarget.setPointerCapture(event.pointerId);
     const move = (ev: PointerEvent) => {
       const delta = ev.clientX - origin;
       if (Math.abs(delta) > 4) dragged = true;
-      const nextStart = Math.max(0, start0 + (delta / width) * span);
+      const previousEnd = index > 0 ? neighbors[index - 1].end : 0;
+      const nextLimit = index + 1 < neighbors.length ? neighbors[index + 1].start : Number.POSITIVE_INFINITY;
+      let nextStart = Math.max(0, start0 + (delta / width) * span);
+      if (nextLimit > previousEnd) {
+        nextStart = Math.min(Math.max(nextStart, previousEnd), Math.max(previousEnd, nextLimit - 0.08));
+      }
+      let nextEnd = nextStart + duration;
+      if (nextEnd > nextLimit) nextEnd = nextLimit;
       words = words.map((word, wordIndex) =>
-        wordIndex === index ? { ...word, start: nextStart, end: nextStart + duration } : word,
+        wordIndex === index ? { ...word, start: nextStart, end: nextEnd } : word,
       );
       onChange(words);
     };
@@ -223,7 +231,7 @@ export function TimingEditor({
             <p className="text-sm text-[var(--muted)]">Đoạn nhạc, chưa tới câu hát</p>
           )}
         </div>
-        <audio ref={audioRef} className="mt-4 w-full" controls src={`http://127.0.0.1:8765/api/jobs/${jobId}/audio`} />
+        <audio ref={audioRef} className="mt-4 w-full" controls src={`/api/jobs/${jobId}/audio`} />
         <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
           Nghe vocal để đối chiếu. Kéo ô chữ trên thước thời gian để đổi lúc chữ được tô vàng. Câu sau một đoạn nhạc từ 8 giây sẽ hiện trước kèm số đếm 5, 4, 3, 2, 1.
         </p>
@@ -232,6 +240,11 @@ export function TimingEditor({
       <section className="space-y-4">
         {lines.map((line, lineIndex) => (
           <article key={lineIndex} className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5">
+            {line.uncertain && (
+              <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
+                Câu này được ghép ước lượng. Hãy nghe và kéo lại từng chữ.
+              </p>
+            )}
             <div className="mb-3 flex items-center justify-between gap-3 text-xs text-[var(--muted)]">
               <span>
                 Câu {lineIndex + 1} · {formatSeconds(line.start)} – {formatSeconds(line.end)}

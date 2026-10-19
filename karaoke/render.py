@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -20,6 +21,7 @@ from karaoke.media import (
 )
 
 TEXT_FPS = 12
+# Keep these in sync with web/src/lib/cue.ts (LONG_GAP_SECONDS, COUNTDOWN_SECONDS).
 LONG_GAP = 8.0
 COUNTDOWN = 5.0
 
@@ -160,27 +162,83 @@ def _draw_countdown(layout: dict, number: int) -> Image.Image:
     return strip
 
 
-def _write_text_frames(lines: list[dict], total_duration: float, cover_duration: float, folder: Path, log) -> int:
-    folder.mkdir(parents=True, exist_ok=True)
+def _frame_at(layouts: list[dict], song_time: float, blank: Image.Image) -> Image.Image:
+    if song_time < 0:
+        return blank
+    mode, layout, number = cue_at(layouts, song_time)
+    if mode == "sing" and layout is not None:
+        return _draw_strip(layout, song_time)
+    if mode == "countdown" and layout is not None:
+        return _draw_countdown(layout, number)
+    return blank
+
+
+def _overlay_text(lines: list[dict], total_duration: float, cover_duration: float, slideshow: Path, destination: Path, log) -> None:
+    """Stream lyric frames into FFmpeg. Nothing is written as a PNG sequence."""
     layouts = [_render_text_pair(line) for line in lines]
     frame_count = max(1, int(round(total_duration * TEXT_FPS)))
-    for index in range(frame_count):
-        timestamp = index / TEXT_FPS
-        song_time = timestamp - cover_duration
-        if song_time < 0:
-            frame = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
-        else:
-            mode, layout, number = cue_at(layouts, song_time)
-            if mode == "sing" and layout is not None:
-                frame = _draw_strip(layout, song_time)
-            elif mode == "countdown" and layout is not None:
-                frame = _draw_countdown(layout, number)
-            else:
-                frame = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
-        frame.save(folder / f"{index:05d}.png", compress_level=1)
-        if index % 96 == 0:
-            log(f"Vẽ chữ karaoke {index + 1}/{frame_count}.")
-    return frame_count
+    blank = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(slideshow),
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "rgba",
+        "-video_size",
+        f"{WIDTH}x{STRIP_HEIGHT}",
+        "-framerate",
+        str(TEXT_FPS),
+        "-i",
+        "pipe:0",
+        "-filter_complex",
+        "[1:v]fps=30,format=rgba[text];[0:v][text]overlay=0:main_h-overlay_h:format=auto:shortest=1,format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(destination),
+    ]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    tail: list[str] = []
+
+    def read_output() -> None:
+        for line in process.stdout:
+            text = line.decode("utf-8", "replace").strip()
+            if text:
+                tail.append(text)
+
+    reader = threading.Thread(target=read_output)
+    reader.start()
+    try:
+        for index in range(frame_count):
+            song_time = index / TEXT_FPS - cover_duration
+            frame = _frame_at(layouts, song_time, blank)
+            process.stdin.write(frame.tobytes())
+            if index % 96 == 0:
+                log(f"Vẽ chữ karaoke {index + 1}/{frame_count}.")
+    except BrokenPipeError:
+        pass
+    finally:
+        process.stdin.close()
+    reader.join()
+    code = process.wait()
+    if code != 0:
+        raise MediaError(tail[-1] if tail else "FFmpeg dừng với lỗi.")
 
 
 def _mux(video: Path, audio: Path, destination: Path, cover_duration: float, log, label: str) -> None:
@@ -241,9 +299,7 @@ def render_videos(
     if work.exists():
         shutil.rmtree(work)
     slides = work / "slides"
-    frames = work / "frames"
     slides.mkdir(parents=True)
-    frames.mkdir(parents=True)
 
     try:
         log("Đang dựng trang bìa.")
@@ -291,35 +347,9 @@ def render_videos(
         ]
         _run(slide_command, log)
 
-        log("Đang vẽ chữ chạy theo nhạc.")
-        _write_text_frames(lines, total, cover_duration, frames, log)
         silent = work / "picture.mp4"
-        log("Đang ghép chữ lên hình.")
-        _run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(slideshow),
-                "-framerate",
-                str(TEXT_FPS),
-                "-i",
-                str(frames / "%05d.png"),
-                "-filter_complex",
-                "[1:v]fps=30,format=rgba[text];[0:v][text]overlay=0:main_h-overlay_h:format=auto:shortest=1,format=yuv420p",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-an",
-                "-movflags",
-                "+faststart",
-                str(silent),
-            ],
-            log,
-        )
+        log("Đang vẽ chữ và ghép lên hình.")
+        _overlay_text(lines, total, cover_duration, slideshow, silent, log)
 
         vocal_out = output_dir / vocal_name
         instrumental_out = output_dir / instrumental_name
