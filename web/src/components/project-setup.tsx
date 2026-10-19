@@ -3,19 +3,12 @@
 import { useMemo, type FormEvent } from "react";
 
 import { ImageCards } from "@/components/image-cards";
-import type { ProjectFields } from "@/lib/types";
+import { sungCount, type ProjectFields } from "@/lib/types";
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output";
 
 const fieldClass =
   "w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none transition focus:border-[var(--gold)]";
-
-function sungCount(lyrics: string) {
-  return lyrics
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && !(line.startsWith("[") && line.endsWith("]"))).length;
-}
 
 function PathField({
   label,
@@ -249,7 +242,9 @@ export function ProjectSetup({
             onBrowse={() => onBrowse("output")}
           />
           {fields.project_path && (
-            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">File dự án: {fields.project_path}</p>
+            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+              File dự án hiện tại: {fields.project_path}. Đổi tên bài hoặc thư mục xuất rồi lưu sẽ ghi sang file mới (tên/thư mục mới) và gỡ bản cũ.
+            </p>
           )}
         </div>
 

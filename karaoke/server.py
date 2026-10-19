@@ -57,25 +57,6 @@ class MatchRequest(BaseModel):
     path: str
 
 
-class CreateJobRequest(BaseModel):
-    title: str = ""
-    artist: str = ""
-    cover_line: str = ""
-    original_audio: str = ""
-    vocal_audio: str = ""
-    instrumental_audio: str = ""
-    lyrics: str = ""
-    background_images: list[str] = Field(default_factory=list)
-    cover_image: str = ""
-    output_dir: str = ""
-    cover_duration: float = 5
-    image_duration: float = 8
-    language: str = "vi"
-    model_name: str = "small"
-    device: str = "cpu"
-    project_path: str = ""
-
-
 class ProjectFieldsRequest(BaseModel):
     title: str = ""
     artist: str = ""
@@ -93,6 +74,9 @@ class ProjectFieldsRequest(BaseModel):
     model_name: str = "small"
     device: str = "cpu"
     project_path: str = ""
+
+
+CreateJobRequest = ProjectFieldsRequest
 
 
 class OpenProjectRequest(BaseModel):
@@ -234,6 +218,11 @@ repeat with itemRef in picked
 end repeat
 return output
 '''
+    if kind == "project":
+        return f'''
+set picked to choose file with prompt "{prompt}" of type {{"public.json", "JSON"}} default location POSIX file "{location}"
+return POSIX path of picked
+'''
     return f'''
 set picked to choose file with prompt "{prompt}" default location POSIX file "{location}"
 return POSIX path of picked
@@ -263,6 +252,11 @@ def defaults():
     }
 
 
+def _is_openable_project(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".karaoke.json") or name.endswith(".karaoke") or name.endswith(" timing.json")
+
+
 @app.post("/api/browse")
 def browse(body: BrowseRequest):
     directory = _default_dir(body.kind, body.initial_dir)
@@ -270,6 +264,13 @@ def browse(body: BrowseRequest):
     paths = [line.strip() for line in raw.splitlines() if line.strip()]
     if body.kind != "images" and len(paths) > 1:
         paths = paths[:1]
+    if body.kind == "project" and paths:
+        path = Path(paths[0])
+        if not _is_openable_project(path):
+            raise HTTPException(
+                status_code=400,
+                detail="Hãy chọn file .karaoke.json hoặc file … timing.json.",
+            )
     for item in paths:
         grant(Path(item))
     return {"paths": paths}

@@ -11,6 +11,7 @@ import {
   emptyFields,
   fieldsFromProject,
   fieldsPayload,
+  sungCount,
   type Job,
   type Phase,
   type Project,
@@ -68,10 +69,10 @@ export function MakerForm() {
         if (next.project) setFields(fieldsFromProject(next.project));
       }
       if (next.status === "done") setPhase("edit");
-      if (next.status === "error" && phase === "align") setPhase("setup");
+      // Keep phase "align" on error so the Ghép chữ screen can show job.error.
     }, 1000);
     return () => clearInterval(timer);
-  }, [job?.id, job?.status, phase]);
+  }, [job?.id, job?.status]);
 
   async function browse(kind: BrowseKind) {
     setNotice("");
@@ -288,13 +289,6 @@ export function MakerForm() {
     } catch {
       setNotice("Không gửi được lệnh xuất video. Server Python chưa chạy.");
     }
-  }
-
-  function sungCount(lyrics: string) {
-    return lyrics
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !(line.startsWith("[") && line.endsWith("]"))).length;
   }
 
   return (

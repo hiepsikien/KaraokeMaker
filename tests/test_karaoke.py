@@ -423,6 +423,79 @@ class ProjectFileTests(unittest.TestCase):
             self.assertEqual(path.name, "Bài.karaoke.json")
             self.assertEqual(prepared["project_path"], str(path))
 
+    def test_sync_moves_project_when_title_or_output_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            other = root / "other"
+            other.mkdir()
+            grant(root)
+            prepared = {
+                "title": "Cũ",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            old = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            self.assertTrue(old.is_file())
+            prepared["title"] = "Mới"
+            prepared["output_dir"] = str(other)
+            new = sync_project_file(prepared, status="aligned")
+            self.assertEqual(new.name, "Mới.karaoke.json")
+            self.assertEqual(new.parent.resolve(), other.resolve())
+            self.assertFalse(old.exists())
+            loaded, _ = load_project(new)
+            self.assertEqual(loaded["title"], "Mới")
+            self.assertEqual(loaded["lines"][0]["text"], "một")
+
+    def test_sync_keeps_exported_status_when_saving_timing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            prepared = {
+                "title": "Xong",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            path = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="exported",
+                outputs={"directory": str(root), "vocal": "a.mp4", "instrumental": "b.mp4"},
+            )
+            again = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.3}]}],
+                status="aligned",
+            )
+            loaded, _ = load_project(again)
+            self.assertEqual(path, again)
+            self.assertEqual(loaded["status"], "exported")
+
 
 if __name__ == "__main__":
     unittest.main()

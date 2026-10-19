@@ -16,7 +16,6 @@ def _normalize_lines(lines: list[dict]) -> list[dict]:
 
 PROJECT_VERSION = 1
 PROJECT_SUFFIX = ".karaoke.json"
-LEGACY_TIMING_SUFFIX = " timing.json"
 STATUSES = frozenset({"draft", "aligned", "exported"})
 
 
@@ -175,10 +174,6 @@ def load_project(path: Path) -> tuple[dict, Path]:
     if not isinstance(payload, dict):
         raise JobError("File dự án không đúng định dạng.")
 
-    if "lines" in payload and isinstance(payload.get("lines"), list) and "version" not in payload:
-        # Object that is not a project but somehow wraps lines — treat fields if present.
-        pass
-
     lines = payload.get("lines")
     if lines is None and isinstance(payload.get("timing"), list):
         lines = payload["timing"]
@@ -203,14 +198,16 @@ def load_project(path: Path) -> tuple[dict, Path]:
 
 
 def resolve_project_path(payload: dict, prepared: dict | None = None) -> Path:
-    stored = str((prepared or {}).get("project_path") or payload.get("project_path") or "").strip()
+    """Preferred path from current title + output_dir; fall back to stored project_path."""
+    data = {**(prepared or {}), **payload}
+    output_dir = str(data.get("output_dir") or "").strip()
+    title = str(data.get("title") or "").strip()
+    if output_dir and title:
+        return project_path_for(output_dir, title)
+    stored = str(data.get("project_path") or "").strip()
     if stored:
         return Path(stored)
-    output_dir = str((prepared or payload).get("output_dir") or "").strip()
-    title = str((prepared or payload).get("title") or "").strip()
-    if not output_dir or not title:
-        raise JobError("Chưa biết nơi lưu file dự án.")
-    return project_path_for(output_dir, title)
+    raise JobError("Chưa biết nơi lưu file dự án.")
 
 
 def prepared_from_project(project: dict) -> dict:
@@ -247,25 +244,50 @@ def sync_project_file(
     status: str | None = None,
     outputs: dict | None = None,
 ) -> Path:
-    """Write/update the project file from the current prepared session."""
-    path = resolve_project_path({}, prepared)
+    """Write/update the project file from the current prepared session.
+
+    When title or output_dir change, writes to the new path and removes the old file.
+    """
+    desired = resolve_project_path({}, prepared)
+    stored = str(prepared.get("project_path") or "").strip()
+    previous = Path(stored) if stored else None
     existing: dict = {}
-    if path.is_file():
+    source: Path | None = None
+    for candidate in (previous, desired):
+        if candidate is None or not candidate.is_file():
+            continue
         try:
-            existing, _ = load_project(path)
+            existing, source = load_project(candidate)
+            break
         except JobError:
             existing = {}
+            source = candidate
+            break
     payload = {**existing, **prepared}
     if lines is not None:
         payload["lines"] = lines
     elif existing.get("lines"):
         payload["lines"] = existing["lines"]
-    next_status = status or existing.get("status") or ("aligned" if payload.get("lines") else "draft")
+    if status is None:
+        next_status = existing.get("status") or ("aligned" if payload.get("lines") else "draft")
+    elif status == "aligned" and existing.get("status") == "exported":
+        # Saving timing after export should not downgrade the project status.
+        next_status = "exported"
+    else:
+        next_status = status
+    if next_status not in STATUSES:
+        next_status = "draft"
     project = project_from_fields(payload, lines=payload.get("lines"), status=next_status)
     if outputs is not None:
         project["outputs"] = outputs
     elif existing.get("outputs"):
         project["outputs"] = existing["outputs"]
-    saved = save_project(path, project)
+    saved = save_project(desired, project)
+    if source is not None:
+        try:
+            if source.resolve() != saved.resolve() and source.is_file():
+                source.unlink()
+        except OSError:
+            pass
     prepared["project_path"] = str(saved)
     return saved

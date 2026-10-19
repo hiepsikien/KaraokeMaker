@@ -2,6 +2,13 @@ import type { TimedLine } from "@/lib/cue";
 
 export type Phase = "home" | "setup" | "align" | "edit" | "export";
 
+export function sungCount(lyrics: string) {
+  return lyrics
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !(line.startsWith("[") && line.endsWith("]"))).length;
+}
+
 export type Outputs = {
   directory: string;
   vocal: string;
