@@ -13,6 +13,7 @@ export type TimedLine = {
   start: number;
   end: number;
   uncertain?: boolean;
+  supplemented?: boolean;
   words: TimedWord[];
 };
 

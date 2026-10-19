@@ -11,6 +11,7 @@ from unittest.mock import patch
 from karaoke.access import AccessError, audio_root, clear_grants, ensure_allowed, grant
 from karaoke.align import (
     _segments_match_lines,
+    reconcile_lyrics_with_transcript,
     _vocal_rms,
     fit_lines_to_voice,
     loosen_against_next_line,
@@ -241,6 +242,81 @@ class SegmentMatchTests(unittest.TestCase):
         self.assertEqual([word["text"] for word in matched[0]["words"]], ["một", "hai"])
         self.assertEqual(matched[0]["words"][0]["start"], 1.0)
         self.assertEqual(matched[0]["words"][1]["end"], 1.8)
+
+
+class TranscriptReconcileTests(unittest.TestCase):
+    def test_keeps_the_verse_at_the_heard_minute_after_a_long_intro(self):
+        lyrics = ["Màn sương buông vương lối phố rêu phong"]
+        early = [
+            {"text": word, "start": 8 + index * 0.4, "end": 8.3 + index * 0.4}
+            for index, word in enumerate("la la la".split())
+        ]
+        heard = "man suong buong vuong loi pho reu phong".split()
+        verse = [
+            {"text": word, "start": 2880 + index * 0.4, "end": 2880.35 + index * 0.4}
+            for index, word in enumerate(heard)
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": early}, {"words": verse}])
+        lyric = next(line for line in matched if not line.get("supplemented"))
+        self.assertGreater(lyric["start"], 2800)
+        self.assertEqual(lyric["words"][0]["text"], "Màn")
+        self.assertTrue(all(line.get("supplemented") for line in matched if line["start"] < 100))
+
+    def test_adds_a_heard_ending_the_lyrics_omitted(self):
+        lyrics = ["Màn sương buông"]
+        lead = [
+            {"text": "màn", "start": 10, "end": 10.4},
+            {"text": "sương", "start": 10.4, "end": 10.8},
+            {"text": "buông", "start": 10.8, "end": 11.2},
+        ]
+        ending = [
+            {"text": "hát", "start": 40, "end": 40.4},
+            {"text": "bè", "start": 40.4, "end": 40.9},
+            {"text": "cuối", "start": 40.9, "end": 41.4},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": lead}, {"words": ending}])
+        added = [line for line in matched if line.get("supplemented")]
+        self.assertEqual([line["text"] for line in added], ["hát bè cuối"])
+        self.assertGreater(added[0]["start"], 30)
+        self.assertEqual(matched[0]["words"][0]["text"], "Màn")
+        self.assertEqual(matched[0]["start"], 10)
+
+    def test_puts_an_unmatched_lyric_just_before_the_next_heard_line(self):
+        lyrics = ["câu chưa nghe thấy gì cả", "Màn sương buông"]
+        lead = [
+            {"text": "màn", "start": 2880, "end": 2880.4},
+            {"text": "sương", "start": 2880.4, "end": 2880.8},
+            {"text": "buông", "start": 2880.8, "end": 2881.2},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": lead}])
+        self.assertEqual(matched[0]["text"], lyrics[0])
+        self.assertTrue(matched[0]["uncertain"])
+        self.assertGreater(matched[0]["start"], 2870)
+        self.assertLess(matched[0]["end"], matched[1]["start"])
+
+    def test_repeated_lines_take_successive_hearings(self):
+        lyrics = ["Màn sương buông", "Màn sương buông"]
+
+        def phrase(start):
+            return [
+                {"text": "màn", "start": start, "end": start + 0.4},
+                {"text": "sương", "start": start + 0.4, "end": start + 0.8},
+                {"text": "buông", "start": start + 0.8, "end": start + 1.2},
+            ]
+
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": phrase(100)}, {"words": phrase(200)}])
+        sung = [line for line in matched if not line.get("supplemented")]
+        self.assertEqual(sung[0]["start"], 100)
+        self.assertEqual(sung[1]["start"], 200)
+
+    def test_rejects_lyrics_that_match_nothing_that_was_heard(self):
+        from karaoke.align import AlignError
+
+        with self.assertRaises(AlignError):
+            reconcile_lyrics_with_transcript(
+                ["hoàn toàn khác biệt"],
+                [{"words": [{"text": "một", "start": 1, "end": 1.4}, {"text": "hai", "start": 1.4, "end": 1.8}]}],
+            )
 
 
 class AccessTests(unittest.TestCase):

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 import wave
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -34,7 +36,12 @@ def _words_from_segment(segment) -> list[dict]:
     return [_word_dict(text, segment.start, segment.end)]
 
 
-def _line_from_words(text: str, words: list[dict], uncertain: bool = False) -> dict:
+def _line_from_words(
+    text: str,
+    words: list[dict],
+    uncertain: bool = False,
+    supplemented: bool = False,
+) -> dict:
     line = {
         "text": text,
         "start": words[0]["start"],
@@ -43,7 +50,18 @@ def _line_from_words(text: str, words: list[dict], uncertain: bool = False) -> d
     }
     if uncertain:
         line["uncertain"] = True
+    if supplemented:
+        line["supplemented"] = True
     return line
+
+
+def _carry_line(source: dict, words: list[dict]) -> dict:
+    return _line_from_words(
+        source["text"],
+        words,
+        uncertain=bool(source.get("uncertain")),
+        supplemented=bool(source.get("supplemented")),
+    )
 
 
 _GAP_LIMIT = 1.5
@@ -247,7 +265,7 @@ def fit_lines_to_voice(lines: list[dict], vocal_path: Path, log=None) -> list[di
             words = _absorb_voiced_gaps(words, levels, hop, threshold)
             if active_end > words[-1]["end"] + 0.22:
                 words[-1] = _word_dict(words[-1]["text"], words[-1]["start"], min(active_end, words[-1]["end"] + 2.5))
-        fitted.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
+        fitted.append(_carry_line(line, words))
     parts: list[str] = []
     if quiet:
         parts.append(f"{quiet} câu vì không thấy đoạn hát đủ lớn")
@@ -267,7 +285,7 @@ def loosen_against_next_line(lines: list[dict]) -> list[dict]:
         elif line.get("repaired"):
             words = _loosen_packed(words)
         if words:
-            loosened.append(_line_from_words(line["text"], words, uncertain=bool(line.get("uncertain"))))
+            loosened.append(_carry_line(line, words))
     return loosened
 
 
@@ -338,6 +356,174 @@ def _segments_match_lines(lines: list[str], segments) -> list[dict] | None:
     return matched
 
 
+def _fold_token(text: str) -> str:
+    folded = unicodedata.normalize("NFD", normalize_token(text))
+    return "".join(char for char in folded if unicodedata.category(char) != "Mn")
+
+
+def _token_score(lyric: str, heard: str) -> float:
+    left = _fold_token(lyric)
+    right = _fold_token(heard)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    if len(left) >= 2 and len(right) >= 2 and (left in right or right in left):
+        shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+        if len(shorter) / len(longer) >= 0.75:
+            return 0.85
+    ratio = SequenceMatcher(None, left, right).ratio()
+    return ratio if ratio >= 0.72 else 0.0
+
+
+def _window_score(tokens: list[str], words: list[dict]) -> float:
+    """How well this lyric line matches a heard phrase, in order."""
+    if not tokens or not words or abs(len(words) - len(tokens)) > 2:
+        return 0.0
+    if _token_score(tokens[0], words[0]["text"]) < 0.72:
+        return 0.0
+    if _token_score(tokens[-1], words[-1]["text"]) < 0.72:
+        return 0.0
+    cursor = 0
+    scores: list[float] = []
+    hits = 0
+    for token in tokens:
+        best = 0.0
+        best_at = cursor
+        for index in range(cursor, len(words)):
+            score = _token_score(token, words[index]["text"])
+            if score > best:
+                best = score
+                best_at = index
+                if score == 1.0:
+                    break
+        scores.append(best)
+        if best >= 0.72:
+            hits += 1
+            cursor = best_at + 1
+    if hits < max(1, (len(tokens) + 1) // 2):
+        return 0.0
+    return sum(scores) / len(tokens)
+
+
+def _find_heard_window(tokens: list[str], words: list[dict], cursor: int, threshold: float) -> tuple[int, int, float] | None:
+    """Earliest heard phrase that matches this lyric line. Later repeats stay for later lines."""
+    for start in range(cursor, len(words)):
+        best_score = 0.0
+        best_end = start + 1
+        for length in range(max(1, len(tokens) - 1), len(tokens) + 3):
+            end = start + length
+            if end > len(words):
+                break
+            score = _window_score(tokens, words[start:end])
+            if score > best_score:
+                best_score = score
+                best_end = end
+        if best_score >= threshold:
+            return start, best_end, best_score
+    return None
+
+
+def _place_unheard(lines: list[str], placed: list[dict | None]) -> list[dict]:
+    """Keep lyric lines Whisper did not match, just before the next line that did match."""
+    index = 0
+    while index < len(lines):
+        if placed[index] is not None:
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(lines) and placed[run_end] is None:
+            run_end += 1
+        previous_end = placed[index - 1]["end"] if index and placed[index - 1] is not None else 0.0
+        next_start = placed[run_end]["start"] if run_end < len(lines) and placed[run_end] is not None else None
+        durations = [max(0.35 * max(1, len(lines[item].split())), 0.8) for item in range(index, run_end)]
+        total = sum(durations) + 0.15 * max(0, len(durations) - 1)
+        cursor = previous_end + 0.4 if next_start is None else max(previous_end + 0.15, next_start - total - 0.2)
+        for offset, duration in enumerate(durations):
+            tokens = lines[index + offset].split()
+            placed[index + offset] = _line_from_words(
+                lines[index + offset],
+                _spread_tokens(tokens, cursor, cursor + duration),
+                uncertain=True,
+            )
+            cursor += duration + 0.15
+        index = run_end
+    return [line for line in placed if line is not None]
+
+
+def _supplement_unmatched(segments: list[dict], used: set[int]) -> list[dict]:
+    """Heard phrases that the typed lyrics never claimed: backing vocals, tags, endings."""
+    extras: list[dict] = []
+    for segment in segments:
+        words = segment["words"]
+        unused = [word for word in words if word["id"] not in used]
+        if not unused:
+            continue
+        duration = unused[-1]["end"] - unused[0]["start"]
+        if len(unused) < 2 and duration < 1.2:
+            continue
+        if len(unused) / len(words) < 0.6:
+            continue
+        text = " ".join(word["text"] for word in unused)
+        extras.append(_line_from_words(text, [_word_dict(word["text"], word["start"], word["end"]) for word in unused], uncertain=True, supplemented=True))
+    return extras
+
+
+def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> list[dict]:
+    """Time the typed lyrics from what Whisper heard, and keep heard lines the lyrics omitted.
+
+    Typed lyrics win on wording wherever a phrase matches. A long silence before the first
+    real match is left empty instead of pulling the verse back to the start of the file.
+    """
+    flat: list[dict] = []
+    heard_segments: list[dict] = []
+    for segment in segments:
+        words = []
+        for word in segment.get("words") or []:
+            text = " ".join(str(word.get("text", "")).split())
+            if not text:
+                continue
+            heard = _word_dict(text, float(word["start"]), float(word["end"]))
+            heard["id"] = len(flat)
+            flat.append(heard)
+            words.append(heard)
+        if words:
+            heard_segments.append({"words": words})
+    if not flat:
+        raise AlignError("Whisper không nghe thấy lời nào trong file vocal.")
+
+    placed: list[dict | None] = [None] * len(lines)
+    used: set[int] = set()
+    cursor = 0
+    for index, line in enumerate(lines):
+        tokens = line.split()
+        if not tokens:
+            continue
+        found = _find_heard_window(tokens, flat, cursor, 0.55)
+        if found is None:
+            continue
+        start, end, score = found
+        window = flat[start:end]
+        if len(tokens) == len(window):
+            words = [_word_dict(token, word["start"], word["end"]) for token, word in zip(tokens, window)]
+        else:
+            words = _spread_tokens(tokens, window[0]["start"], window[-1]["end"])
+        placed[index] = _line_from_words(line, words, uncertain=score < 0.75)
+        used.update(word["id"] for word in window)
+        cursor = end
+
+    if not any(item is not None for item in placed):
+        raise AlignError(
+            "Whisper có nghe thấy tiếng hát, nhưng không khớp câu nào với lời đã nhập. Hãy kiểm tra lời và file vocal."
+        )
+
+    lyric_lines = _place_unheard(lines, placed)
+    extras = _supplement_unmatched(heard_segments, used)
+    combined = lyric_lines + extras
+    combined.sort(key=lambda item: (item["start"], 1 if item.get("supplemented") else 0))
+    return combined
+
+
 def _allow_mps_alignment() -> None:
     """Whisper's DTW casts the matrix to float64. MPS cannot do that in place."""
     import whisper.timing as timing
@@ -384,66 +570,63 @@ def align_lyrics(
             raise AlignError(f"Không tải được model căn lời: {error}") from error
 
     _allow_mps_alignment()
-    log("Đang căn lời vào file vocal.")
+    prompt = " ".join(lines)[:220]
+    log("Đang nghe vocal bằng Whisper, rồi đối chiếu với lời đã nhập.")
     try:
-        result = model.align(
+        result = model.transcribe(
             str(vocal_path),
-            "\n".join(lines),
-            language=language,
-            original_split=True,
+            language=language or None,
             verbose=None,
+            word_timestamps=True,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            initial_prompt=prompt or None,
+            regroup=True,
         )
     except Exception as error:
         if device == "cpu":
-            raise AlignError(f"Căn lời thất bại: {error}") from error
-        log(f"GPU Apple không căn được ({error}). Đang căn lại trên CPU.")
+            raise AlignError(f"Nghe vocal thất bại: {error}") from error
+        log(f"GPU Apple không nghe được ({error}). Đang nghe lại trên CPU.")
         model = stable_whisper.load_model(model_name, device="cpu")
         try:
-            result = model.align(
+            result = model.transcribe(
                 str(vocal_path),
-                "\n".join(lines),
-                language=language,
-                original_split=True,
+                language=language or None,
                 verbose=None,
+                word_timestamps=True,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                initial_prompt=prompt or None,
+                regroup=True,
             )
         except Exception as cpu_error:
-            raise AlignError(f"Căn lời thất bại: {cpu_error}") from cpu_error
+            raise AlignError(f"Nghe vocal thất bại: {cpu_error}") from cpu_error
 
     if result is None:
-        raise AlignError("Bộ căn lời không trả về thời gian cho bài này.")
+        raise AlignError("Whisper không trả về lời nghe được.")
 
-    segments = list(result.segments or [])
-    matched = _segments_match_lines(lines, segments)
-    if matched is None:
-        log("Số đoạn căn được khác số câu hát. Đang ghép theo từng chữ, nên kiểm tra kỹ các câu được đánh dấu.")
-        flat: list[dict] = []
-        for segment in segments:
-            flat.extend(_words_from_segment(segment))
-        matched = _match_lines(lines, flat)
-
-    if not matched:
-        raise AlignError("Không ghép được thời gian với lời bài hát.")
-
-    repaired: list[dict] = []
-    moved = 0
-    for line in matched:
-        words, count = repair_stretched_words(line["words"])
-        moved += count
+    heard_segments = []
+    for segment in result.segments or []:
+        words = _words_from_segment(segment)
         if words:
-            repaired_line = _line_from_words(line["text"], words, uncertain=bool(line.get("uncertain")))
-            if count:
-                repaired_line["repaired"] = True
-            repaired.append(repaired_line)
-    matched = loosen_against_next_line(repaired)
+            heard_segments.append({"words": words})
+    try:
+        matched = reconcile_lyrics_with_transcript(lines, heard_segments)
+    except AlignError:
+        raise
+    except Exception as error:
+        raise AlignError(f"Không đối chiếu được lời với bản nghe: {error}") from error
+
     try:
         matched = fit_lines_to_voice(matched, vocal_path, log)
     except (AlignError, wave.Error, EOFError) as error:
-        log(f"Không chỉnh được câu theo tiếng hát ({error}). Giữ thời gian căn được.")
-    if moved:
-        log(f"Đã kéo {moved} chữ bị đặt vào khoảng nhạc về sát câu hát.")
-    unsure = [line["text"] for line in matched if line.get("uncertain")]
+        log(f"Không chỉnh được câu theo tiếng hát ({error}). Giữ thời gian đã đối chiếu.")
+    added = [line["text"] for line in matched if line.get("supplemented")]
+    if added:
+        log(f"Đã thêm {len(added)} câu Whisper nghe được mà lời nhập chưa có, để khít hát bè hoặc đoạn kết.")
+    unsure = [line["text"] for line in matched if line.get("uncertain") and not line.get("supplemented")]
     if unsure:
-        log(f"{len(unsure)} câu được ghép ước lượng. Trên trang sửa, những câu đó được đánh dấu để nghe lại.")
+        log(f"{len(unsure)} câu khớp chưa chắc. Trên trang sửa, những câu đó được đánh dấu để nghe lại.")
 
     log(
         f"Căn xong. Câu đầu lúc {matched[0]['start']:.1f}s, "

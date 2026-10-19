@@ -62,6 +62,8 @@ def normalize_edited_lines(lines: list[dict]) -> list[dict]:
         }
         if line.get("uncertain"):
             cleaned_line["uncertain"] = True
+        if line.get("supplemented"):
+            cleaned_line["supplemented"] = True
         cleaned.append(cleaned_line)
     if not cleaned:
         raise JobError("Không còn chữ nào để xuất.")

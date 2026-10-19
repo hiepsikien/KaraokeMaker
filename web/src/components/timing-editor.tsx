@@ -352,7 +352,12 @@ export function TimingEditor({
             onClick={() => chooseLine(lineIndex)}
             className={`cursor-pointer rounded-3xl border bg-[var(--panel)] p-4 sm:p-5 ${selectedLine === lineIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
           >
-            {line.uncertain && (
+            {line.supplemented && (
+              <p className="mb-3 rounded-xl bg-sky-950/50 px-3 py-2 text-xs leading-5 text-sky-100">
+                Whisper nghe được câu này, nhưng lời bạn nhập chưa có. Sửa chữ nếu đó là hát bè hoặc đoạn kết.
+              </p>
+            )}
+            {line.uncertain && !line.supplemented && (
               <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
                 Câu này được ghép ước lượng. Hãy nghe và kéo lại từng chữ.
               </p>
