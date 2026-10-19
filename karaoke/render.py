@@ -24,6 +24,10 @@ TEXT_FPS = 12
 # Keep these in sync with web/src/lib/cue.ts (LONG_GAP_SECONDS, COUNTDOWN_SECONDS).
 LONG_GAP = 8.0
 COUNTDOWN = 5.0
+# One size for every lyric line; long lines wrap to at most two rows.
+LYRIC_FONT_SIZE = 56
+MAX_LYRIC_WIDTH = 1700
+LYRIC_ROW_GAP = 10
 
 
 def _run(command: list[str], log) -> None:
@@ -42,46 +46,97 @@ def _run(command: list[str], log) -> None:
         raise MediaError(tail or "FFmpeg dừng với lỗi.")
 
 
-def _layout(line: dict, size: int):
-    font = load_font(size)
-    space = font.getlength(" ")
-    widths = [font.getlength(word["text"]) for word in line["words"]]
-    total = sum(widths) + space * max(0, len(widths) - 1)
-    return font, space, widths, total
+def _row_width(widths: list[float], space: float) -> float:
+    if not widths:
+        return 0.0
+    return sum(widths) + space * max(0, len(widths) - 1)
+
+
+def _wrap_word_rows(widths: list[float], space: float, max_width: float) -> list[list[int]]:
+    """Pack words into one row, or two balanced rows when the line is too long."""
+    count = len(widths)
+    if count == 0:
+        return [[]]
+    if _row_width(widths, space) <= max_width or count == 1:
+        return [list(range(count))]
+
+    best_split = 1
+    best_score: float | None = None
+    for split in range(1, count):
+        first = _row_width(widths[:split], space)
+        second = _row_width(widths[split:], space)
+        overflow = 0.0
+        if first > max_width:
+            overflow += first - max_width
+        if second > max_width:
+            overflow += second - max_width
+        score = overflow * 10_000 + abs(first - second)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_split = split
+    return [list(range(best_split)), list(range(best_split, count))]
 
 
 def _render_text_pair(line: dict):
-    font = None
-    space = 0.0
-    widths: list[float] = []
-    total = 0.0
-    for size in (72, 60, 50, 42, 34):
-        font, space, widths, total = _layout(line, size)
-        if total <= 1700:
-            break
-    assert font is not None
-    height = max(font.getbbox(word["text"])[3] for word in line["words"]) + 12
-    image_width = max(1, int(total) + 4)
-    white = Image.new("RGBA", (image_width, height), (0, 0, 0, 0))
-    gold = Image.new("RGBA", (image_width, height), (0, 0, 0, 0))
+    words = list(line.get("words") or [])
+    font = load_font(LYRIC_FONT_SIZE)
+    space = float(font.getlength(" "))
+    widths = [float(font.getlength(word["text"])) for word in words]
+    if not words:
+        empty = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        return {
+            "white": empty,
+            "gold": empty,
+            "boxes": [],
+            "widths": [],
+            "space": space,
+            "start": line.get("start", 0),
+            "end": line.get("end", 0),
+            "words": [],
+        }
+
+    rows = _wrap_word_rows(widths, space, MAX_LYRIC_WIDTH)
+    ascent, descent = font.getmetrics()
+    row_height = ascent + descent + 8
+    row_widths = []
+    for row in rows:
+        row_widths.append(_row_width([widths[index] for index in row], space))
+    image_width = max(1, int(max(row_widths) + 4))
+    image_height = max(1, int(row_height * len(rows) + LYRIC_ROW_GAP * max(0, len(rows) - 1)))
+    white = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
+    gold = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
     white_draw = ImageDraw.Draw(white)
     gold_draw = ImageDraw.Draw(gold)
-    x = 0.0
-    for word, width in zip(line["words"], widths):
-        white_draw.text((x + 2, 3), word["text"], font=font, fill=(0, 0, 0, 190))
-        gold_draw.text((x + 2, 3), word["text"], font=font, fill=(0, 0, 0, 190))
-        white_draw.text((x, 0), word["text"], font=font, fill=(255, 248, 236, 255))
-        gold_draw.text((x, 0), word["text"], font=font, fill=(255, 196, 72, 255))
-        x += width + space
+    boxes: list[dict] = [{"x": 0.0, "y": 0.0, "width": 0.0, "height": float(row_height)} for _ in words]
+
+    for row_index, row in enumerate(rows):
+        y = row_index * (row_height + LYRIC_ROW_GAP)
+        x = max(0.0, (image_width - row_widths[row_index]) / 2)
+        for word_index in row:
+            word = words[word_index]
+            width = widths[word_index]
+            text_y = y + 4
+            white_draw.text((x + 2, text_y + 3), word["text"], font=font, fill=(0, 0, 0, 190))
+            gold_draw.text((x + 2, text_y + 3), word["text"], font=font, fill=(0, 0, 0, 190))
+            white_draw.text((x, text_y), word["text"], font=font, fill=(255, 248, 236, 255))
+            gold_draw.text((x, text_y), word["text"], font=font, fill=(255, 196, 72, 255))
+            boxes[word_index] = {
+                "x": x,
+                "y": float(y),
+                "width": width,
+                "height": float(row_height),
+            }
+            x += width + space
+
     return {
         "white": white,
         "gold": gold,
+        "boxes": boxes,
         "widths": widths,
         "space": space,
-        "total": total,
         "start": line["start"],
         "end": line["end"],
-        "words": line["words"],
+        "words": words,
     }
 
 
@@ -119,28 +174,18 @@ def cue_at(layouts: list[dict], song_time: float) -> tuple[str, dict | None, int
     return "blank", None, 0
 
 
-def _fill_width(layout: dict, song_time: float) -> float:
-    if song_time >= layout["end"]:
-        return layout["total"]
-    filled = 0.0
-    for index, word in enumerate(layout["words"]):
-        width = layout["widths"][index]
-        start = word["start"]
-        end = max(word["end"], start + 0.05)
-        if song_time >= end:
-            filled += width
-            if index < len(layout["words"]) - 1:
-                filled += layout["space"]
-            continue
-        if song_time > start:
-            filled += width * ((song_time - start) / (end - start))
-        break
-    return filled
+def _word_fill(word: dict, song_time: float) -> float:
+    start = float(word["start"])
+    end = max(float(word["end"]), start + 0.05)
+    if song_time >= end:
+        return 1.0
+    if song_time <= start:
+        return 0.0
+    return (song_time - start) / (end - start)
 
 
 def _draw_strip(layout: dict, song_time: float) -> Image.Image:
     strip = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
-    filled = _fill_width(layout, song_time)
     text = layout["white"]
     bar_width = text.width + 56
     bar_height = text.height + 36
@@ -151,9 +196,22 @@ def _draw_strip(layout: dict, song_time: float) -> Image.Image:
     text_x = (WIDTH - text.width) // 2
     text_y = (STRIP_HEIGHT - text.height) // 2
     strip.alpha_composite(layout["white"], (text_x, text_y))
-    if filled > 1:
-        crop = layout["gold"].crop((0, 0, min(text.width, int(filled)), text.height))
-        strip.alpha_composite(crop, (text_x, text_y))
+    boxes = layout.get("boxes") or []
+    for index, word in enumerate(layout["words"]):
+        fill = _word_fill(word, song_time)
+        if fill <= 0 or index >= len(boxes):
+            continue
+        box = boxes[index]
+        left = int(box["x"])
+        top = int(box["y"])
+        width = max(1, int(math.ceil(box["width"] * fill)))
+        height = max(1, int(math.ceil(box["height"])))
+        right = min(layout["gold"].width, left + width)
+        bottom = min(layout["gold"].height, top + height)
+        if right <= left or bottom <= top:
+            continue
+        crop = layout["gold"].crop((left, top, right, bottom))
+        strip.alpha_composite(crop, (text_x + left, text_y + top))
     return strip
 
 
@@ -254,33 +312,31 @@ def _mux(video: Path, audio: Path, destination: Path, cover_duration: float, log
     delay = int(round(cover_duration * 1000))
     channels = probe_channels(audio)
     delay_filter = "adelay=" + "|".join([str(delay)] * channels)
-    _run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video),
-            "-i",
-            str(audio),
-            "-filter_complex",
-            f"[1:a]{delay_filter},apad[a]",
-            "-map",
-            "0:v:0",
-            "-map",
-            "[a]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(destination),
-        ],
-        log,
-    )
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video),
+        "-i",
+        str(audio),
+        "-filter_complex",
+        f"[1:a]{delay_filter},apad[a]",
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
+    ]
+    if destination.suffix.lower() == ".mp4":
+        command += ["-movflags", "+faststart"]
+    command.append(str(destination))
+    _run(command, log)
 
 
 def render_videos(

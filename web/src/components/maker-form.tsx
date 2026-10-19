@@ -1,45 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
-import { ImageCards } from "@/components/image-cards";
-import { TimingEditor } from "@/components/timing-editor";
+import { HomeGate } from "@/components/home-gate";
+import { PhaseStepper } from "@/components/phase-stepper";
+import { ProjectSetup } from "@/components/project-setup";
+import { TimingEditor, type ExportOptions } from "@/components/timing-editor";
 import type { TimedLine } from "@/lib/cue";
+import {
+  emptyFields,
+  fieldsFromProject,
+  fieldsPayload,
+  sungCount,
+  type Job,
+  type Phase,
+  type Project,
+  type ProjectFields,
+} from "@/lib/types";
 
-type Outputs = {
-  directory: string;
-  vocal: string;
-  instrumental: string;
-  timing: string;
-};
-
-type Job = {
-  id: string;
-  status: "running" | "editing" | "rendering" | "done" | "error";
-  log: string[];
-  error: string;
-  outputs: Outputs | null;
-  lines: TimedLine[] | null;
-  duration: number;
-  export_gaps?: string[];
-};
-
-type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "timing";
-
-const fieldClass =
-  "w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none transition focus:border-[var(--gold)]";
-
-function fileName(path: string) {
-  const parts = path.split(/[/\\]/);
-  return parts[parts.length - 1] || path;
-}
-
-function sungCount(lyrics: string) {
-  return lyrics
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && !(line.startsWith("[") && line.endsWith("]"))).length;
-}
+type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project";
 
 async function readError(response: Response) {
   try {
@@ -50,64 +29,29 @@ async function readError(response: Response) {
   }
 }
 
-function PathField({
-  label,
-  value,
-  placeholder,
-  onBrowse,
-}: {
-  label: string;
-  value: string;
-  placeholder: string;
-  onBrowse: () => void;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1.5 block text-sm text-[var(--muted)]">{label}</span>
-      <div className="flex gap-2">
-        <input className={fieldClass} value={value} placeholder={placeholder} readOnly />
-        <button
-          type="button"
-          onClick={onBrowse}
-          className="shrink-0 rounded-xl border border-[var(--line)] px-3 text-sm hover:border-[var(--gold)]"
-        >
-          Chọn
-        </button>
-      </div>
-    </label>
-  );
-}
-
 export function MakerForm() {
-  const [title, setTitle] = useState("");
-  const [artist, setArtist] = useState("");
-  const [coverLine, setCoverLine] = useState("");
-  const [originalAudio, setOriginalAudio] = useState("");
-  const [vocalAudio, setVocalAudio] = useState("");
-  const [instrumentalAudio, setInstrumentalAudio] = useState("");
-  const [lyrics, setLyrics] = useState("");
-  const [images, setImages] = useState<string[]>([]);
-  const [coverImage, setCoverImage] = useState("");
-  const [outputDir, setOutputDir] = useState("");
-  const [coverDuration, setCoverDuration] = useState("5");
-  const [imageDuration, setImageDuration] = useState("8");
-  const [modelName, setModelName] = useState("small");
-  const [device, setDevice] = useState("cpu");
+  const [phase, setPhase] = useState<Phase>("home");
+  const [fields, setFields] = useState<ProjectFields>(() => emptyFields());
+  const [hasLines, setHasLines] = useState(false);
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
-  const [hideEditor, setHideEditor] = useState(false);
 
-  const lines = useMemo(() => sungCount(lyrics), [lyrics]);
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
-  const showEditor = Boolean(job?.lines && job.status !== "running" && !hideEditor);
+  const exported = job?.status === "done";
+  // Only highlight Xuất while rendering or right after a finished export.
+  // Once the user edits again (status back to editing), return to Biên tập.
+  const displayPhase: Phase =
+    phase === "edit" && (rendering || exported) ? "export" : phase;
 
   useEffect(() => {
     fetch("/api/defaults")
       .then((response) => response.json())
       .then((data) => {
-        if (data.output_dir) setOutputDir(data.output_dir);
+        if (data.output_dir) {
+          setFields((current) => (current.output_dir ? current : { ...current, output_dir: data.output_dir }));
+        }
       })
       .catch(() => {
         setNotice("Chưa kết nối được phần xử lý. Hãy chạy server Python rồi tải lại trang.");
@@ -122,6 +66,13 @@ export function MakerForm() {
       if (!response.ok) return;
       const next = (await response.json()) as Job;
       setJob(next);
+      if (next.status === "editing") {
+        setPhase("edit");
+        setHasLines(Boolean(next.lines?.length));
+        if (next.project) setFields(fieldsFromProject(next.project));
+      }
+      if (next.status === "done") setPhase("edit");
+      // Keep phase "align" on error so the Ghép chữ screen can show job.error.
     }, 1000);
     return () => clearInterval(timer);
   }, [job?.id, job?.status]);
@@ -133,47 +84,60 @@ export function MakerForm() {
       const response = await fetch("/api/browse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify({ kind, initial_dir: kind === "project" ? fields.output_dir : "" }),
       });
       if (!response.ok) {
         setNotice(await readError(response));
-        return;
+        return [];
       }
       const data = await response.json();
-      const paths = (data.paths || []) as string[];
-      if (paths.length === 0) return;
-      if (kind === "images") {
-        setImages((current) => [...current, ...paths.filter((path) => !current.includes(path))]);
-        return;
-      }
-      const selected = paths[0];
-      if (kind === "cover") setCoverImage(selected);
-      if (kind === "output") setOutputDir(selected);
-      if (kind === "original") setOriginalAudio(selected);
-      if (kind === "vocal") setVocalAudio(selected);
-      if (kind === "instrumental") setInstrumentalAudio(selected);
-      if (kind === "original" || kind === "vocal" || kind === "instrumental") {
-        await fillFromAudio(selected);
-      }
+      return (data.paths || []) as string[];
     } catch {
       setNotice("Không mở được hộp thoại chọn file. Kiểm tra server Python đang chạy.");
+      return [];
     } finally {
       setBusyBrowse("");
     }
   }
 
-  async function fillFromAudio(path: string) {
-    const response = await fetch("/api/match", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    });
-    if (!response.ok) return;
-    const data = await response.json();
-    if (data.vocal) setVocalAudio((current) => current || data.vocal);
-    if (data.instrumental) setInstrumentalAudio((current) => current || data.instrumental);
-    if (data.original) setOriginalAudio((current) => current || data.original);
-    if (data.title) setTitle((current) => current || data.title);
+  async function browseSetup(kind: Exclude<BrowseKind, "project">) {
+    const paths = await browse(kind);
+    if (paths.length === 0) return;
+    if (kind === "images") {
+      setFields((current) => ({
+        ...current,
+        background_images: [...current.background_images, ...paths.filter((path) => !current.background_images.includes(path))],
+      }));
+      return;
+    }
+    const selected = paths[0];
+    if (kind === "cover") {
+      setFields((current) => ({ ...current, cover_image: selected }));
+      return;
+    }
+    if (kind === "output") {
+      setFields((current) => ({ ...current, output_dir: selected }));
+      return;
+    }
+
+    let matched = { vocal: "", instrumental: "", original: "", title: "" };
+    try {
+      const response = await fetch("/api/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selected }),
+      });
+      if (response.ok) matched = await response.json();
+    } catch {
+      /* keep manual selection */
+    }
+    setFields((current) => ({
+      ...current,
+      original_audio: kind === "original" ? selected : current.original_audio || matched.original || "",
+      vocal_audio: kind === "vocal" ? selected : current.vocal_audio || matched.vocal || "",
+      instrumental_audio: kind === "instrumental" ? selected : current.instrumental_audio || matched.instrumental || "",
+      title: current.title || matched.title || "",
+    }));
   }
 
   async function reveal(path: string) {
@@ -184,26 +148,70 @@ export function MakerForm() {
     });
   }
 
-  async function submit(event: FormEvent) {
+  function startCreate() {
+    setNotice("");
+    setJob(null);
+    setHasLines(false);
+    setFields((current) => emptyFields(current.output_dir));
+    setPhase("setup");
+  }
+
+  async function openProject() {
+    setNotice("");
+    const paths = await browse("project");
+    const path = paths[0];
+    if (!path) return;
+    try {
+      const response = await fetch("/api/projects/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as {
+        phase: "setup" | "edit";
+        project: Project;
+        job: Job | null;
+        notice?: string;
+      };
+      setFields(fieldsFromProject(data.project));
+      setHasLines(Boolean(data.project.lines?.length));
+      if (data.notice) setNotice(data.notice);
+      if (data.phase === "edit" && data.job) {
+        setJob(data.job);
+        setPhase("edit");
+        return;
+      }
+      setJob(null);
+      setPhase("setup");
+    } catch {
+      setNotice("Không mở được dự án. Server Python chưa chạy bản mới.");
+    }
+  }
+
+  async function submitAlign(event: FormEvent) {
     event.preventDefault();
     setNotice("");
-    if (!title.trim() || !artist.trim()) {
+    if (!fields.title.trim() || !fields.artist.trim()) {
       setNotice("Nhập tên bài hát và tác giả.");
       return;
     }
-    if (!originalAudio || !vocalAudio || !instrumentalAudio) {
+    if (!fields.original_audio || !fields.vocal_audio || !fields.instrumental_audio) {
       setNotice("Chọn đủ audio gốc, vocal và instrumental.");
       return;
     }
-    if (lines === 0) {
+    if (sungCount(fields.lyrics) === 0) {
       setNotice("Nhập lời hát. Dòng nằm trọn trong [ngoặc] sẽ được bỏ.");
       return;
     }
-    if (!coverImage && images.length === 0) {
+    if (!fields.cover_image && fields.background_images.length === 0) {
       setNotice("Chọn ảnh bìa hoặc ít nhất một ảnh nền.");
       return;
     }
-    if (!outputDir) {
+    if (!fields.output_dir) {
       setNotice("Chọn thư mục xuất.");
       return;
     }
@@ -211,30 +219,14 @@ export function MakerForm() {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          artist,
-          cover_line: coverLine,
-          original_audio: originalAudio,
-          vocal_audio: vocalAudio,
-          instrumental_audio: instrumentalAudio,
-          lyrics,
-          background_images: images,
-          cover_image: coverImage,
-          output_dir: outputDir,
-          cover_duration: Number(coverDuration),
-          image_duration: Number(imageDuration),
-          language: "vi",
-          model_name: modelName,
-          device,
-        }),
+        body: JSON.stringify(fieldsPayload(fields)),
       });
       if (!response.ok) {
         setNotice(await readError(response));
         return;
       }
       const data = await response.json();
-      setHideEditor(false);
+      setPhase("align");
       setJob({
         id: data.id,
         status: "running",
@@ -249,246 +241,158 @@ export function MakerForm() {
     }
   }
 
-  async function openSaved() {
-    if (!vocalAudio) {
-      setNotice("Hãy chọn file vocal trước, rồi mở bản đã sửa.");
+  async function resumeEdit() {
+    setNotice("");
+    if (!fields.project_path) {
+      setNotice("Chưa có file dự án để cập nhật.");
       return;
     }
-    setNotice("");
-    setBusyBrowse("timing");
+    if (!fields.vocal_audio) {
+      setNotice("Cần file vocal để nghe và biên tập.");
+      return;
+    }
     try {
-      const picked = await fetch("/api/browse", {
+      const response = await fetch("/api/projects/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "timing", initial_dir: outputDir }),
-      });
-      if (!picked.ok) {
-        setNotice(await readError(picked));
-        return;
-      }
-      const pickedBody = await picked.json();
-      const timingPath = (pickedBody.paths || [])[0] as string | undefined;
-      if (!timingPath) return;
-      const response = await fetch("/api/jobs/open", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          timing_path: timingPath,
-          title,
-          artist,
-          cover_line: coverLine,
-          original_audio: originalAudio,
-          vocal_audio: vocalAudio,
-          instrumental_audio: instrumentalAudio,
-          background_images: images,
-          cover_image: coverImage,
-          output_dir: outputDir,
-          cover_duration: Number(coverDuration),
-          image_duration: Number(imageDuration),
-        }),
+        body: JSON.stringify(fieldsPayload(fields)),
       });
       if (!response.ok) {
         setNotice(await readError(response));
         return;
       }
-      const data = await response.json();
-      setHideEditor(false);
-      setJob({
-        id: data.id,
-        status: "editing",
-        log: data.log || ["Đã mở bản đã sửa."],
-        error: "",
-        outputs: null,
-        lines: data.lines,
-        duration: data.duration || 0,
-        export_gaps: data.export_gaps || [],
-      });
+      const data = (await response.json()) as { phase: string; project: Project; job: Job | null };
+      setFields(fieldsFromProject(data.project));
+      setHasLines(Boolean(data.project.lines?.length));
+      if (data.job) {
+        setJob(data.job);
+        setPhase("edit");
+        return;
+      }
+      setNotice("Chưa vào được biên tập. Kiểm tra lại vocal và timing trong dự án.");
     } catch {
-      setNotice("Không mở được bản đã sửa. Server Python chưa chạy bản mới.");
-    } finally {
-      setBusyBrowse("");
+      setNotice("Không cập nhật được dự án. Server Python chưa chạy.");
     }
   }
 
-  async function renderVideos(nextLines: TimedLine[]) {
+  function resumeEditing() {
+    setJob((current) => {
+      if (!current || (current.status !== "done" && current.status !== "error")) return current;
+      return { ...current, status: "editing", error: "" };
+    });
+  }
+
+  async function browseExportDir() {
+    const paths = await browse("output");
+    const selected = paths[0] || null;
+    if (selected) {
+      setFields((current) => ({ ...current, output_dir: selected }));
+    }
+    return selected;
+  }
+
+  async function renderVideos(nextLines: TimedLine[], options: ExportOptions) {
     if (!job) return;
     setNotice("");
     try {
       const response = await fetch(`/api/jobs/${job.id}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lines: nextLines }),
+        body: JSON.stringify({
+          lines: nextLines,
+          output_dir: options.output_dir,
+          format: options.format,
+        }),
       });
       if (!response.ok) {
         setNotice(await readError(response));
         return;
       }
+      setFields((current) => ({ ...current, output_dir: options.output_dir || current.output_dir }));
       setJob((current) => (current ? { ...current, status: "rendering", error: "" } : current));
     } catch {
       setNotice("Không gửi được lệnh xuất video. Server Python chưa chạy.");
     }
   }
 
-  if (showEditor && job?.lines) {
-    return (
-      <TimingEditor
-        key={job.id}
-        jobId={job.id}
-        initialLines={job.lines}
-        locked={rendering}
-        error={job.status === "error" ? job.error : notice}
-        log={job.log}
-        outputs={job.status === "done" ? job.outputs : null}
-        onRender={renderVideos}
-        onReveal={reveal}
-        onBack={() => setHideEditor(true)}
-        exportGaps={job.export_gaps || []}
-      />
-    );
-  }
-
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
-      <form onSubmit={submit} className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
-        <section className="grid gap-4 sm:grid-cols-2">
-          <label className="block sm:col-span-2">
-            <span className="mb-1.5 block text-sm text-[var(--muted)]">Tên bài hát</span>
-            <input className={fieldClass} value={title} onChange={(event) => setTitle(event.target.value)} />
-          </label>
-          <label className="block">
-            <span className="mb-1.5 block text-sm text-[var(--muted)]">Tác giả</span>
-            <input className={fieldClass} value={artist} onChange={(event) => setArtist(event.target.value)} />
-          </label>
-          <label className="block">
-            <span className="mb-1.5 block text-sm text-[var(--muted)]">Dòng phụ trên bìa</span>
-            <input className={fieldClass} value={coverLine} onChange={(event) => setCoverLine(event.target.value)} placeholder="Không bắt buộc" />
-          </label>
-        </section>
+    <div>
+      <PhaseStepper phase={displayPhase} />
 
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Audio</h2>
-          <PathField label="Audio gốc" value={originalAudio} placeholder="Bài hát đầy đủ" onBrowse={() => browse("original")} />
-          <PathField label="Vocal" value={vocalAudio} placeholder="File _(Vocals)" onBrowse={() => browse("vocal")} />
-          <PathField label="Instrumental" value={instrumentalAudio} placeholder="File _(Instrumental)" onBrowse={() => browse("instrumental")} />
-          <p className="text-xs leading-5 text-[var(--muted)]">
-            Chọn một file vocal hoặc instrumental, ứng dụng sẽ tìm file còn lại và bài gốc cùng tên.
-          </p>
-        </section>
+      {phase === "home" && (
+        <HomeGate onCreate={startCreate} onOpen={openProject} busy={busyBrowse === "project"} notice={notice} />
+      )}
 
-        <section>
-          <div className="mb-1.5 flex items-center justify-between">
-            <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Lời</h2>
-            <span className="text-xs text-[var(--muted)]">{lines} câu hát</span>
-          </div>
-          <textarea
-            className={`${fieldClass} min-h-52 resize-y leading-6`}
-            value={lyrics}
-            onChange={(event) => setLyrics(event.target.value)}
-            placeholder={"Dán lời vào đây.\nDòng [Verse], [Intro] và ghi chú trong ngoặc sẽ không hiện trên video."}
-          />
-        </section>
+      {phase === "setup" && (
+        <ProjectSetup
+          fields={fields}
+          setFields={setFields}
+          notice={notice}
+          busyBrowse={busyBrowse}
+          aligning={aligning}
+          hasLines={hasLines}
+          showAlignOptions={!hasLines}
+          onBrowse={browseSetup}
+          onAlign={submitAlign}
+          onResumeEdit={resumeEdit}
+          onBackHome={() => {
+            setJob(null);
+            setPhase("home");
+            setNotice("");
+          }}
+        />
+      )}
 
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Hình</h2>
-          <p className="text-sm leading-6 text-[var(--muted)]">
-            Khung video là 1920×1080, tỉ lệ 16:9. Ảnh đúng tỉ lệ này sẽ đầy khung. Ảnh vuông hoặc 3:2 vẫn dùng được, nằm giữa khung và có viền tối hai bên.
-          </p>
-          <PathField label="Ảnh bìa" value={coverImage} placeholder="Ảnh phía sau tên bài, nên 1920×1080" onBrowse={() => browse("cover")} />
-          {coverImage && <ImageCards paths={[coverImage]} onRemove={() => setCoverImage("")} />}
-          <div>
-            <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-sm text-[var(--muted)]">Ảnh nền, lặp đến hết bài</span>
-              <button type="button" onClick={() => browse("images")} className="text-sm text-[var(--gold)]">
-                Thêm ảnh
-              </button>
-            </div>
-            {images.length === 0 && <p className="text-sm text-[var(--muted)]">Chưa có ảnh nền. Nếu bỏ trống, ảnh bìa sẽ được lặp lại.</p>}
-            <ImageCards paths={images} onRemove={(path) => setImages((current) => current.filter((item) => item !== path))} />
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-[var(--muted)]">Bìa (giây)</span>
-              <input className={fieldClass} type="number" min="0" step="0.5" value={coverDuration} onChange={(event) => setCoverDuration(event.target.value)} />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-[var(--muted)]">Mỗi ảnh nền (giây)</span>
-              <input className={fieldClass} type="number" min="1" step="0.5" value={imageDuration} onChange={(event) => setImageDuration(event.target.value)} />
-            </label>
-          </div>
-        </section>
-
-        <section className="grid gap-4 sm:grid-cols-2">
-          <label className="block">
-            <span className="mb-1.5 block text-sm text-[var(--muted)]">Model căn lời</span>
-            <select className={fieldClass} value={modelName} onChange={(event) => setModelName(event.target.value)}>
-              <option value="tiny">Tiny, nhanh</option>
-              <option value="base">Base</option>
-              <option value="small">Small, cân bằng</option>
-              <option value="medium">Medium, chậm hơn</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="mb-1.5 block text-sm text-[var(--muted)]">Thiết bị</span>
-            <select className={fieldClass} value={device} onChange={(event) => setDevice(event.target.value)}>
-              <option value="cpu">CPU</option>
-              <option value="mps">GPU Apple</option>
-            </select>
-          </label>
-          <div className="sm:col-span-2">
-            <PathField label="Thư mục xuất" value={outputDir} placeholder="Nơi lưu hai video" onBrowse={() => browse("output")} />
-          </div>
-        </section>
-
-        {notice && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{notice}</p>}
-        {busyBrowse && <p className="text-sm text-[var(--muted)]">Đang mở hộp thoại trên máy…</p>}
-
-        <button
-          type="submit"
-          disabled={aligning}
-          className="w-full rounded-2xl bg-[var(--gold)] px-4 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
-        >
-          {aligning ? "Đang căn lời…" : "Căn lời"}
-        </button>
-        <button
-          type="button"
-          disabled={busyBrowse === "timing"}
-          onClick={openSaved}
-          className="w-full rounded-2xl border border-[var(--gold)] px-4 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
-        >
-          Mở bản đã sửa
-        </button>
-        <p className="text-xs leading-5 text-[var(--muted)]">
-          Sau khi căn xong, bạn sửa từng chữ rồi mới xuất hai video. Mở bản đã sửa dùng file timing.json đã lưu, không căn lại.
-        </p>
-      </form>
-
-      <aside className="space-y-4 lg:sticky lg:top-6">
-        <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5">
-          <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Tiến trình</h2>
-          <ol className="mt-4 max-h-[28rem] space-y-2 overflow-auto text-sm leading-6 text-[var(--muted)]">
-            {(job?.log || ["Chưa chạy."]).map((line, index) => (
+      {phase === "align" && job && (
+        <section className="mx-auto max-w-2xl rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-6">
+          <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Ghép chữ</p>
+          <h2 className="mt-2 text-xl font-semibold">Đang căn lời vào vocal…</h2>
+          <ol className="mt-5 max-h-[28rem] space-y-2 overflow-auto text-sm leading-6 text-[var(--muted)]">
+            {job.log.map((line, index) => (
               <li key={`${index}-${line}`}>{line}</li>
             ))}
           </ol>
-          {job?.status === "error" && <p className="mt-3 text-sm text-red-200">{job.error}</p>}
-        </section>
-        {job?.status === "done" && job.outputs && (
-          <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5">
-            <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Đã xuất</h2>
-            <div className="mt-4 space-y-3 text-sm">
-              <button type="button" className="block text-left hover:text-[var(--gold)]" onClick={() => reveal(job.outputs!.vocal)}>
-                {fileName(job.outputs.vocal)}
-              </button>
-              <button type="button" className="block text-left hover:text-[var(--gold)]" onClick={() => reveal(job.outputs!.instrumental)}>
-                {fileName(job.outputs.instrumental)}
-              </button>
-              <button type="button" className="text-[var(--gold)]" onClick={() => reveal(job.outputs!.directory)}>
-                Mở thư mục
+          {job.status === "error" && (
+            <div className="mt-4 space-y-3">
+              <p className="text-sm text-red-200">{job.error}</p>
+              <button
+                type="button"
+                onClick={() => setPhase("setup")}
+                className="rounded-2xl border border-[var(--gold)] px-4 py-2 text-sm text-[var(--gold)]"
+              >
+                Quay lại khai báo
               </button>
             </div>
-          </section>
-        )}
-      </aside>
+          )}
+        </section>
+      )}
+
+      {phase === "edit" && job?.lines && (
+        <TimingEditor
+          key={job.id}
+          jobId={job.id}
+          initialLines={job.lines}
+          locked={rendering}
+          exported={exported}
+          error={job.status === "error" ? job.error : notice}
+          log={job.log}
+          outputs={job.outputs}
+          defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
+          onRender={renderVideos}
+          onReveal={reveal}
+          onResumeEditing={resumeEditing}
+          onBrowseOutput={browseExportDir}
+          onBack={() => {
+            setNotice("");
+            setPhase("setup");
+          }}
+          onFillGaps={() => {
+            setNotice("Bổ sung các file còn thiếu rồi bấm lưu khai báo và vào biên tập.");
+            setPhase("setup");
+          }}
+          exportGaps={job.export_gaps || []}
+        />
+      )}
     </div>
   );
 }

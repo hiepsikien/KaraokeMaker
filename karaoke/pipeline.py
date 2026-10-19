@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
-from karaoke.access import AccessError, ensure_allowed, grant
+from karaoke.access import AccessError, ensure_allowed, grant, grant_project_paths
 from karaoke.align import AlignError, align_lyrics
+from karaoke.errors import JobError
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import (
     AUDIO_SUFFIXES,
@@ -16,9 +18,7 @@ from karaoke.media import (
 )
 from karaoke.render import render_videos
 
-
-class JobError(RuntimeError):
-    pass
+EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
 
 
 def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
@@ -181,7 +181,26 @@ def timing_path_for(prepared: dict) -> Path:
     stored = str(prepared.get("timing_path") or "").strip()
     if stored:
         return Path(stored)
+    project_path = str(prepared.get("project_path") or "").strip()
+    if project_path:
+        path = Path(project_path)
+        # Keep a sibling legacy timing.json next to the project for compatibility.
+        stem = path.name
+        if stem.endswith(".karaoke.json"):
+            stem = stem[: -len(".karaoke.json")]
+        elif stem.endswith(".karaoke"):
+            stem = stem[: -len(".karaoke")]
+        else:
+            stem = path.stem
+        return path.parent / f"{stem} timing.json"
     return Path(prepared["output_dir"]) / f"{safe_title(prepared['title'])} timing.json"
+
+
+def _optional_existing(raw: str, label: str, suffixes: set[str]) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    return str(_existing_file(text, label, suffixes))
 
 
 def open_saved(payload: dict) -> tuple[dict, list[dict]]:
@@ -201,12 +220,6 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     grant(output_dir)
 
-    def optional(raw: str, label: str, suffixes: set[str]) -> str:
-        text = str(raw or "").strip()
-        if not text:
-            return ""
-        return str(_existing_file(text, label, suffixes))
-
     try:
         vocal_length = probe_duration(vocal)
     except MediaError as error:
@@ -216,13 +229,17 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
         "artist": artist,
         "cover_line": " ".join(str(payload.get("cover_line", "")).split()),
         "lyrics": "\n".join(line["text"] for line in lines),
-        "original_audio": optional(payload.get("original_audio", ""), "audio gốc", AUDIO_SUFFIXES),
+        "original_audio": _optional_existing(payload.get("original_audio", ""), "audio gốc", AUDIO_SUFFIXES),
         "vocal_audio": str(vocal),
-        "instrumental_audio": optional(payload.get("instrumental_audio", ""), "file instrumental", AUDIO_SUFFIXES),
+        "instrumental_audio": _optional_existing(
+            payload.get("instrumental_audio", ""), "file instrumental", AUDIO_SUFFIXES
+        ),
         "background_images": [
-            optional(item, "ảnh nền", IMAGE_SUFFIXES) for item in payload.get("background_images") or [] if str(item).strip()
+            _optional_existing(item, "ảnh nền", IMAGE_SUFFIXES)
+            for item in payload.get("background_images") or []
+            if str(item).strip()
         ],
-        "cover_image": optional(payload.get("cover_image", ""), "ảnh bìa", IMAGE_SUFFIXES),
+        "cover_image": _optional_existing(payload.get("cover_image", ""), "ảnh bìa", IMAGE_SUFFIXES),
         "output_dir": str(output_dir),
         "cover_duration": float(payload.get("cover_duration") or 0),
         "image_duration": float(payload.get("image_duration") or 8),
@@ -233,6 +250,91 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
         "timing_path": str(timing),
     }
     return prepared, lines
+
+
+def open_project_file(path_text: str) -> tuple[dict, list[dict], dict]:
+    """Open a .karaoke.json project (or migrate legacy timing.json). Returns prepared, lines, project."""
+    from karaoke.project import load_project, prepared_from_project, project_path_for, save_project
+
+    path = Path(str(path_text or "").strip()).expanduser()
+    if not path.is_file():
+        raise JobError(f"Không thấy file dự án: {path}")
+    try:
+        path = ensure_allowed(path)
+    except AccessError as error:
+        raise JobError(str(error)) from error
+
+    project, source_path = load_project(path)
+    grant(source_path.parent)
+    # Opening a project file is an explicit user choice — trust its stored media paths.
+    grant_project_paths(project)
+
+    # Legacy timing.json list → write a real project file beside it on first open.
+    from karaoke.project import is_project_path
+
+    if not is_project_path(source_path) and project.get("lines"):
+        target = project_path_for(project["output_dir"] or source_path.parent, project["title"] or "karaoke")
+        project["path"] = str(target)
+        save_project(target, project)
+        source_path = target
+        project["path"] = str(target)
+        grant_project_paths(project)
+
+    prepared = prepared_from_project(project)
+    prepared["project_path"] = str(source_path)
+    if str(source_path).endswith(" timing.json"):
+        prepared["timing_path"] = str(source_path)
+
+    vocal_text = prepared.get("vocal_audio") or ""
+    if vocal_text:
+        vocal = _existing_file(vocal_text, "file vocal", AUDIO_SUFFIXES)
+        prepared["vocal_audio"] = str(vocal)
+        try:
+            prepared["vocal_duration"] = probe_duration(vocal)
+        except MediaError as error:
+            raise JobError(str(error)) from error
+    else:
+        prepared["vocal_duration"] = 0.0
+
+    for key, label, suffixes in (
+        ("original_audio", "audio gốc", AUDIO_SUFFIXES),
+        ("instrumental_audio", "file instrumental", AUDIO_SUFFIXES),
+        ("cover_image", "ảnh bìa", IMAGE_SUFFIXES),
+    ):
+        if prepared.get(key):
+            try:
+                prepared[key] = _optional_existing(prepared[key], label, suffixes)
+            except JobError:
+                prepared[key] = ""
+
+    backgrounds = []
+    for item in prepared.get("background_images") or []:
+        if not str(item).strip():
+            continue
+        try:
+            backgrounds.append(_optional_existing(item, "ảnh nền", IMAGE_SUFFIXES))
+        except JobError:
+            continue
+    prepared["background_images"] = backgrounds
+
+    output_dir = Path(str(prepared.get("output_dir") or source_path.parent).strip()).expanduser()
+    try:
+        output_dir = ensure_allowed(output_dir)
+    except AccessError as error:
+        raise JobError(str(error)) from error
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grant(output_dir)
+    prepared["output_dir"] = str(output_dir)
+
+    lines = list(project.get("lines") or [])
+    if lines:
+        lines = normalize_edited_lines(lines)
+    project["path"] = str(source_path)
+    # Keep the project payload aligned with paths the session can actually use.
+    for key in ("original_audio", "vocal_audio", "instrumental_audio", "cover_image", "output_dir"):
+        project[key] = prepared.get(key) or ""
+    project["background_images"] = list(prepared.get("background_images") or [])
+    return prepared, lines, project
 
 
 def align_job(prepared: dict, log) -> list[dict]:
@@ -281,24 +383,63 @@ def _images_for_render(prepared: dict) -> tuple[Path, list[Path]]:
     if cover is not None and not images:
         images = [cover]
     if cover is None:
-        raise JobError("Chưa xuất được vì còn thiếu ảnh bìa hoặc ảnh nền. Chọn đủ file rồi mở lại bản đã sửa.")
+        raise JobError("Chưa xuất được vì còn thiếu ảnh bìa hoặc ảnh nền. Hãy bổ sung file trong phần khai báo.")
     return cover, images
 
 
-def render_job(prepared: dict, lines: list[dict], log) -> dict:
+def normalize_export_format(raw: str | None) -> str:
+    fmt = str(raw or "mp4").strip().lower().lstrip(".")
+    if fmt not in EXPORT_FORMATS:
+        raise JobError("Định dạng xuất chỉ hỗ trợ mp4, mov hoặc mkv.")
+    return fmt
+
+
+def unique_export_names(output_dir: Path, stem: str, fmt: str) -> tuple[str, str]:
+    """Build video filenames with a timestamp suffix so re-exports never overwrite."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ext = f".{fmt}"
+    for index in range(0, 50):
+        suffix = stamp if index == 0 else f"{stamp}-{index + 1}"
+        vocal_name = f"{stem} (có giọng) {suffix}{ext}"
+        instrumental_name = f"{stem} (không lời) {suffix}{ext}"
+        if not (output_dir / vocal_name).exists() and not (output_dir / instrumental_name).exists():
+            return vocal_name, instrumental_name
+    raise JobError("Không tạo được tên file xuất mới. Thử lại sau một giây.")
+
+
+def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict | None = None) -> dict:
+    from karaoke.project import sync_project_file
+
+    options = export_options or {}
     lines = normalize_edited_lines(lines)
     gaps = export_gaps(prepared)
     if gaps:
         raise JobError(
-            "Chưa xuất được vì còn thiếu " + ", ".join(gaps) + ". Chọn đủ file rồi mở lại bản đã sửa."
+            "Chưa xuất được vì còn thiếu " + ", ".join(gaps) + ". Hãy bổ sung file trong phần khai báo."
         )
-    output_dir = Path(prepared["output_dir"])
+
+    fmt = normalize_export_format(options.get("format"))
+    output_text = str(options.get("output_dir") or prepared.get("output_dir") or "").strip()
+    if not output_text:
+        raise JobError("Hãy chọn thư mục xuất.")
+    output_dir = Path(output_text).expanduser()
+    try:
+        output_dir = ensure_allowed(output_dir)
+    except AccessError as error:
+        raise JobError(str(error)) from error
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grant(output_dir)
+    prepared["output_dir"] = str(output_dir)
+
     title = prepared["title"]
     stem = safe_title(title)
+    vocal_name, instrumental_name = unique_export_names(output_dir, stem, fmt)
     cover, images = _images_for_render(prepared)
     try:
         timing_path = save_timing_file(timing_path_for(prepared), lines)
         log(f"Đã lưu thời gian từng chữ vào {timing_path}.")
+        prepared["timing_path"] = str(timing_path)
+        log(f"Xuất {fmt.upper()} vào {output_dir} — {vocal_name}")
         vocal_out, instrumental_out = render_videos(
             lines=lines,
             title=title,
@@ -309,8 +450,8 @@ def render_job(prepared: dict, lines: list[dict], log) -> dict:
             original_audio=Path(prepared["original_audio"]),
             instrumental_audio=Path(prepared["instrumental_audio"]),
             output_dir=output_dir,
-            vocal_name=f"{stem} (có giọng).mp4",
-            instrumental_name=f"{stem} (không lời).mp4",
+            vocal_name=vocal_name,
+            instrumental_name=instrumental_name,
             cover_duration=float(prepared["cover_duration"]),
             image_duration=float(prepared["image_duration"]),
             log=log,
@@ -320,12 +461,20 @@ def render_job(prepared: dict, lines: list[dict], log) -> dict:
     except Exception as error:
         raise JobError(f"Dựng video thất bại: {error}") from error
     log("Xong hai video.")
-    return {
+    outputs = {
         "directory": str(output_dir),
         "vocal": str(vocal_out),
         "instrumental": str(instrumental_out),
         "timing": str(timing_path),
+        "format": fmt,
     }
+    try:
+        project_path = sync_project_file(prepared, lines=lines, status="exported", outputs=outputs)
+        outputs["project"] = str(project_path)
+        log(f"Đã lưu dự án {project_path.name}.")
+    except JobError as error:
+        log(f"Video xong nhưng chưa ghi được file dự án: {error}")
+    return outputs
 
 
 def run_job(payload: dict, log) -> dict:

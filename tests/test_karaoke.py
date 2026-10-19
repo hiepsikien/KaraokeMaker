@@ -17,8 +17,26 @@ from karaoke.align import (
     repair_stretched_words,
 )
 from karaoke.lyrics import extract_sung_lines
-from karaoke.pipeline import JobError, export_gaps, load_timing_file, render_job, save_timing_file
-from karaoke.render import COUNTDOWN, LONG_GAP, cue_at
+from karaoke.pipeline import (
+    JobError,
+    export_gaps,
+    load_timing_file,
+    normalize_export_format,
+    open_project_file,
+    render_job,
+    save_timing_file,
+    unique_export_names,
+)
+from karaoke.project import load_project, project_from_fields, project_path_for, save_project, sync_project_file
+from karaoke.render import (
+    COUNTDOWN,
+    LONG_GAP,
+    LYRIC_FONT_SIZE,
+    MAX_LYRIC_WIDTH,
+    _render_text_pair,
+    _wrap_word_rows,
+    cue_at,
+)
 
 
 class LyricsTests(unittest.TestCase):
@@ -250,6 +268,48 @@ class AccessTests(unittest.TestCase):
                 else:
                     os.environ["KARAOKE_AUDIO_ROOT"] = previous
 
+    def test_opening_a_project_grants_its_stored_image_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            images = Path(tempfile.mkdtemp())
+            cover = images / "cover.jpg"
+            cover.write_bytes(b"JPEG")
+            bg = images / "bg.jpg"
+            bg.write_bytes(b"JPEG")
+            previous = os.environ.get("KARAOKE_AUDIO_ROOT")
+            os.environ["KARAOKE_AUDIO_ROOT"] = str(root)
+            try:
+                grant(root)
+                project = project_from_fields(
+                    {
+                        "title": "Ảnh",
+                        "artist": "A",
+                        "output_dir": str(root),
+                        "cover_image": str(cover),
+                        "background_images": [str(bg)],
+                        "vocal_audio": "",
+                    },
+                    status="draft",
+                )
+                path = save_project(project_path_for(root, "Ảnh"), project)
+                clear_grants()
+                grant(path)  # browse grants the project file only
+                with self.assertRaises(AccessError):
+                    ensure_allowed(bg)
+                with patch("karaoke.pipeline.probe_duration", return_value=10.0):
+                    prepared, _lines, opened = open_project_file(str(path))
+                self.assertEqual(Path(prepared["cover_image"]).resolve(), cover.resolve())
+                self.assertEqual([Path(item).resolve() for item in prepared["background_images"]], [bg.resolve()])
+                self.assertEqual(ensure_allowed(bg), bg.resolve())
+                self.assertEqual(opened["background_images"][0], prepared["background_images"][0])
+            finally:
+                clear_grants()
+                if previous is None:
+                    os.environ.pop("KARAOKE_AUDIO_ROOT", None)
+                else:
+                    os.environ["KARAOKE_AUDIO_ROOT"] = previous
+                shutil.rmtree(images, ignore_errors=True)
+
 
 class TimingFileTests(unittest.TestCase):
     def test_saves_and_reloads_edited_lines(self):
@@ -301,7 +361,7 @@ class TimingFileTests(unittest.TestCase):
                 lambda _message: None,
             )
         self.assertIn("audio gốc", str(caught.exception))
-        self.assertIn("mở lại bản đã sửa", str(caught.exception))
+        self.assertIn("khai báo", str(caught.exception))
 
     def test_render_writes_the_opened_timing_file(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -346,6 +406,285 @@ class TimingFileTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             with self.assertRaises(JobError):
                 load_timing_file(path)
+
+
+class ProjectFileTests(unittest.TestCase):
+    def tearDown(self):
+        clear_grants()
+
+    def test_saves_and_reloads_a_project_with_embedded_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            path = project_path_for(root, "Hào Khí")
+            project = project_from_fields(
+                {
+                    "title": "Hào Khí",
+                    "artist": "Ai đó",
+                    "vocal_audio": str(root / "v.wav"),
+                    "output_dir": str(root),
+                },
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.3}]}],
+                status="aligned",
+            )
+            saved = save_project(path, project)
+            loaded, loaded_path = load_project(saved)
+            self.assertEqual(loaded_path, saved.resolve())
+            self.assertEqual(loaded["title"], "Hào Khí")
+            self.assertEqual(loaded["status"], "aligned")
+            self.assertEqual(loaded["lines"][0]["text"], "một")
+
+    def test_migrates_legacy_timing_json_on_open(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            vocal = root / "vocal.wav"
+            vocal.write_bytes(b"")
+            timing = root / "Hào Khí timing.json"
+            timing.write_text(
+                '[{"text":"một","words":[{"text":"một","start":0,"end":0.2}]}]',
+                encoding="utf-8",
+            )
+            # open_project_file needs a real audio duration — mock probe
+            with patch("karaoke.pipeline.probe_duration", return_value=12.0):
+                prepared, lines, project = open_project_file(str(timing))
+            self.assertEqual(lines[0]["text"], "một")
+            self.assertTrue(Path(prepared["project_path"]).name.endswith(".karaoke.json"))
+            self.assertTrue(Path(prepared["project_path"]).is_file())
+            self.assertEqual(project["title"], "Hào Khí")
+
+    def test_sync_project_file_writes_beside_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            prepared = {
+                "title": "Bài",
+                "artist": "A",
+                "cover_line": "",
+                "lyrics": "một",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+            }
+            path = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            self.assertEqual(path.name, "Bài.karaoke.json")
+            self.assertEqual(prepared["project_path"], str(path))
+
+    def test_sync_moves_project_when_title_or_output_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            other = root / "other"
+            other.mkdir()
+            grant(root)
+            prepared = {
+                "title": "Cũ",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            old = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            self.assertTrue(old.is_file())
+            prepared["title"] = "Mới"
+            prepared["output_dir"] = str(other)
+            new = sync_project_file(prepared, status="aligned")
+            self.assertEqual(new.name, "Mới.karaoke.json")
+            self.assertEqual(new.parent.resolve(), other.resolve())
+            self.assertFalse(old.exists())
+            loaded, _ = load_project(new)
+            self.assertEqual(loaded["title"], "Mới")
+            self.assertEqual(loaded["lines"][0]["text"], "một")
+
+    def test_sync_keeps_exported_status_when_saving_timing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            prepared = {
+                "title": "Xong",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            path = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="exported",
+                outputs={"directory": str(root), "vocal": "a.mp4", "instrumental": "b.mp4"},
+            )
+            again = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.3}]}],
+                status="aligned",
+            )
+            loaded, _ = load_project(again)
+            self.assertEqual(path, again)
+            self.assertEqual(loaded["status"], "exported")
+
+    def test_session_style_sync_relocates_and_keeps_exported(self):
+        """Khai báo → Lưu must use sync (status=None), not save_project on the old path."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            prepared = {
+                "title": "Cũ",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            old = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="exported",
+                outputs={"directory": str(root), "vocal": "a.mp4", "instrumental": "b.mp4"},
+            )
+            prepared["title"] = "Mới"
+            prepared["project_path"] = str(old)
+            new = sync_project_file(prepared, status=None)
+            self.assertEqual(new.name, "Mới.karaoke.json")
+            self.assertFalse(old.exists())
+            loaded, _ = load_project(new)
+            self.assertEqual(loaded["status"], "exported")
+            self.assertEqual(loaded["title"], "Mới")
+            self.assertEqual(loaded["outputs"]["vocal"], "a.mp4")
+
+    def test_sync_refuses_to_overwrite_another_project_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            other = project_from_fields(
+                {"title": "Other", "artist": "B", "output_dir": str(root), "lyrics": "hai"},
+                lines=[{"text": "hai", "words": [{"text": "hai", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            save_project(project_path_for(root, "Other"), other)
+            prepared = {
+                "title": "Mine",
+                "artist": "A",
+                "lyrics": "một",
+                "output_dir": str(root),
+                "cover_duration": 5,
+                "image_duration": 8,
+                "language": "vi",
+                "model_name": "small",
+                "device": "cpu",
+                "original_audio": "",
+                "vocal_audio": "",
+                "instrumental_audio": "",
+                "cover_image": "",
+                "background_images": [],
+            }
+            mine = sync_project_file(
+                prepared,
+                lines=[{"text": "một", "words": [{"text": "một", "start": 0, "end": 0.2}]}],
+                status="aligned",
+            )
+            prepared["title"] = "Other"
+            with self.assertRaises(JobError) as caught:
+                sync_project_file(prepared, status="aligned")
+            self.assertIn("Other.karaoke.json", str(caught.exception))
+            self.assertTrue(mine.is_file())
+            loaded, _ = load_project(project_path_for(root, "Other"))
+            self.assertEqual(loaded["title"], "Other")
+            self.assertEqual(loaded["lines"][0]["text"], "hai")
+
+
+class ExportNamingTests(unittest.TestCase):
+    def test_rejects_unknown_export_format(self):
+        with self.assertRaises(JobError):
+            normalize_export_format("avi")
+
+    def test_unique_export_names_add_a_timestamp_suffix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            vocal, instrumental = unique_export_names(root, "Bài", "mp4")
+            self.assertTrue(vocal.startswith("Bài (có giọng) "))
+            self.assertTrue(vocal.endswith(".mp4"))
+            self.assertTrue(instrumental.startswith("Bài (không lời) "))
+            self.assertNotEqual(vocal, instrumental)
+            (root / vocal).write_bytes(b"x")
+            (root / instrumental).write_bytes(b"x")
+            again_vocal, again_instrumental = unique_export_names(root, "Bài", "mp4")
+            self.assertNotEqual(again_vocal, vocal)
+            self.assertTrue(again_vocal.endswith(".mp4"))
+            self.assertFalse((root / again_vocal).exists())
+            self.assertFalse((root / again_instrumental).exists())
+
+
+class LyricLayoutTests(unittest.TestCase):
+    def test_uses_one_fixed_font_size_for_short_and_long_lines(self):
+        short = {
+            "text": "một hai",
+            "start": 0,
+            "end": 1,
+            "words": [
+                {"text": "một", "start": 0, "end": 0.4},
+                {"text": "hai", "start": 0.4, "end": 1.0},
+            ],
+        }
+        long_words = [{"text": f"chữ{index}", "start": index * 0.2, "end": index * 0.2 + 0.15} for index in range(18)]
+        long = {
+            "text": " ".join(word["text"] for word in long_words),
+            "start": 0,
+            "end": 4,
+            "words": long_words,
+        }
+        short_layout = _render_text_pair(short)
+        long_layout = _render_text_pair(long)
+        self.assertEqual(len({box["height"] for box in short_layout["boxes"]}), 1)
+        self.assertEqual(short_layout["boxes"][0]["height"], long_layout["boxes"][0]["height"])
+        row_ys = {round(box["y"], 2) for box in long_layout["boxes"]}
+        self.assertGreaterEqual(len(row_ys), 2)
+        self.assertLessEqual(long_layout["white"].width, MAX_LYRIC_WIDTH + 8)
+        self.assertEqual(LYRIC_FONT_SIZE, 56)
+
+    def test_wrap_keeps_a_short_line_on_one_row(self):
+        rows = _wrap_word_rows([40.0, 40.0, 40.0], 10.0, MAX_LYRIC_WIDTH)
+        self.assertEqual(rows, [[0, 1, 2]])
 
 
 if __name__ == "__main__":
