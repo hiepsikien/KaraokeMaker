@@ -15,7 +15,7 @@ from karaoke.access import AccessError, audio_root, ensure_allowed, grant
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
 from karaoke.align import fit_lines_to_voice
-from karaoke.pipeline import JobError, align_job, prepare_job, render_job
+from karaoke.pipeline import JobError, align_job, open_saved, prepare_job, render_job, save_timing_file, timing_path_for
 
 app = FastAPI(title="KaraokeMaker")
 app.add_middleware(
@@ -56,6 +56,21 @@ class CreateJobRequest(BaseModel):
     language: str = "vi"
     model_name: str = "small"
     device: str = "cpu"
+
+
+class OpenSavedRequest(BaseModel):
+    timing_path: str = ""
+    title: str = ""
+    artist: str = ""
+    cover_line: str = ""
+    original_audio: str = ""
+    vocal_audio: str = ""
+    instrumental_audio: str = ""
+    background_images: list[str] = Field(default_factory=list)
+    cover_image: str = ""
+    output_dir: str = ""
+    cover_duration: float = 5
+    image_duration: float = 8
 
 
 class RevealRequest(BaseModel):
@@ -121,7 +136,7 @@ def _default_dir(kind: str, requested: str) -> str:
         return str(songs)
     if kind in {"vocal", "instrumental"} and separated.is_dir():
         return str(separated)
-    if kind == "output":
+    if kind in {"output", "timing"}:
         karaoke = root / "Karaoke"
         if root.is_dir():
             return str(karaoke if karaoke.is_dir() else root)
@@ -161,6 +176,7 @@ def _browse_script(kind: str, directory: str) -> str:
         "cover": "Chọn ảnh bìa",
         "images": "Chọn ảnh nền",
         "output": "Chọn thư mục xuất",
+        "timing": "Chọn file thời gian đã lưu",
     }.get(kind, "Chọn file")
     if kind == "output":
         return f'''
@@ -364,6 +380,30 @@ def create_job(body: CreateJobRequest):
     return {"id": job_id}
 
 
+@app.post("/api/jobs/open")
+def open_job(body: OpenSavedRequest):
+    job_id = uuid.uuid4().hex
+    try:
+        prepared, lines = open_saved(body.model_dump())
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    record = {
+        "id": job_id,
+        "status": "editing",
+        "created": time.time(),
+        "log": [f"Đã mở {Path(prepared['timing_path']).name}. Không căn lại bằng Whisper."],
+        "error": "",
+        "outputs": None,
+        "lines": lines,
+        "duration": prepared["vocal_duration"],
+        "prepared": prepared,
+    }
+    with _lock:
+        _prune_jobs()
+        _jobs[job_id] = record
+    return _public_job(record)
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
     with _lock:
@@ -403,6 +443,26 @@ def fit_job(job_id: str):
         if _jobs.get(job_id) is record:
             record["lines"] = fitted
     return {"lines": fitted}
+
+
+@app.post("/api/jobs/{job_id}/timing")
+def save_job_timing(job_id: str, body: RenderRequest):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Chưa có việc để lưu.")
+        prepared = record["prepared"]
+        lines = [line.model_dump() for line in body.lines]
+    try:
+        path = save_timing_file(timing_path_for(prepared), lines)
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with _lock:
+        if _jobs.get(job_id) is record:
+            record["prepared"]["timing_path"] = str(path)
+            record["lines"] = lines
+            record["log"].append(f"Đã lưu {path.name}.")
+    return {"path": str(path)}
 
 
 @app.post("/api/jobs/{job_id}/render")

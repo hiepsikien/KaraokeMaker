@@ -54,6 +54,7 @@ export function TimingEditor({
   onRender,
   onReveal,
   onBack,
+  keepTiming = false,
 }: {
   jobId: string;
   initialLines: TimedLine[];
@@ -64,6 +65,7 @@ export function TimingEditor({
   onRender: (lines: TimedLine[]) => void;
   onReveal: (path: string) => void;
   onBack: () => void;
+  keepTiming?: boolean;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const dirty = useRef(false);
@@ -72,9 +74,13 @@ export function TimingEditor({
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
+  const [selectedWord, setSelectedWord] = useState<number | null>(null);
+  const [savedPath, setSavedPath] = useState("");
+  const [saveError, setSaveError] = useState("");
   const cue = cueAt(lines, time);
 
   useEffect(() => {
+    if (keepTiming) return;
     let cancelled = false;
     fetch(`/api/jobs/${jobId}/fit`, { method: "POST" })
       .then(async (response) => {
@@ -89,7 +95,7 @@ export function TimingEditor({
     return () => {
       cancelled = true;
     };
-  }, [jobId]);
+  }, [jobId, keepTiming]);
 
   useEffect(() => {
     let frame = 0;
@@ -144,6 +150,85 @@ export function TimingEditor({
     setTime(next);
   }
 
+  function playFrom(next: number) {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.currentTime = Math.max(0, next);
+    setTime(audio.currentTime);
+    audio.play().catch(() => undefined);
+  }
+
+  function togglePlay() {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) audio.play().catch(() => undefined);
+    else audio.pause();
+  }
+
+  function chooseLine(index: number | null) {
+    setSelectedLine(index);
+    setSelectedWord(null);
+  }
+
+  function addLine() {
+    const index = selectedLine ?? Math.max(0, lines.length - 1);
+    const previousEnd = lines[index]?.end ?? 0;
+    const nextStart = index + 1 < lines.length ? lines[index + 1].start : Number.POSITIVE_INFINITY;
+    let start = time;
+    if (!(start >= previousEnd + 0.04 && start + 0.45 < nextStart)) start = previousEnd + 0.08;
+    if (start + 0.2 >= nextStart) start = Math.max(previousEnd + 0.02, nextStart - 0.5);
+    const end = Math.max(start + 0.12, Math.min(start + 0.4, nextStart - 0.02));
+    const line = syncLine({
+      text: "chữ",
+      start,
+      end,
+      words: [{ text: "chữ", start, end }],
+    });
+    dirty.current = true;
+    setLines((current) => {
+      const next = [...current];
+      next.splice(index + 1, 0, line);
+      return next;
+    });
+    setSelectedLine(index + 1);
+    setSelectedWord(0);
+  }
+
+  function splitLine() {
+    if (selectedLine == null || selectedWord == null || selectedWord <= 0) return;
+    const line = lines[selectedLine];
+    if (!line || selectedWord >= line.words.length) return;
+    const head = syncLine({ ...line, words: line.words.slice(0, selectedWord) });
+    const tail = syncLine({ ...line, words: line.words.slice(selectedWord) });
+    dirty.current = true;
+    setLines((current) => {
+      const next = [...current];
+      next.splice(selectedLine, 1, head, tail);
+      return next;
+    });
+    setSelectedLine(selectedLine + 1);
+    setSelectedWord(0);
+  }
+
+  async function saveTiming() {
+    setSaveError("");
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/timing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lines }),
+      });
+      if (!response.ok) {
+        setSaveError("Chưa lưu được. Hãy khởi động lại server Python rồi thử lại.");
+        return;
+      }
+      const body = await response.json();
+      setSavedPath(body.path || "");
+    } catch {
+      setSaveError("Chưa lưu được. Server Python chưa chạy.");
+    }
+  }
+
   const fileName = (path: string) => path.split(/[/\\]/).pop() || path;
 
   return (
@@ -156,9 +241,16 @@ export function TimingEditor({
       playing={playing}
       locked={locked}
       selectedLine={selectedLine}
+      selectedWord={selectedWord}
+      canSplit={selectedLine != null && selectedWord != null && selectedWord > 0}
       onSeek={seek}
-      onSelectLine={setSelectedLine}
+      onSelectLine={chooseLine}
+      onSelectWord={setSelectedWord}
       onChangeLine={replaceLine}
+      onTogglePlay={togglePlay}
+      onPlayFrom={playFrom}
+      onAddLine={addLine}
+      onSplitLine={splitLine}
     />
     <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
       <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
@@ -201,7 +293,7 @@ export function TimingEditor({
           <article
             id={`karaoke-line-${lineIndex}`}
             key={lineIndex}
-            onClick={() => setSelectedLine(lineIndex)}
+            onClick={() => chooseLine(lineIndex)}
             className={`cursor-pointer rounded-3xl border bg-[var(--panel)] p-4 sm:p-5 ${selectedLine === lineIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
           >
             {line.uncertain && (
@@ -218,8 +310,8 @@ export function TimingEditor({
                 disabled={locked}
                 onClick={(event) => {
                   event.stopPropagation();
-                  setSelectedLine(lineIndex);
-                  seek(Math.max(0, line.start - 0.4));
+                  chooseLine(lineIndex);
+                  playFrom(line.start);
                 }}
                 className="text-[var(--gold)] disabled:opacity-40"
               >
@@ -228,7 +320,15 @@ export function TimingEditor({
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {line.words.map((word, wordIndex) => (
-                <label key={`${lineIndex}-${wordIndex}`} className="flex items-center gap-1 rounded-xl border border-[var(--line)] bg-black/20 px-2 py-1">
+                <label
+                  key={`${lineIndex}-${wordIndex}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSelectedLine(lineIndex);
+                    setSelectedWord(wordIndex);
+                  }}
+                  className={`flex items-center gap-1 rounded-xl border bg-black/20 px-2 py-1 ${selectedLine === lineIndex && selectedWord === wordIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
+                >
                   <input
                     value={word.text}
                     disabled={locked}
@@ -240,8 +340,19 @@ export function TimingEditor({
                   </button>
                 </label>
               ))}
-              <button type="button" disabled={locked} onClick={() => addWord(lineIndex)} className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] disabled:opacity-40">
+              <button type="button" disabled={locked} onClick={(event) => { event.stopPropagation(); setSelectedLine(lineIndex); addWord(lineIndex); }} className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] disabled:opacity-40">
                 Thêm chữ
+              </button>
+              <button
+                type="button"
+                disabled={locked || selectedLine !== lineIndex || selectedWord == null || selectedWord <= 0}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  splitLine();
+                }}
+                className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] disabled:opacity-40"
+              >
+                Tách từ chữ này
               </button>
             </div>
           </article>
@@ -249,8 +360,25 @@ export function TimingEditor({
       </section>
 
       {error && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{error}</p>}
+      {saveError && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{saveError}</p>}
+      {savedPath && (
+        <p className="text-sm text-[var(--muted)]">
+          Đã lưu{" "}
+          <button type="button" className="text-[var(--gold)]" onClick={() => onReveal(savedPath)}>
+            {fileName(savedPath)}
+          </button>
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          disabled={locked || lines.length === 0}
+          onClick={saveTiming}
+          className="rounded-2xl border border-[var(--gold)] px-5 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
+        >
+          Lưu bản sửa
+        </button>
         <button
           type="button"
           disabled={locked || lines.length === 0}

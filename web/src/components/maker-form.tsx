@@ -23,7 +23,7 @@ type Job = {
   duration: number;
 };
 
-type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output";
+type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "timing";
 
 const fieldClass =
   "w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none transition focus:border-[var(--gold)]";
@@ -96,6 +96,7 @@ export function MakerForm() {
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [hideEditor, setHideEditor] = useState(false);
+  const [keepTiming, setKeepTiming] = useState(false);
 
   const lines = useMemo(() => sungCount(lyrics), [lyrics]);
   const aligning = job?.status === "running";
@@ -233,6 +234,7 @@ export function MakerForm() {
         return;
       }
       const data = await response.json();
+      setKeepTiming(false);
       setHideEditor(false);
       setJob({
         id: data.id,
@@ -245,6 +247,67 @@ export function MakerForm() {
       });
     } catch {
       setNotice("Không gửi được việc. Server Python chưa chạy.");
+    }
+  }
+
+  async function openSaved() {
+    if (!vocalAudio) {
+      setNotice("Hãy chọn file vocal trước, rồi mở bản đã sửa.");
+      return;
+    }
+    setNotice("");
+    setBusyBrowse("timing");
+    try {
+      const picked = await fetch("/api/browse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "timing", initial_dir: outputDir }),
+      });
+      if (!picked.ok) {
+        setNotice(await readError(picked));
+        return;
+      }
+      const pickedBody = await picked.json();
+      const timingPath = (pickedBody.paths || [])[0] as string | undefined;
+      if (!timingPath) return;
+      const response = await fetch("/api/jobs/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          timing_path: timingPath,
+          title,
+          artist,
+          cover_line: coverLine,
+          original_audio: originalAudio,
+          vocal_audio: vocalAudio,
+          instrumental_audio: instrumentalAudio,
+          background_images: images,
+          cover_image: coverImage,
+          output_dir: outputDir,
+          cover_duration: Number(coverDuration),
+          image_duration: Number(imageDuration),
+        }),
+      });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      const data = await response.json();
+      setKeepTiming(true);
+      setHideEditor(false);
+      setJob({
+        id: data.id,
+        status: "editing",
+        log: data.log || ["Đã mở bản đã sửa."],
+        error: "",
+        outputs: null,
+        lines: data.lines,
+        duration: data.duration || 0,
+      });
+    } catch {
+      setNotice("Không mở được bản đã sửa. Server Python chưa chạy bản mới.");
+    } finally {
+      setBusyBrowse("");
     }
   }
 
@@ -280,6 +343,7 @@ export function MakerForm() {
         onRender={renderVideos}
         onReveal={reveal}
         onBack={() => setHideEditor(true)}
+        keepTiming={keepTiming}
       />
     );
   }
@@ -386,7 +450,17 @@ export function MakerForm() {
         >
           {aligning ? "Đang căn lời…" : "Căn lời"}
         </button>
-        <p className="text-xs leading-5 text-[var(--muted)]">Sau khi căn xong, bạn sửa từng chữ rồi mới xuất hai video.</p>
+        <button
+          type="button"
+          disabled={busyBrowse === "timing"}
+          onClick={openSaved}
+          className="w-full rounded-2xl border border-[var(--gold)] px-4 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
+        >
+          Mở bản đã sửa
+        </button>
+        <p className="text-xs leading-5 text-[var(--muted)]">
+          Sau khi căn xong, bạn sửa từng chữ rồi mới xuất hai video. Mở bản đã sửa dùng file timing.json đã lưu, không căn lại.
+        </p>
       </form>
 
       <aside className="space-y-4 lg:sticky lg:top-6">

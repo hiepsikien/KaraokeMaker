@@ -99,6 +99,13 @@ export function AlignTimeline({
   onSeek,
   onSelectLine,
   onChangeLine,
+  onTogglePlay,
+  onPlayFrom,
+  onSelectWord,
+  onAddLine,
+  onSplitLine,
+  selectedWord,
+  canSplit,
 }: {
   jobId: string;
   lines: TimedLine[];
@@ -107,9 +114,16 @@ export function AlignTimeline({
   playing: boolean;
   locked: boolean;
   selectedLine: number | null;
+  selectedWord: number | null;
+  canSplit: boolean;
   onSeek: (time: number) => void;
   onSelectLine: (index: number | null) => void;
   onChangeLine: (index: number, line: TimedLine) => void;
+  onTogglePlay: () => void;
+  onPlayFrom: (time: number) => void;
+  onSelectWord: (index: number) => void;
+  onAddLine: () => void;
+  onSplitLine: () => void;
 }) {
   const { peaks, failed } = usePeaks(jobId);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -380,6 +394,15 @@ export function AlignTimeline({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button type="button" className="rounded-full bg-[var(--gold)] px-3 py-1 text-xs font-semibold text-[#1a1206]" onClick={onTogglePlay}>
+            {playing ? "Tạm dừng" : "Phát"}
+          </button>
+          <button type="button" disabled={locked} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs disabled:opacity-40" onClick={onAddLine}>
+            Thêm câu
+          </button>
+          <button type="button" disabled={locked || !canSplit} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs disabled:opacity-40" onClick={onSplitLine}>
+            Tách câu
+          </button>
           {activeIndex != null && (
             <button type="button" className="rounded-full border border-[var(--line)] px-3 py-1 text-xs text-[var(--gold)]" onClick={() => onSelectLine(null)}>
               Các câu
@@ -441,6 +464,7 @@ export function AlignTimeline({
                     event.stopPropagation();
                     onSelectLine(index);
                     fitLine(index);
+                    onPlayFrom(line.start);
                   }}
                 />
               ))}
@@ -453,8 +477,14 @@ export function AlignTimeline({
                 left={word.start * pps - scrollLeft}
                 width={(word.end - word.start) * pps}
                 top={18}
+                active={wordIndex === selectedWord}
                 disabled={locked}
-                onEdge={(event, edge) => beginDrag(event, (delta) => applyWord(activeIndex, wordIndex, edge, delta), () => onSeek(word.start))}
+                onEdge={(event, edge) =>
+                  beginDrag(event, (delta) => applyWord(activeIndex, wordIndex, edge, delta), () => {
+                    onSelectWord(wordIndex);
+                    onPlayFrom(word.start);
+                  })
+                }
               />
             ))}
             {activeIndex == null &&
@@ -472,6 +502,7 @@ export function AlignTimeline({
                     beginDrag(event, (delta) => applyLine(index, edge, delta), () => {
                       onSelectLine(index);
                       fitLine(index);
+                      onPlayFrom(line.start);
                     })
                   }
                 />

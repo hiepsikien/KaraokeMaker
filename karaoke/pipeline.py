@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from karaoke.access import AccessError, ensure_allowed, grant
@@ -152,6 +153,82 @@ def prepare_job(payload: dict, log) -> dict:
         "device": device,
         "vocal_duration": vocal_length,
     }
+
+
+def load_timing_file(path: Path) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise JobError(f"Không đọc được file thời gian: {error}") from error
+    if not isinstance(payload, list):
+        raise JobError("File thời gian phải là danh sách các câu.")
+    return normalize_edited_lines(payload)
+
+
+def save_timing_file(path: Path, lines: list[dict]) -> Path:
+    cleaned = normalize_edited_lines(lines)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    grant(path.parent)
+    write_timing(path, cleaned)
+    return path
+
+
+def timing_path_for(prepared: dict) -> Path:
+    stored = str(prepared.get("timing_path") or "").strip()
+    if stored:
+        return Path(stored)
+    return Path(prepared["output_dir"]) / f"{safe_title(prepared['title'])} timing.json"
+
+
+def open_saved(payload: dict) -> tuple[dict, list[dict]]:
+    """Rebuild an editing session from a saved timing file. Whisper is not used."""
+    timing = _existing_file(payload.get("timing_path", ""), "file thời gian", {".json"})
+    vocal = _existing_file(payload.get("vocal_audio", ""), "file vocal", AUDIO_SUFFIXES)
+    lines = load_timing_file(timing)
+    title = " ".join(str(payload.get("title", "")).split())
+    if not title:
+        title = timing.stem[: -len(" timing")] if timing.stem.endswith(" timing") else timing.stem
+    artist = " ".join(str(payload.get("artist", "")).split())
+    output_dir = Path(str(payload.get("output_dir") or timing.parent).strip()).expanduser()
+    try:
+        output_dir = ensure_allowed(output_dir)
+    except AccessError as error:
+        raise JobError(str(error)) from error
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grant(output_dir)
+
+    def optional(raw: str, label: str, suffixes: set[str]) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        return str(_existing_file(text, label, suffixes))
+
+    try:
+        vocal_length = probe_duration(vocal)
+    except MediaError as error:
+        raise JobError(str(error)) from error
+    prepared = {
+        "title": title,
+        "artist": artist,
+        "cover_line": " ".join(str(payload.get("cover_line", "")).split()),
+        "lyrics": "\n".join(line["text"] for line in lines),
+        "original_audio": optional(payload.get("original_audio", ""), "audio gốc", AUDIO_SUFFIXES),
+        "vocal_audio": str(vocal),
+        "instrumental_audio": optional(payload.get("instrumental_audio", ""), "file instrumental", AUDIO_SUFFIXES),
+        "background_images": [
+            optional(item, "ảnh nền", IMAGE_SUFFIXES) for item in payload.get("background_images") or [] if str(item).strip()
+        ],
+        "cover_image": optional(payload.get("cover_image", ""), "ảnh bìa", IMAGE_SUFFIXES),
+        "output_dir": str(output_dir),
+        "cover_duration": float(payload.get("cover_duration") or 0),
+        "image_duration": float(payload.get("image_duration") or 8),
+        "language": "vi",
+        "model_name": "small",
+        "device": "cpu",
+        "vocal_duration": vocal_length,
+        "timing_path": str(timing),
+    }
+    return prepared, lines
 
 
 def align_job(prepared: dict, log) -> list[dict]:

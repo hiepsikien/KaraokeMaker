@@ -10,6 +10,7 @@ import wave
 
 from karaoke.align import _segments_match_lines, fit_lines_to_voice, loosen_against_next_line, repair_stretched_words
 from karaoke.lyrics import extract_sung_lines
+from karaoke.pipeline import JobError, load_timing_file, save_timing_file
 from karaoke.render import COUNTDOWN, LONG_GAP, cue_at
 
 
@@ -210,6 +211,35 @@ class AccessTests(unittest.TestCase):
                     os.environ.pop("KARAOKE_AUDIO_ROOT", None)
                 else:
                     os.environ["KARAOKE_AUDIO_ROOT"] = previous
+
+
+class TimingFileTests(unittest.TestCase):
+    def test_saves_and_reloads_edited_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "Hào Khí timing.json"
+            save_timing_file(
+                path,
+                [
+                    {
+                        "text": "một hai",
+                        "words": [
+                            {"text": "một", "start": 1, "end": 1.2},
+                            {"text": "hai", "start": 1.2, "end": 1.5},
+                        ],
+                    }
+                ],
+            )
+            loaded = load_timing_file(path)
+            self.assertEqual(loaded[0]["text"], "một hai")
+            self.assertEqual(loaded[0]["end"], 1.5)
+            clear_grants()
+
+    def test_rejects_a_timing_file_that_is_not_a_list(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "bad.json"
+            path.write_text("{}", encoding="utf-8")
+            with self.assertRaises(JobError):
+                load_timing_file(path)
 
 
 if __name__ == "__main__":
