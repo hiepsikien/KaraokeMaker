@@ -9,7 +9,7 @@ export default function HomePage() {
           <h1 className="mt-2 text-4xl font-semibold tracking-tight">KaraokeMaker</h1>
         </div>
         <p className="hidden max-w-sm text-right text-sm leading-6 text-[var(--muted)] sm:block">
-          Căn lời vào vocal, lặp ảnh nền, rồi xuất hai video: có giọng và không lời.
+          Căn lời vào vocal, sửa thời gian từng chữ, rồi xuất hai video: có giọng và không lời.
         </p>
       </header>
       <MakerForm />

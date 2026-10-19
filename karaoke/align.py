@@ -38,6 +38,42 @@ def _line_from_words(text: str, words: list[dict]) -> dict:
     }
 
 
+_GAP_LIMIT = 1.5
+_SHORT_WORD = 0.28
+_LONG_WORD = 2.4
+
+
+def _typical_duration(words: list[dict]) -> float:
+    durations = [word["end"] - word["start"] for word in words]
+    healthy = [item for item in durations if _SHORT_WORD <= item <= _LONG_WORD]
+    if not healthy:
+        return 0.4
+    healthy.sort()
+    return healthy[len(healthy) // 2]
+
+
+def repair_stretched_words(words: list[dict]) -> tuple[list[dict], int]:
+    """Pull words that were parked across a long instrumental gap back onto the sung phrase."""
+    if not words:
+        return [], 0
+    repaired: list[dict] = [dict(words[0])]
+    moved = 0
+    for source in words[1:]:
+        word = dict(source)
+        previous = repaired[-1]
+        gap = word["start"] - previous["end"]
+        duration = word["end"] - word["start"]
+        if gap > _GAP_LIMIT:
+            typical = _typical_duration(repaired)
+            if duration < _SHORT_WORD or duration > _LONG_WORD:
+                duration = max(typical, _SHORT_WORD)
+            word["start"] = previous["end"] + 0.06
+            word["end"] = word["start"] + duration
+            moved += 1
+        repaired.append(_word_dict(word["text"], word["start"], word["end"]))
+    return repaired, moved
+
+
 def _match_lines(lines: list[str], timed_words: list[dict]) -> list[dict]:
     cursor = 0
     matched: list[dict] = []
@@ -170,6 +206,17 @@ def align_lyrics(
 
     if not matched:
         raise AlignError("Không ghép được thời gian với lời bài hát.")
+
+    repaired: list[dict] = []
+    moved = 0
+    for line in matched:
+        words, count = repair_stretched_words(line["words"])
+        moved += count
+        if words:
+            repaired.append(_line_from_words(line["text"], words))
+    matched = repaired
+    if moved:
+        log(f"Đã kéo {moved} chữ bị đặt vào khoảng nhạc về sát câu hát.")
 
     log(
         f"Căn xong. Câu đầu lúc {matched[0]['start']:.1f}s, "

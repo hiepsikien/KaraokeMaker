@@ -7,11 +7,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
-from karaoke.media import AUDIO_ROOT, find_original, find_stems, sibling_stem
-from karaoke.pipeline import JobError, run_job
+from karaoke.media import AUDIO_ROOT, IMAGE_SUFFIXES, find_original, find_stems, inspect_image, sibling_stem
+from karaoke.pipeline import JobError, align_job, prepare_job, render_job
 
 app = FastAPI(title="KaraokeMaker")
 app.add_middleware(
@@ -54,6 +55,37 @@ class CreateJobRequest(BaseModel):
 
 class RevealRequest(BaseModel):
     path: str
+
+
+class ImageInspectRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+
+
+class WordIn(BaseModel):
+    text: str = ""
+    start: float = 0
+    end: float = 0
+
+
+class LineIn(BaseModel):
+    text: str = ""
+    start: float = 0
+    end: float = 0
+    words: list[WordIn] = Field(default_factory=list)
+
+
+class RenderRequest(BaseModel):
+    lines: list[LineIn] = Field(default_factory=list)
+
+
+_AUDIO_TYPES = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+}
 
 
 def _apple_string(value: str) -> str:
@@ -182,15 +214,65 @@ def match_audio(body: MatchRequest):
     }
 
 
+@app.post("/api/images/inspect")
+def inspect_images(body: ImageInspectRequest):
+    facts = []
+    for raw in body.paths[:24]:
+        path = Path(raw).expanduser()
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+            facts.append(
+                {
+                    "path": str(path),
+                    "width": 0,
+                    "height": 0,
+                    "ratio": "",
+                    "fits_frame": False,
+                    "note": "Không đọc được ảnh này.",
+                    "thumbnail": "",
+                }
+            )
+            continue
+        try:
+            facts.append(inspect_image(path))
+        except Exception:
+            facts.append(
+                {
+                    "path": str(path),
+                    "width": 0,
+                    "height": 0,
+                    "ratio": "",
+                    "fits_frame": False,
+                    "note": "Không đọc được ảnh này.",
+                    "thumbnail": "",
+                }
+            )
+    return {"images": facts}
+
+
+def _public_job(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "log": list(record["log"]),
+        "error": record["error"],
+        "outputs": record["outputs"],
+        "lines": record["lines"],
+        "duration": record["duration"],
+    }
+
+
 @app.post("/api/jobs")
 def create_job(body: CreateJobRequest):
     job_id = uuid.uuid4().hex
     record = {
         "id": job_id,
         "status": "running",
-        "log": ["Bắt đầu."],
+        "log": ["Bắt đầu căn lời."],
         "error": "",
         "outputs": None,
+        "lines": None,
+        "duration": 0,
+        "prepared": None,
     }
     with _lock:
         _jobs[job_id] = record
@@ -201,10 +283,14 @@ def create_job(body: CreateJobRequest):
 
     def worker() -> None:
         try:
-            outputs = run_job(body.model_dump(), log)
+            prepared = prepare_job(body.model_dump(), log)
+            lines = align_job(prepared, log)
             with _lock:
-                record["status"] = "done"
-                record["outputs"] = outputs
+                record["prepared"] = prepared
+                record["lines"] = lines
+                record["duration"] = prepared["vocal_duration"]
+                record["log"].append("Căn xong. Hãy sửa chữ và thời gian, rồi xuất video.")
+                record["status"] = "editing"
         except JobError as error:
             with _lock:
                 record["status"] = "error"
@@ -224,13 +310,59 @@ def get_job(job_id: str):
         record = _jobs.get(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Không thấy việc này.")
-        return {
-            "id": record["id"],
-            "status": record["status"],
-            "log": list(record["log"]),
-            "error": record["error"],
-            "outputs": record["outputs"],
-        }
+        return _public_job(record)
+
+
+@app.get("/api/jobs/{job_id}/audio")
+def job_audio(job_id: str):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Chưa có audio để nghe thử.")
+        path = Path(record["prepared"]["vocal_audio"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy file vocal.")
+    media_type = _AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@app.post("/api/jobs/{job_id}/render")
+def start_render(job_id: str, body: RenderRequest):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Không thấy việc này.")
+        if record.get("prepared") is None:
+            raise HTTPException(status_code=409, detail="Hãy căn lời trước khi xuất video.")
+        if record["status"] in {"running", "rendering"}:
+            raise HTTPException(status_code=409, detail="Việc này đang chạy.")
+        record["status"] = "rendering"
+        record["error"] = ""
+        prepared = record["prepared"]
+        lines = [line.model_dump() for line in body.lines]
+
+    def log(message: str) -> None:
+        with _lock:
+            record["log"].append(message)
+
+    def worker() -> None:
+        try:
+            outputs = render_job(prepared, lines, log)
+            with _lock:
+                record["status"] = "done"
+                record["outputs"] = outputs
+                record["lines"] = lines
+        except JobError as error:
+            with _lock:
+                record["status"] = "error"
+                record["error"] = str(error)
+        except Exception as error:
+            with _lock:
+                record["status"] = "error"
+                record["error"] = str(error)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"id": job_id}
 
 
 @app.post("/api/reveal")

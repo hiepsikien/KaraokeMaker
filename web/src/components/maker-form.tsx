@@ -2,6 +2,10 @@
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
+import { ImageCards } from "@/components/image-cards";
+import { TimingEditor } from "@/components/timing-editor";
+import type { TimedLine } from "@/lib/cue";
+
 type Outputs = {
   directory: string;
   vocal: string;
@@ -11,10 +15,12 @@ type Outputs = {
 
 type Job = {
   id: string;
-  status: "running" | "done" | "error";
+  status: "running" | "editing" | "rendering" | "done" | "error";
   log: string[];
   error: string;
   outputs: Outputs | null;
+  lines: TimedLine[] | null;
+  duration: number;
 };
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output";
@@ -89,9 +95,12 @@ export function MakerForm() {
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
+  const [hideEditor, setHideEditor] = useState(false);
 
   const lines = useMemo(() => sungCount(lyrics), [lyrics]);
-  const running = job?.status === "running";
+  const aligning = job?.status === "running";
+  const rendering = job?.status === "rendering";
+  const showEditor = Boolean(job?.lines && job.status !== "running" && !hideEditor);
 
   useEffect(() => {
     fetch("/api/defaults")
@@ -105,7 +114,7 @@ export function MakerForm() {
   }, []);
 
   useEffect(() => {
-    if (!job || job.status !== "running") return;
+    if (!job || (job.status !== "running" && job.status !== "rendering")) return;
     const timer = setInterval(async () => {
       const response = await fetch(`/api/jobs/${job.id}`);
       if (!response.ok) return;
@@ -223,10 +232,55 @@ export function MakerForm() {
         return;
       }
       const data = await response.json();
-      setJob({ id: data.id, status: "running", log: ["Đã gửi việc."], error: "", outputs: null });
+      setHideEditor(false);
+      setJob({
+        id: data.id,
+        status: "running",
+        log: ["Đã gửi việc căn lời."],
+        error: "",
+        outputs: null,
+        lines: null,
+        duration: 0,
+      });
     } catch {
       setNotice("Không gửi được việc. Server Python chưa chạy.");
     }
+  }
+
+  async function renderVideos(nextLines: TimedLine[]) {
+    if (!job) return;
+    setNotice("");
+    try {
+      const response = await fetch(`/api/jobs/${job.id}/render`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lines: nextLines }),
+      });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      setJob((current) => (current ? { ...current, status: "rendering", error: "" } : current));
+    } catch {
+      setNotice("Không gửi được lệnh xuất video. Server Python chưa chạy.");
+    }
+  }
+
+  if (showEditor && job?.lines) {
+    return (
+      <TimingEditor
+        key={job.id}
+        jobId={job.id}
+        initialLines={job.lines}
+        locked={rendering}
+        error={job.status === "error" ? job.error : notice}
+        log={job.log}
+        outputs={job.status === "done" ? job.outputs : null}
+        onRender={renderVideos}
+        onReveal={reveal}
+        onBack={() => setHideEditor(true)}
+      />
+    );
   }
 
   return (
@@ -272,7 +326,11 @@ export function MakerForm() {
 
         <section className="space-y-3">
           <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Hình</h2>
-          <PathField label="Ảnh bìa" value={coverImage} placeholder="Ảnh phía sau tên bài" onBrowse={() => browse("cover")} />
+          <p className="text-sm leading-6 text-[var(--muted)]">
+            Khung video là 1920×1080, tỉ lệ 16:9. Ảnh đúng tỉ lệ này sẽ đầy khung. Ảnh vuông hoặc 3:2 vẫn dùng được, nằm giữa khung và có viền tối hai bên.
+          </p>
+          <PathField label="Ảnh bìa" value={coverImage} placeholder="Ảnh phía sau tên bài, nên 1920×1080" onBrowse={() => browse("cover")} />
+          {coverImage && <ImageCards paths={[coverImage]} onRemove={() => setCoverImage("")} />}
           <div>
             <div className="mb-1.5 flex items-center justify-between">
               <span className="text-sm text-[var(--muted)]">Ảnh nền, lặp đến hết bài</span>
@@ -280,17 +338,8 @@ export function MakerForm() {
                 Thêm ảnh
               </button>
             </div>
-            <ul className="space-y-2">
-              {images.length === 0 && <li className="text-sm text-[var(--muted)]">Chưa có ảnh nền. Nếu bỏ trống, ảnh bìa sẽ được lặp lại.</li>}
-              {images.map((image) => (
-                <li key={image} className="flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] px-3 py-2 text-sm">
-                  <span className="truncate">{fileName(image)}</span>
-                  <button type="button" className="text-[var(--muted)] hover:text-white" onClick={() => setImages((current) => current.filter((item) => item !== image))}>
-                    Xóa
-                  </button>
-                </li>
-              ))}
-            </ul>
+            {images.length === 0 && <p className="text-sm text-[var(--muted)]">Chưa có ảnh nền. Nếu bỏ trống, ảnh bìa sẽ được lặp lại.</p>}
+            <ImageCards paths={images} onRemove={(path) => setImages((current) => current.filter((item) => item !== path))} />
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="block">
@@ -331,11 +380,12 @@ export function MakerForm() {
 
         <button
           type="submit"
-          disabled={running}
+          disabled={aligning}
           className="w-full rounded-2xl bg-[var(--gold)] px-4 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
         >
-          {running ? "Đang tạo video…" : "Tạo hai video karaoke"}
+          {aligning ? "Đang căn lời…" : "Căn lời"}
         </button>
+        <p className="text-xs leading-5 text-[var(--muted)]">Sau khi căn xong, bạn sửa từng chữ rồi mới xuất hai video.</p>
       </form>
 
       <aside className="space-y-4 lg:sticky lg:top-6">

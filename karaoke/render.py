@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,8 @@ from karaoke.media import (
 )
 
 TEXT_FPS = 12
+LONG_GAP = 8.0
+COUNTDOWN = 5.0
 
 
 def _run(command: list[str], log) -> None:
@@ -80,12 +83,30 @@ def _render_text_pair(line: dict):
     }
 
 
-def _active_layout(layouts: list[dict], song_time: float) -> dict | None:
+def _display_end(layouts: list[dict], index: int) -> float:
+    layout = layouts[index]
+    if index + 1 >= len(layouts):
+        return layout["end"] + 0.7
+    gap = layouts[index + 1]["start"] - layout["end"]
+    if gap >= LONG_GAP:
+        return layout["end"] + 0.35
+    return layouts[index + 1]["start"]
+
+
+def cue_at(layouts: list[dict], song_time: float) -> tuple[str, dict | None, int]:
+    """Return sing, countdown, or blank for one moment in the song."""
     for index, layout in enumerate(layouts):
-        end = layouts[index + 1]["start"] if index + 1 < len(layouts) else layout["end"] + 0.7
-        if layout["start"] <= song_time < end:
-            return layout
-    return None
+        if layout["start"] <= song_time < _display_end(layouts, index):
+            return "sing", layout, 0
+    for index, layout in enumerate(layouts):
+        previous_end = layouts[index - 1]["end"] if index else 0.0
+        if layout["start"] - previous_end < LONG_GAP:
+            continue
+        if layout["start"] - COUNTDOWN <= song_time < layout["start"]:
+            remaining = layout["start"] - song_time
+            number = max(1, min(int(COUNTDOWN), math.ceil(remaining - 1e-9)))
+            return "countdown", layout, number
+    return "blank", None, 0
 
 
 def _fill_width(layout: dict, song_time: float) -> float:
@@ -126,6 +147,19 @@ def _draw_strip(layout: dict, song_time: float) -> Image.Image:
     return strip
 
 
+def _draw_countdown(layout: dict, number: int) -> Image.Image:
+    strip = _draw_strip(layout, layout["start"] - 1)
+    font = load_font(72)
+    digit = str(number)
+    draw = ImageDraw.Draw(strip)
+    box = draw.textbbox((0, 0), digit, font=font)
+    x = 56
+    y = (STRIP_HEIGHT - (box[3] - box[1])) // 2 - box[1]
+    draw.text((x + 2, y + 3), digit, font=font, fill=(0, 0, 0, 190))
+    draw.text((x, y), digit, font=font, fill=(255, 196, 72, 255))
+    return strip
+
+
 def _write_text_frames(lines: list[dict], total_duration: float, cover_duration: float, folder: Path, log) -> int:
     folder.mkdir(parents=True, exist_ok=True)
     layouts = [_render_text_pair(line) for line in lines]
@@ -136,8 +170,13 @@ def _write_text_frames(lines: list[dict], total_duration: float, cover_duration:
         if song_time < 0:
             frame = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
         else:
-            layout = _active_layout(layouts, song_time)
-            frame = _draw_strip(layout, song_time) if layout else Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
+            mode, layout, number = cue_at(layouts, song_time)
+            if mode == "sing" and layout is not None:
+                frame = _draw_strip(layout, song_time)
+            elif mode == "countdown" and layout is not None:
+                frame = _draw_countdown(layout, number)
+            else:
+                frame = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
         frame.save(folder / f"{index:05d}.png", compress_level=1)
         if index % 96 == 0:
             log(f"Vẽ chữ karaoke {index + 1}/{frame_count}.")

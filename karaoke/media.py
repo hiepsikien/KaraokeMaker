@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import unicodedata
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
@@ -78,7 +80,8 @@ def probe_channels(path: Path) -> int:
 
 
 def fit_image(source: Path, size: tuple[int, int] = (WIDTH, HEIGHT)) -> Image.Image:
-    image = Image.open(source).convert("RGB")
+    with Image.open(source) as opened:
+        image = ImageOps.exif_transpose(opened).convert("RGB")
     contained = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
     canvas = Image.new("RGB", size, (12, 10, 8))
     canvas.paste(contained, ((size[0] - contained.width) // 2, (size[1] - contained.height) // 2))
@@ -139,6 +142,51 @@ def make_cover(photo: Path, title: str, artist: str, cover_line: str, destinatio
 
 def prepare_slide(source: Path, destination: Path) -> None:
     fit_image(source).save(destination, quality=95)
+
+
+def _ratio_label(width: int, height: int) -> str:
+    if height <= 0:
+        return ""
+    value = width / height
+    known = (
+        (1, 1, "1:1"),
+        (3, 2, "3:2"),
+        (4, 3, "4:3"),
+        (16, 9, "16:9"),
+        (2, 3, "2:3"),
+        (9, 16, "9:16"),
+    )
+    for wide, tall, label in known:
+        if abs(value - (wide / tall)) < 0.04:
+            return label
+    return f"{value:.2f}:1"
+
+
+def inspect_image(source: Path) -> dict:
+    """Size, aspect, and a small preview. The video frame is 1920×1080."""
+    with Image.open(source) as opened:
+        image = ImageOps.exif_transpose(opened)
+        width, height = image.size
+        preview = image.convert("RGB")
+    preview.thumbnail((360, 202), Image.Resampling.LANCZOS)
+    buffer = BytesIO()
+    preview.save(buffer, format="JPEG", quality=80)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    ratio = _ratio_label(width, height)
+    fits = ratio == "16:9"
+    if fits:
+        note = "Đúng 16:9, đầy khung video."
+    else:
+        note = f"Tỉ lệ {ratio}. Khung video là 1920×1080, ảnh này nằm giữa và có viền tối."
+    return {
+        "path": str(source),
+        "width": width,
+        "height": height,
+        "ratio": ratio,
+        "fits_frame": fits,
+        "note": note,
+        "thumbnail": f"data:image/jpeg;base64,{encoded}",
+    }
 
 
 def song_dirs_near(audio_path: Path) -> list[Path]:

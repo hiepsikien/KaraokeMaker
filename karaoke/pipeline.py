@@ -28,7 +28,41 @@ def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
     return path
 
 
-def run_job(payload: dict, log) -> dict:
+def normalize_edited_lines(lines: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    for line in lines:
+        words: list[dict] = []
+        for word in line.get("words") or []:
+            text = " ".join(str(word.get("text", "")).split())
+            if not text:
+                continue
+            try:
+                start = float(word.get("start", 0))
+                end = float(word.get("end", 0))
+            except (TypeError, ValueError) as error:
+                raise JobError("Thời gian từng chữ phải là số giây.") from error
+            if start < 0:
+                start = 0.0
+            if end <= start:
+                end = start + 0.08
+            words.append({"text": text, "start": start, "end": end})
+        if not words:
+            continue
+        words.sort(key=lambda item: item["start"])
+        cleaned.append(
+            {
+                "text": " ".join(word["text"] for word in words),
+                "start": words[0]["start"],
+                "end": words[-1]["end"],
+                "words": words,
+            }
+        )
+    if not cleaned:
+        raise JobError("Không còn chữ nào để xuất.")
+    return cleaned
+
+
+def prepare_job(payload: dict, log) -> dict:
     title = " ".join(str(payload.get("title", "")).split())
     artist = " ".join(str(payload.get("artist", "")).split())
     cover_line = " ".join(str(payload.get("cover_line", "")).split())
@@ -90,33 +124,71 @@ def run_job(payload: dict, log) -> dict:
     if abs(vocal_length - instrumental_length) > 1.5:
         log("Vocal và instrumental lệch nhau hơn 1,5 giây. Vẫn tiếp tục với file bạn đã chọn.")
 
+    return {
+        "title": title,
+        "artist": artist,
+        "cover_line": cover_line,
+        "lyrics": lyrics,
+        "original_audio": str(original),
+        "vocal_audio": str(vocal),
+        "instrumental_audio": str(instrumental),
+        "background_images": [str(path) for path in backgrounds],
+        "cover_image": str(cover),
+        "output_dir": str(output_dir),
+        "cover_duration": cover_duration,
+        "image_duration": image_duration,
+        "language": language,
+        "model_name": model_name,
+        "device": device,
+        "vocal_duration": vocal_length,
+    }
+
+
+def align_job(prepared: dict, log) -> list[dict]:
     try:
-        lines = align_lyrics(vocal, lyrics, language, model_name, device, log)
-        timing_path = output_dir / f"{safe_title(title)} timing.json"
+        return align_lyrics(
+            Path(prepared["vocal_audio"]),
+            prepared["lyrics"],
+            prepared["language"],
+            prepared["model_name"],
+            prepared["device"],
+            log,
+        )
+    except AlignError:
+        raise
+    except Exception as error:
+        raise JobError(f"Căn lời thất bại: {error}") from error
+
+
+def render_job(prepared: dict, lines: list[dict], log) -> dict:
+    lines = normalize_edited_lines(lines)
+    output_dir = Path(prepared["output_dir"])
+    title = prepared["title"]
+    stem = safe_title(title)
+    timing_path = output_dir / f"{stem} timing.json"
+    try:
         write_timing(timing_path, lines)
         log(f"Đã lưu thời gian từng chữ vào {timing_path.name}.")
-        stem = safe_title(title)
         vocal_out, instrumental_out = render_videos(
             lines=lines,
             title=title,
-            artist=artist,
-            cover_line=cover_line,
-            cover_photo=cover,
-            background_images=backgrounds,
-            original_audio=original,
-            instrumental_audio=instrumental,
+            artist=prepared["artist"],
+            cover_line=prepared["cover_line"],
+            cover_photo=Path(prepared["cover_image"]),
+            background_images=[Path(path) for path in prepared["background_images"]],
+            original_audio=Path(prepared["original_audio"]),
+            instrumental_audio=Path(prepared["instrumental_audio"]),
             output_dir=output_dir,
             vocal_name=f"{stem} (có giọng).mp4",
             instrumental_name=f"{stem} (không lời).mp4",
-            cover_duration=cover_duration,
-            image_duration=image_duration,
+            cover_duration=float(prepared["cover_duration"]),
+            image_duration=float(prepared["image_duration"]),
             log=log,
         )
-    except (AlignError, MediaError, JobError):
+    except (MediaError, JobError):
         raise
     except Exception as error:
         raise JobError(f"Dựng video thất bại: {error}") from error
-
     log("Xong hai video.")
     return {
         "directory": str(output_dir),
@@ -124,3 +196,9 @@ def run_job(payload: dict, log) -> dict:
         "instrumental": str(instrumental_out),
         "timing": str(timing_path),
     }
+
+
+def run_job(payload: dict, log) -> dict:
+    prepared = prepare_job(payload, log)
+    lines = align_job(prepared, log)
+    return render_job(prepared, lines, log)

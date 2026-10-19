@@ -36,8 +36,10 @@ Môi trường `.venv` của UVR và `.venv-karaoke` tách riêng. UVR khóa `nu
 1. Nhập tên bài hát và tác giả. Dòng phụ trên bìa là tùy chọn.
 2. Chọn audio gốc, file vocal và file instrumental.
 3. Dán lời bài hát.
-4. Chọn ảnh bìa và các ảnh nền sẽ được lặp đến hết bài.
-5. Chọn thư mục xuất, rồi bấm **Tạo hai video karaoke**.
+4. Chọn ảnh bìa và các ảnh nền sẽ được lặp đến hết bài. Khung video là 1920×1080 (16:9). Ảnh đúng tỉ lệ này đầy khung. Ảnh vuông hoặc 3:2 vẫn dùng được, nhưng nằm giữa và có viền tối hai bên. Mỗi ảnh hiện thumbnail kèm kích thước thật.
+5. Chọn thư mục xuất, rồi bấm **Căn lời**.
+6. Trang sửa mở ra khi căn xong. Sửa chữ, kéo từng chữ trên thước thời gian, nghe thử vocal. Đoạn nhạc dài từ 8 giây sẽ hiện câu sắp hát kèm số đếm 5, 4, 3, 2, 1 trong 5 giây cuối.
+7. Bấm **Xuất hai video**.
 
 Chọn file vocal hoặc instrumental dạng `1_Tên bài_(Vocals).wav` thì ứng dụng tự điền file còn lại trong cùng thư mục, và tìm bài gốc cùng tên trong thư mục `Songs`. Chọn thẳng bài gốc thì ứng dụng lấy cặp vocal và instrumental mới nhất trong `Separated`.
 
@@ -71,21 +73,23 @@ Với bài tên `Bình Ngô Đại Cáo`, thư mục xuất có:
 
 Trang bìa hiện trước, mặc định 5 giây, với ảnh bìa, tên bài và tác giả. Trong lúc đó tiếng được lùi đúng bằng thời lượng bìa, nên chữ bắt đầu đổi màu khi bài hát bắt đầu. Ảnh nền đổi lần lượt, mặc định mỗi ảnh 8 giây. Nếu không chọn ảnh nền, ảnh bìa được lặp lại.
 
-Câu hát nằm ở cuối khung hình. Chữ chưa hát màu trắng, chữ đang hát được tô vàng dần.
+Câu hát nằm ở cuối khung hình. Chữ chưa hát màu trắng, chữ đang hát được tô vàng dần. Câu kết thúc sau chữ cuối, không nằm chờ qua đoạn nhạc. Trước câu đầu và trước câu sau một khoảng trống từ 8 giây, 5 giây cuối hiện sẵn câu đó cùng số đếm.
 
 ## Cấu trúc
 
 ```text
 karaoke/
   server.py      # API cho giao diện
-  pipeline.py    # kiểm tra file và chạy cả việc
-  align.py       # căn lyrics lên vocal.wav
+  pipeline.py    # kiểm tra file, căn lời, rồi xuất khi người dùng xác nhận
+  align.py       # căn lyrics lên vocal.wav, kéo chữ bị đẩy sang khoảng nhạc
   lyrics.py      # bỏ dòng ghi chú, so khớp tên bài
-  media.py       # ảnh bìa, thời lượng, tìm file UVR
-  render.py      # dựng hình, chữ và hai file MP4
+  media.py       # ảnh bìa, thumbnail, thời lượng, tìm file UVR
+  render.py      # dựng hình, đếm ngược, chữ và hai file MP4
 web/
   src/app        # trang Next.js
   src/components/maker-form.tsx
+  src/components/timing-editor.tsx
+  src/components/image-cards.tsx
 requirements-karaoke.txt
 ```
 
