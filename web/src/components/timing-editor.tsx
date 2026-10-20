@@ -99,7 +99,7 @@ export function TimingEditor({
   const [exportDir, setExportDir] = useState(defaultOutputDir);
   const [exportFormat, setExportFormat] = useState<ExportOptions["format"]>("mp4");
   const [browsingOutput, setBrowsingOutput] = useState(false);
-  const [removed, setRemoved] = useState<{ line: TimedLine; index: number } | null>(null);
+  const [removed, setRemoved] = useState<TimedLine[]>([]);
   const cue = cueAt(lines, time);
 
   useEffect(() => {
@@ -183,7 +183,7 @@ export function TimingEditor({
     const line = lines[lineIndex];
     if (!line) return;
     markDirty();
-    setRemoved({ line, index: lineIndex });
+    setRemoved((current) => [...current, line]);
     setLines((current) => current.filter((_, index) => index !== lineIndex));
     setSelectedWord(null);
     setSelectedLine((selected) => {
@@ -193,11 +193,12 @@ export function TimingEditor({
   }
 
   function undoRemove() {
-    if (!removed) return;
-    const { line } = removed;
+    const line = removed[removed.length - 1];
+    if (!line) return;
+    markDirty();
     const later = lines.findIndex((item) => item.start > line.start);
     const index = later < 0 ? lines.length : later;
-    setRemoved(null);
+    setRemoved(removed.slice(0, -1));
     setLines([...lines.slice(0, index), line, ...lines.slice(index)]);
     setSelectedWord(null);
     setSelectedLine((selected) => (selected != null && selected >= index ? selected + 1 : selected));
@@ -352,34 +353,49 @@ export function TimingEditor({
       onSplitLine={() => splitLine()}
       onDragEnd={sortLines}
       onRemoveLine={removeLine}
+      actions={
+        <>
+          {onRealign && (
+            <button
+              type="button"
+              disabled={locked}
+              onClick={() => leaveIfSaved(onRealign)}
+              className="text-sm text-[var(--gold)] hover:text-white disabled:opacity-40"
+            >
+              Ghép chữ lại
+            </button>
+          )}
+          <button type="button" onClick={() => leaveIfSaved(onBack)} className="text-sm text-[var(--muted)] hover:text-white">
+            Sửa tên, ảnh, lời…
+          </button>
+          {onNewProject && (
+            <button type="button" onClick={() => leaveIfSaved(onNewProject)} className="text-sm text-[var(--muted)] hover:text-white">
+              Dự án mới
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={locked || lines.length === 0}
+            onClick={saveTiming}
+            className="rounded-full border border-[var(--gold)] px-4 py-1.5 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
+          >
+            {locked ? "Đang xuất… (lưu sau)" : dirty ? "Lưu dự án •" : "Lưu dự án"}
+          </button>
+          {saveError ? (
+            <span className="text-xs text-red-200">Chưa lưu được</span>
+          ) : savedPath && !dirty ? (
+            <button type="button" className="text-xs text-[var(--muted)] hover:text-[var(--gold)]" onClick={() => onReveal(savedPath)}>
+              Đã lưu
+            </button>
+          ) : null}
+        </>
+      }
     />
     <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
       <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
-            <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            {onRealign && (
-              <button
-                type="button"
-                disabled={locked}
-                onClick={onRealign}
-                className="text-sm text-[var(--gold)] disabled:opacity-40"
-              >
-                Ghép chữ lại
-              </button>
-            )}
-            <button type="button" onClick={() => leaveIfSaved(onBack)} className="text-sm text-[var(--muted)] hover:text-white">
-              Sửa tên, ảnh, lời…
-            </button>
-            {onNewProject && (
-              <button type="button" onClick={() => leaveIfSaved(onNewProject)} className="text-sm text-[var(--gold)] hover:text-white">
-                Dự án mới
-              </button>
-            )}
-          </div>
+        <div className="mb-4">
+          <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
+          <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
         </div>
         {(exported || outputs) && (
           <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
@@ -517,14 +533,17 @@ export function TimingEditor({
       )}
 
       <div className="sticky bottom-3 z-20 space-y-3 rounded-3xl border border-[var(--line)] bg-[var(--panel)]/95 p-4 shadow-lg backdrop-blur">
-        {removed && (
+        {removed.length > 0 && (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-black/30 px-3 py-2 text-sm text-[var(--muted)]">
-            <span className="min-w-0 truncate">Đã xoá câu {removed.index + 1}: {removed.line.text}</span>
+            <span className="min-w-0 truncate">
+              {removed.length > 1 ? `Đã xoá ${removed.length} câu. Gần nhất: ` : "Đã xoá câu: "}
+              {removed[removed.length - 1].text}
+            </span>
             <div className="flex shrink-0 items-center gap-3">
               <button type="button" disabled={locked} className="text-[var(--gold)] disabled:opacity-40" onClick={undoRemove}>
                 Hoàn tác
               </button>
-              <button type="button" className="hover:text-white" onClick={() => setRemoved(null)}>
+              <button type="button" className="hover:text-white" onClick={() => setRemoved([])}>
                 Ẩn
               </button>
             </div>
@@ -572,14 +591,6 @@ export function TimingEditor({
           Tên file có hậu tố thời gian (vd. 20261019-161005) nên xuất lại không ghi đè bản trước.
         </p>
         <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            disabled={locked || lines.length === 0}
-            onClick={saveTiming}
-            className="rounded-2xl border border-[var(--gold)] px-5 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
-          >
-            {locked ? "Đang xuất… (lưu sau)" : "Lưu dự án"}
-          </button>
           <button
             type="button"
             disabled={locked || lines.length === 0 || exportGaps.length > 0 || !exportDir.trim()}

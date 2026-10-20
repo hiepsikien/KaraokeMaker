@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { formatSeconds, type TimedLine, type TimedWord } from "@/lib/cue";
 
@@ -10,6 +10,7 @@ type Edge = "move" | "start" | "end";
 const RULER = 18;
 const WAVE = 92;
 const LANE = 58;
+const MIN_ROW = 24;
 const MAX_PPS = 720;
 
 function shiftWords(words: TimedWord[], delta: number) {
@@ -106,6 +107,7 @@ export function AlignTimeline({
   onSplitLine,
   onDragEnd,
   onRemoveLine,
+  actions,
   selectedWord,
   canSplit,
 }: {
@@ -128,6 +130,7 @@ export function AlignTimeline({
   onSplitLine: () => void;
   onDragEnd?: () => void;
   onRemoveLine?: (index: number) => void;
+  actions?: ReactNode;
 }) {
   const { peaks, failed } = usePeaks(jobId);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -393,13 +396,16 @@ export function AlignTimeline({
     rowEnds[row] = line.end;
     rows.push(row);
   });
-  const rowHeight = Math.min(38, (LANE - 6) / Math.max(1, rowEnds.length));
+  const rowCount = activeIndex == null ? Math.max(1, rowEnds.length) : 1;
+  const lane = Math.max(LANE, 6 + rowCount * MIN_ROW);
+  const rowHeight = Math.min(38, (lane - 6) / rowCount);
   const selected = activeIndex == null ? null : lines[activeIndex];
 
   return (
     <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-3 sm:p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
+      <div className="mb-3 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">
             {activeIndex == null ? "Biên các câu" : `Câu ${activeIndex + 1} · biên từng chữ`}
           </p>
@@ -408,6 +414,8 @@ export function AlignTimeline({
               ? "Kéo cả câu để dời, kể cả khi phải đi qua câu khác. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ."
               : "Kéo vùng vàng trên sóng âm để dời cả câu, kể cả khi lệch xa câu bên cạnh. Kéo từng chữ để chỉnh chỗ hát. Bấm Các câu để quay lại."}
           </p>
+        </div>
+        {actions && <div className="flex flex-wrap items-center justify-end gap-4">{actions}</div>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" className="rounded-full bg-[var(--gold)] px-3 py-1 text-xs font-semibold text-[#1a1206]" onClick={onTogglePlay}>
@@ -462,9 +470,9 @@ export function AlignTimeline({
           className="overflow-x-auto overflow-y-hidden"
           onScroll={() => setScrollLeft(scrollRef.current?.scrollLeft ?? 0)}
         >
-          <div style={{ width: trackWidth, height: RULER + WAVE + LANE + 14 }} />
+          <div style={{ width: trackWidth, height: RULER + WAVE + lane + 14 }} />
         </div>
-        <div className="absolute inset-x-0 top-0" style={{ height: RULER + WAVE + LANE }}>
+        <div className="absolute inset-x-0 top-0" style={{ height: RULER + WAVE + lane }}>
           <div className="relative overflow-hidden border-b border-white/10" style={{ height: RULER }} onPointerDown={beginPan}>
             {ticks.map((mark) => (
               <span key={mark} className="absolute top-0 text-[10px] text-[var(--muted)]" style={{ left: mark * pps - scrollLeft + 4 }}>
@@ -490,7 +498,7 @@ export function AlignTimeline({
             {!peaks && !failed && <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--muted)]">Đang vẽ sóng âm…</p>}
             {failed && <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--muted)]">Không vẽ được sóng âm. Vẫn kéo được chữ.</p>}
           </div>
-          <div className="relative overflow-hidden bg-black/35" style={{ height: LANE }} onPointerDown={beginPan}>
+          <div className="relative overflow-hidden bg-black/35" style={{ height: lane }} onPointerDown={beginPan}>
             {activeIndex != null &&
               lines.map((line, index) => (
                 <button
