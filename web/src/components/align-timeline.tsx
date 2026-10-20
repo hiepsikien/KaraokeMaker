@@ -104,6 +104,8 @@ export function AlignTimeline({
   onSelectWord,
   onAddLine,
   onSplitLine,
+  onDragEnd,
+  onRemoveLine,
   selectedWord,
   canSplit,
 }: {
@@ -124,6 +126,8 @@ export function AlignTimeline({
   onSelectWord: (index: number) => void;
   onAddLine: () => void;
   onSplitLine: () => void;
+  onDragEnd?: () => void;
+  onRemoveLine?: (index: number) => void;
 }) {
   const { peaks, failed } = usePeaks(jobId);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -300,9 +304,11 @@ export function AlignTimeline({
   }
 
   function limits(index: number) {
+    const line = lines[index];
+    // A line already overlapping a neighbour may not grow further into it, but is never squeezed.
     return {
-      previous: index > 0 ? lines[index - 1].end + 0.02 : 0,
-      next: index + 1 < lines.length ? lines[index + 1].start - 0.02 : songLength,
+      previous: index > 0 ? Math.min(lines[index - 1].end + 0.02, line.start) : 0,
+      next: index + 1 < lines.length ? Math.max(lines[index + 1].start - 0.02, line.end) : songLength,
     };
   }
 
@@ -364,7 +370,8 @@ export function AlignTimeline({
       target.onpointermove = null;
       target.onpointerup = null;
       target.onpointercancel = null;
-      if (!dragged) onClick();
+      if (dragged) onDragEnd?.();
+      else onClick();
     };
     event.currentTarget.onpointermove = move;
     event.currentTarget.onpointerup = finish;
@@ -378,6 +385,10 @@ export function AlignTimeline({
     if (mark >= 0) ticks.push(mark);
   }
   const playhead = time * pps - scrollLeft;
+  const rows: number[] = [];
+  lines.forEach((line, index) => {
+    rows.push(index > 0 && line.start < lines[index - 1].end ? 1 - rows[index - 1] : 0);
+  });
   const selected = activeIndex == null ? null : lines[activeIndex];
 
   return (
@@ -409,6 +420,16 @@ export function AlignTimeline({
           >
             Chia câu
           </button>
+          {activeIndex != null && onRemoveLine && (
+            <button
+              type="button"
+              disabled={locked}
+              className="rounded-full border border-[var(--line)] px-3 py-1 text-xs hover:border-red-300 hover:text-red-200 disabled:opacity-40"
+              onClick={() => onRemoveLine(activeIndex)}
+            >
+              Xoá câu
+            </button>
+          )}
           {activeIndex != null && (
             <button type="button" className="rounded-full border border-[var(--line)] px-3 py-1 text-xs text-[var(--gold)]" onClick={() => onSelectLine(null)}>
               Các câu
@@ -508,7 +529,7 @@ export function AlignTimeline({
                   title={`Câu ${index + 1} · ${formatSeconds(line.start)} – ${formatSeconds(line.end)}`}
                   left={line.start * pps - scrollLeft}
                   width={(line.end - line.start) * pps}
-                  top={10}
+                  top={rows[index] ? 20 : 4}
                   active={index === selectedLine}
                   disabled={locked}
                   onEdge={(event, edge) =>

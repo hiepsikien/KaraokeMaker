@@ -434,19 +434,16 @@ def _trusted(anchors: list[tuple[int, int, float]], token_count: int) -> bool:
 _LONGEST_WORD = 4.0
 
 
-def _plausible_heard(text: str, start: float, end: float) -> bool:
-    """Drop Whisper's hallucinations: one word held for many seconds, or a non-Latin script."""
-    if end - start > _LONGEST_WORD:
-        return False
+def _held_long(word: dict) -> bool:
+    return word["end"] - word["start"] > _LONGEST_WORD
+
+
+def _plausible_heard(text: str) -> bool:
+    """Drop Whisper's hallucinations in a non-Latin script. Long held words are judged after pairing."""
     for char in text:
         if char.isalpha() and "LATIN" not in unicodedata.name(char, ""):
             return False
     return True
-
-
-def _looks_vietnamese(text: str) -> bool:
-    """Whisper writes Vietnamese with tone marks or đ. Bare ASCII here is usually English noise."""
-    return any(char.isalpha() and not char.isascii() for char in text)
 
 
 def _after_previous(line: dict, previous_end: float) -> dict:
@@ -455,7 +452,9 @@ def _after_previous(line: dict, previous_end: float) -> dict:
         return line
     start = previous_end + 0.02
     if line["end"] - start < 0.08 * len(line["words"]):
-        return line
+        flagged = dict(line)
+        flagged["uncertain"] = True
+        return flagged
     span = max(1e-6, line["end"] - line["start"])
     scale = (line["end"] - start) / span
     words = [
@@ -483,7 +482,11 @@ def _words_from_anchors(tokens: list[str], anchors: list[tuple[int, int, float]]
     """Paired syllables keep the heard time. Unpaired ones fill in between their neighbours."""
     times: list[tuple[float, float] | None] = [None] * len(tokens)
     for position, heard_index, _score in anchors:
-        times[position] = (flat[heard_index]["start"], flat[heard_index]["end"])
+        start, end = flat[heard_index]["start"], flat[heard_index]["end"]
+        if position == 0 and end - start > _LONGEST_WORD:
+            # Whisper stretches an opening word back over the silence before it.
+            start = end - _LONGEST_WORD
+        times[position] = (start, end)
 
     first_position, first_heard, _ = anchors[0]
     last_position, last_heard, _ = anchors[-1]
@@ -593,11 +596,14 @@ def _place_unheard(lines: list[str], placed: list[dict | None]) -> list[dict]:
 
 
 def _supplement_unmatched(segments: list[dict], used: set[int]) -> list[dict]:
-    """Heard phrases that the typed lyrics never claimed: backing vocals, tags, endings."""
+    """Heard phrases that the typed lyrics never claimed: backing vocals, tags, endings.
+
+    Kept even when Whisper wrote them without tone marks; the user fixes the text in the editor.
+    """
     extras: list[dict] = []
     for segment in segments:
         words = segment["words"]
-        unused = [word for word in words if word["id"] not in used]
+        unused = [word for word in words if word["id"] not in used and not _held_long(word)]
         if not unused:
             continue
         duration = unused[-1]["end"] - unused[0]["start"]
@@ -606,14 +612,20 @@ def _supplement_unmatched(segments: list[dict], used: set[int]) -> list[dict]:
         if len(unused) / len(words) < 0.6:
             continue
         text = " ".join(word["text"] for word in unused)
-        if not _looks_vietnamese(text):
-            continue
         extras.append(_line_from_words(text, [_word_dict(word["text"], word["start"], word["end"]) for word in unused], uncertain=True, supplemented=True))
     return extras
 
 
+def _echoes(extra: dict, line: dict) -> bool:
+    """Most of the heard syllables pair with the typed line's: the same phrase, misheard."""
+    heard = [_fold_token(word["text"]) for word in extra["words"]]
+    typed = [_fold_token(word["text"]) for word in line["words"]]
+    paired = sum(1 for index, score in _align_tokens(heard, typed) if index is not None and score >= 0.5)
+    return paired / max(1, len(heard)) >= 0.5
+
+
 def _drop_covered_supplements(extras: list[dict], lyric_lines: list[dict]) -> list[dict]:
-    """A heard line that sits on a typed line is the same phrase, misheard."""
+    """Drop a heard line that sits on a typed line and repeats it. Different words there are a backing part."""
     kept: list[dict] = []
     for extra in extras:
         duration = extra["end"] - extra["start"]
@@ -622,7 +634,7 @@ def _drop_covered_supplements(extras: list[dict], lyric_lines: list[dict]) -> li
         covered = False
         for line in lyric_lines:
             overlap = min(extra["end"], line["end"]) - max(extra["start"], line["start"])
-            if overlap > 0 and overlap / duration >= 0.5:
+            if overlap > 0 and overlap / duration >= 0.5 and _echoes(extra, line):
                 covered = True
                 break
         if not covered:
@@ -643,7 +655,7 @@ def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> 
         words = []
         for word in segment.get("words") or []:
             text = " ".join(str(word.get("text", "")).split())
-            if not text or not _plausible_heard(text, float(word["start"]), float(word["end"])):
+            if not text or not _plausible_heard(text):
                 continue
             heard = _word_dict(text, float(word["start"]), float(word["end"]))
             heard["id"] = len(flat)
@@ -664,8 +676,12 @@ def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> 
 
     anchors_by_line: list[list[tuple[int, int, float]]] = [[] for _ in lines]
     for (line_index, position), (heard_index, score) in zip(owners, pairs):
-        if heard_index is not None:
-            anchors_by_line[line_index].append((position, heard_index, score))
+        if heard_index is None:
+            continue
+        if _held_long(flat[heard_index]) and score < _SURE:
+            # One word held for many seconds is a hallucination unless it is clearly the typed word.
+            continue
+        anchors_by_line[line_index].append((position, heard_index, score))
 
     if not any(score >= _SURE for _heard, score in pairs if _heard is not None):
         raise AlignError(

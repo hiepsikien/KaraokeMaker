@@ -25,6 +25,7 @@ from karaoke.pipeline import (
     JobError,
     export_gaps,
     load_timing_file,
+    normalize_edited_lines,
     normalize_export_format,
     open_project_file,
     render_job,
@@ -300,6 +301,23 @@ class TranscriptReconcileTests(unittest.TestCase):
         self.assertEqual(matched[0]["words"][0]["text"], "Màn")
         self.assertEqual(matched[0]["start"], 10)
 
+    def test_keeps_a_heard_ending_written_without_tone_marks(self):
+        lyrics = ["Màn sương buông"]
+        lead = [
+            {"text": "màn", "start": 10, "end": 10.4},
+            {"text": "sương", "start": 10.4, "end": 10.8},
+            {"text": "buông", "start": 10.8, "end": 11.2},
+        ]
+        ending = [
+            {"text": "ve", "start": 40, "end": 40.4},
+            {"text": "nha", "start": 40.4, "end": 40.9},
+            {"text": "thoi", "start": 40.9, "end": 41.4},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": lead}, {"words": ending}])
+        added = [line for line in matched if line.get("supplemented")]
+        self.assertEqual([line["text"] for line in added], ["ve nha thoi"])
+        self.assertEqual(added[0]["start"], 40)
+
     def test_puts_an_unmatched_lyric_just_before_the_next_heard_line(self):
         lyrics = ["câu chưa nghe thấy gì cả", "Màn sương buông"]
         lead = [
@@ -405,7 +423,23 @@ class TranscriptReconcileTests(unittest.TestCase):
         self.assertGreater(lyric["start"], 55)
         self.assertLess(lyric["end"] - lyric["start"], 6)
 
-    def test_drops_a_heard_line_covered_by_typed_lyrics(self):
+    def test_drops_a_heard_echo_of_a_typed_line(self):
+        lyrics = ["Màn sương buông vương lối phố rêu phong"]
+        heard = "man suong buong vuong loi pho reu phong".split()
+        verse = [
+            {"text": word, "start": 10 + index * 0.4, "end": 10.35 + index * 0.4}
+            for index, word in enumerate(heard)
+        ]
+        echo = [
+            {"text": "mằn", "start": 10.1, "end": 10.5},
+            {"text": "sướng", "start": 10.5, "end": 10.9},
+            {"text": "buồng", "start": 10.9, "end": 11.3},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": verse}, {"words": echo}])
+        self.assertEqual([line["text"] for line in matched], lyrics)
+        self.assertFalse(any(line.get("supplemented") for line in matched))
+
+    def test_keeps_a_backing_part_sung_over_a_typed_line(self):
         lyrics = ["Màn sương buông vương lối phố rêu phong"]
         heard = "man suong buong vuong loi pho reu phong".split()
         verse = [
@@ -418,8 +452,64 @@ class TranscriptReconcileTests(unittest.TestCase):
             {"text": "phụ", "start": 11.3, "end": 11.7},
         ]
         matched = reconcile_lyrics_with_transcript(lyrics, [{"words": verse}, {"words": harmony}])
+        added = [line["text"] for line in matched if line.get("supplemented")]
+        self.assertEqual(added, ["hát bè phụ"])
+
+    def test_a_held_closing_word_keeps_its_sung_end(self):
+        lyrics = ["Màn sương buông"]
+        words = [
+            {"text": "màn", "start": 10, "end": 10.4},
+            {"text": "sương", "start": 10.4, "end": 10.8},
+            {"text": "buông", "start": 10.8, "end": 15.8},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": words}])
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0]["end"], 15.8)
+
+    def test_a_long_unpaired_word_is_not_used(self):
+        lyrics = ["Màn sương buông"]
+        stray = [{"text": "ừm", "start": 0, "end": 9}]
+        verse = [
+            {"text": "màn", "start": 10, "end": 10.4},
+            {"text": "sương", "start": 10.4, "end": 10.8},
+            {"text": "buông", "start": 10.8, "end": 11.2},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": stray}, {"words": verse}])
         self.assertEqual([line["text"] for line in matched], lyrics)
-        self.assertFalse(any(line.get("supplemented") for line in matched))
+        self.assertEqual(matched[0]["start"], 10)
+
+    def test_a_line_that_cannot_clear_the_one_before_is_flagged(self):
+        from karaoke.align import _after_previous
+
+        line = {
+            "text": "một hai",
+            "start": 5.0,
+            "end": 5.1,
+            "words": [
+                {"text": "một", "start": 5.0, "end": 5.05},
+                {"text": "hai", "start": 5.05, "end": 5.1},
+            ],
+        }
+        self.assertTrue(_after_previous(line, 5.08)["uncertain"])
+
+    def test_a_long_song_aligns_in_reasonable_time(self):
+        import random
+        import time
+
+        rng = random.Random(4)
+        vocab = "màn sương buông vương lối phố rêu phong ngàn năm gông cùm đập tan từ đây bạch đằng dậy sóng cắm mốc chủ quyền khúc ca tự xua bóng đêm".split()
+        lyrics = [" ".join(rng.choice(vocab) for _ in range(8)) for _ in range(60)]
+        words = []
+        cursor = 5.0
+        for line in lyrics:
+            for token in line.split():
+                words.append({"text": token, "start": cursor, "end": cursor + 0.35})
+                cursor += 0.4
+            cursor += 1.0
+        began = time.perf_counter()
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": words}])
+        self.assertLess(time.perf_counter() - began, 10)
+        self.assertEqual(len([line for line in matched if not line.get("supplemented")]), len(lyrics))
 
     def test_rejects_lyrics_that_match_nothing_that_was_heard(self):
         from karaoke.align import AlignError
@@ -429,6 +519,15 @@ class TranscriptReconcileTests(unittest.TestCase):
                 ["hoàn toàn khác biệt"],
                 [{"words": [{"text": "một", "start": 1, "end": 1.4}, {"text": "hai", "start": 1.4, "end": 1.8}]}],
             )
+
+
+class EditedLinesTests(unittest.TestCase):
+    def test_a_line_dragged_past_another_is_saved_in_time_order(self):
+        lines = [
+            {"text": "sau", "words": [{"text": "sau", "start": 20, "end": 20.5}]},
+            {"text": "trước", "words": [{"text": "trước", "start": 10, "end": 10.5}]},
+        ]
+        self.assertEqual([line["text"] for line in normalize_edited_lines(lines)], ["trước", "sau"])
 
 
 class AccessTests(unittest.TestCase):

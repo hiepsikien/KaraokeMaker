@@ -65,6 +65,7 @@ export function TimingEditor({
   onBack,
   onRealign,
   onFillGaps,
+  onNewProject,
   exportGaps = [],
 }: {
   jobId: string;
@@ -82,6 +83,7 @@ export function TimingEditor({
   onBack: () => void;
   onRealign?: () => void;
   onFillGaps?: () => void;
+  onNewProject?: () => void;
   exportGaps?: string[];
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -128,6 +130,24 @@ export function TimingEditor({
     setLines((current) => current.map((item, itemIndex) => (itemIndex === index ? line : item)));
   }
 
+  const reorder = useRef<number[] | null>(null);
+
+  function sortLines() {
+    setLines((current) => {
+      const order = current.map((_, index) => index).sort((a, b) => current[a].start - current[b].start || a - b);
+      if (order.every((from, to) => from === to)) return current;
+      reorder.current = order;
+      return order.map((from) => current[from]);
+    });
+  }
+
+  useEffect(() => {
+    const order = reorder.current;
+    if (!order) return;
+    reorder.current = null;
+    setSelectedLine((selected) => (selected == null ? selected : order.indexOf(selected)));
+  }, [lines]);
+
   function changeWord(lineIndex: number, wordIndex: number, text: string) {
     const line = lines[lineIndex];
     const words = line.words.map((word, index) => (index === wordIndex ? { ...word, text } : word));
@@ -151,6 +171,16 @@ export function TimingEditor({
       return;
     }
     replaceLine(lineIndex, syncLine({ ...line, words }));
+  }
+
+  function removeLine(lineIndex: number) {
+    markDirty();
+    setLines((current) => current.filter((_, index) => index !== lineIndex));
+    setSelectedWord(null);
+    setSelectedLine((selected) => {
+      if (selected == null || selected === lineIndex) return null;
+      return selected > lineIndex ? selected - 1 : selected;
+    });
   }
 
   useEffect(() => {
@@ -300,6 +330,8 @@ export function TimingEditor({
       onPlayFrom={playFrom}
       onAddLine={addLine}
       onSplitLine={() => splitLine()}
+      onDragEnd={sortLines}
+      onRemoveLine={removeLine}
     />
     <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
       <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
@@ -320,17 +352,22 @@ export function TimingEditor({
               </button>
             )}
             <button type="button" onClick={onBack} className="text-sm text-[var(--muted)] hover:text-white">
-              Khai báo dự án
+              Sửa tên, ảnh, lời…
             </button>
+            {onNewProject && (
+              <button type="button" onClick={onNewProject} className="text-sm text-[var(--gold)] hover:text-white">
+                Dự án mới
+              </button>
+            )}
           </div>
         </div>
         {(exported || outputs) && (
           <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
             {exported && !dirty
-              ? "Đã xuất video. Kéo sửa timing bên dưới — nút Lưu dự án luôn dùng được; xong thì Xuất lại."
+              ? "Đã xuất video. Muốn đổi tên bài, ảnh bìa, ảnh nền: bấm Sửa tên, ảnh, lời… rồi Lưu khai báo và vào biên tập, sau đó Xuất lại. Bài khác: Dự án mới."
               : dirty
                 ? "Đang sửa sau khi xuất. Hãy Lưu dự án, rồi Xuất lại nếu cần video mới."
-                : "Có bản video đã xuất. Bạn vẫn có thể sửa timing và Lưu dự án bất cứ lúc nào."}
+                : "Có bản video đã xuất. Sửa timing tại đây; sửa tên/ảnh/lời ở Sửa tên, ảnh, lời… rồi Xuất lại."}
           </p>
         )}
         <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl bg-black/45 px-4 py-5">
@@ -380,18 +417,31 @@ export function TimingEditor({
               <span>
                 Câu {lineIndex + 1} · {formatSeconds(line.start)} – {formatSeconds(line.end)}
               </span>
-              <button
-                type="button"
-                disabled={locked}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  chooseLine(lineIndex);
-                  playFrom(line.start);
-                }}
-                className="text-[var(--gold)] disabled:opacity-40"
-              >
-                Nghe câu này
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={locked}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    chooseLine(lineIndex);
+                    playFrom(line.start);
+                  }}
+                  className="text-[var(--gold)] disabled:opacity-40"
+                >
+                  Nghe câu này
+                </button>
+                <button
+                  type="button"
+                  disabled={locked}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeLine(lineIndex);
+                  }}
+                  className="hover:text-red-200 disabled:opacity-40"
+                >
+                  Xoá câu
+                </button>
+              </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {line.words.map((word, wordIndex) => (
