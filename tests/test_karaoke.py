@@ -353,6 +353,74 @@ class TranscriptReconcileTests(unittest.TestCase):
         self.assertEqual(sung[0]["start"], 100)
         self.assertEqual(sung[1]["start"], 200)
 
+    def test_misheard_opening_keeps_the_typed_line_at_the_heard_time(self):
+        lyrics = ["Thủy quái Nam Hán rẽ sóng ngàn vùng"]
+        heard = "Thì quái Nam Hàn dễ sông ngàn vùng".split()
+        words = [
+            {"text": word, "start": 77.7 + index * 0.6, "end": 78.2 + index * 0.6}
+            for index, word in enumerate(heard)
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": words}])
+        self.assertEqual([line["text"] for line in matched], lyrics)
+        self.assertEqual(matched[0]["words"][0]["text"], "Thủy")
+        self.assertEqual(matched[0]["start"], 77.7)
+        self.assertFalse(any(line.get("supplemented") for line in matched))
+
+    def test_misheard_lines_take_their_sung_time_not_the_next_match(self):
+        lyrics = [
+            "Ngàn năm gông cùm... đập tan từ đây!",
+            "Bạch Đằng dậy sóng, cắm mốc chủ quyền!",
+            "Khúc ca tự chủ, xua tan bóng đêm!",
+            "Xung phong... Khải hoàn vạn thu!",
+        ]
+
+        def heard(text, start, step=0.4):
+            return [
+                {"text": word, "start": start + index * step, "end": start + index * step + step * 0.9}
+                for index, word in enumerate(text.split())
+            ]
+
+        segments = [
+            {"words": heard("Ngàn năm gông cùm... đập tan từ đây!", 254.3)},
+            {"words": heard("Và nhăng giấy sống, đâm bộ trú huyền", 257.6)},
+            {"words": heard("Phúc ca thư trù, xua tham bóng đen", 260.8)},
+            {"words": heard("Xung phong... Khải hoàn vạn thu!", 277.3)},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, segments)
+        self.assertEqual([line["text"] for line in matched], lyrics)
+        self.assertFalse(any(line.get("supplemented") for line in matched))
+        self.assertAlmostEqual(matched[1]["start"], 257.6, delta=0.5)
+        self.assertAlmostEqual(matched[2]["start"], 260.8, delta=0.5)
+        self.assertLess(matched[2]["end"], 265)
+
+    def test_a_line_split_far_apart_keeps_its_main_phrase(self):
+        lyrics = ["Màn sương buông vương lối phố rêu phong"]
+        stray = [{"text": "màn", "start": 5, "end": 5.4}]
+        verse = [
+            {"text": word, "start": 60 + index * 0.4, "end": 60.35 + index * 0.4}
+            for index, word in enumerate("sương buông vương lối phố rêu phong".split())
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": stray}, {"words": verse}])
+        lyric = next(line for line in matched if not line.get("supplemented"))
+        self.assertGreater(lyric["start"], 55)
+        self.assertLess(lyric["end"] - lyric["start"], 6)
+
+    def test_drops_a_heard_line_covered_by_typed_lyrics(self):
+        lyrics = ["Màn sương buông vương lối phố rêu phong"]
+        heard = "man suong buong vuong loi pho reu phong".split()
+        verse = [
+            {"text": word, "start": 10 + index * 0.4, "end": 10.35 + index * 0.4}
+            for index, word in enumerate(heard)
+        ]
+        harmony = [
+            {"text": "hát", "start": 10.5, "end": 10.9},
+            {"text": "bè", "start": 10.9, "end": 11.3},
+            {"text": "phụ", "start": 11.3, "end": 11.7},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": verse}, {"words": harmony}])
+        self.assertEqual([line["text"] for line in matched], lyrics)
+        self.assertFalse(any(line.get("supplemented") for line in matched))
+
     def test_rejects_lyrics_that_match_nothing_that_was_heard(self):
         from karaoke.align import AlignError
 
