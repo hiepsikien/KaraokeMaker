@@ -621,7 +621,9 @@ def _echoes(extra: dict, line: dict) -> bool:
     heard = [_fold_token(word["text"]) for word in extra["words"]]
     typed = [_fold_token(word["text"]) for word in line["words"]]
     paired = sum(1 for index, score in _align_tokens(heard, typed) if index is not None and score >= 0.5)
-    return paired / max(1, len(heard)) >= 0.5
+    # A short ad-lib like "anh ơi" shares a syllable with almost any line, so it must repeat in full.
+    needed = len(heard) if len(heard) <= 2 else math.ceil(len(heard) * 0.5)
+    return len(heard) > 0 and paired >= needed
 
 
 def _drop_covered_supplements(extras: list[dict], lyric_lines: list[dict]) -> list[dict]:

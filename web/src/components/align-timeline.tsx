@@ -386,9 +386,14 @@ export function AlignTimeline({
   }
   const playhead = time * pps - scrollLeft;
   const rows: number[] = [];
-  lines.forEach((line, index) => {
-    rows.push(index > 0 && line.start < lines[index - 1].end ? 1 - rows[index - 1] : 0);
+  const rowEnds: number[] = [];
+  lines.forEach((line) => {
+    let row = rowEnds.findIndex((end) => end <= line.start);
+    if (row < 0) row = rowEnds.length;
+    rowEnds[row] = line.end;
+    rows.push(row);
   });
+  const rowHeight = Math.min(38, (LANE - 6) / Math.max(1, rowEnds.length));
   const selected = activeIndex == null ? null : lines[activeIndex];
 
   return (
@@ -529,7 +534,8 @@ export function AlignTimeline({
                   title={`Câu ${index + 1} · ${formatSeconds(line.start)} – ${formatSeconds(line.end)}`}
                   left={line.start * pps - scrollLeft}
                   width={(line.end - line.start) * pps}
-                  top={rows[index] ? 20 : 4}
+                  top={3 + rows[index] * rowHeight}
+                  height={rowHeight - 2}
                   active={index === selectedLine}
                   disabled={locked}
                   onEdge={(event, edge) =>
@@ -565,6 +571,7 @@ function Block({
   left,
   width,
   top,
+  height = 36,
   active,
   disabled,
   onEdge,
@@ -574,21 +581,23 @@ function Block({
   left: number;
   width: number;
   top: number;
+  height?: number;
   active?: boolean;
   disabled: boolean;
   onEdge: (event: ReactPointerEvent<HTMLButtonElement>, edge: Edge) => void;
 }) {
   return (
     <div
-      className={`absolute h-9 overflow-hidden rounded-md border ${active ? "border-[var(--gold)] bg-[var(--gold)]/30" : "border-[var(--gold)]/40 bg-[var(--gold)]/15"}`}
-      style={{ left, width: Math.max(width, 8), top }}
+      className={`absolute overflow-hidden rounded-md border ${active ? "border-[var(--gold)] bg-[var(--gold)]/30" : "border-[var(--gold)]/40 bg-[var(--gold)]/15"}`}
+      style={{ left, width: Math.max(width, 8), top, height }}
       title={title}
     >
       <button type="button" disabled={disabled} aria-label="Đổi lúc bắt đầu" className="absolute inset-y-0 left-0 z-10 w-2 cursor-ew-resize" onPointerDown={(event) => onEdge(event, "start")} />
       <button
         type="button"
         disabled={disabled}
-        className="h-full w-full cursor-grab truncate px-2 text-left text-[11px] leading-9 disabled:cursor-default"
+        className="h-full w-full cursor-grab truncate px-2 text-left text-[11px] disabled:cursor-default"
+        style={{ lineHeight: `${height - 2}px` }}
         onPointerDown={(event) => onEdge(event, "move")}
       >
         {text}

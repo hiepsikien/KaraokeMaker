@@ -455,6 +455,20 @@ class TranscriptReconcileTests(unittest.TestCase):
         added = [line["text"] for line in matched if line.get("supplemented")]
         self.assertEqual(added, ["hát bè phụ"])
 
+    def test_keeps_a_short_ad_lib_that_shares_one_syllable(self):
+        lyrics = ["Anh yêu em nhiều lắm"]
+        verse = [
+            {"text": word, "start": 10 + index * 0.5, "end": 10.45 + index * 0.5}
+            for index, word in enumerate("anh yêu em nhiều lắm".split())
+        ]
+        ad_lib = [
+            {"text": "anh", "start": 10.6, "end": 11.0},
+            {"text": "ơi", "start": 11.0, "end": 11.6},
+        ]
+        matched = reconcile_lyrics_with_transcript(lyrics, [{"words": verse}, {"words": ad_lib}])
+        added = [line["text"] for line in matched if line.get("supplemented")]
+        self.assertEqual(added, ["anh ơi"])
+
     def test_a_held_closing_word_keeps_its_sung_end(self):
         lyrics = ["Màn sương buông"]
         words = [
