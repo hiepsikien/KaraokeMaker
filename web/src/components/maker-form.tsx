@@ -409,6 +409,7 @@ export function MakerForm() {
             setPhase("home");
             setNotice("");
           }}
+          onNewProject={startCreate}
         />
       )}
 
@@ -562,6 +563,7 @@ export function MakerForm() {
             setNotice("Bổ sung các file còn thiếu rồi bấm lưu khai báo và vào biên tập.");
             setPhase("setup");
           }}
+          onNewProject={startCreate}
           exportGaps={job.export_gaps || []}
         />
       )}

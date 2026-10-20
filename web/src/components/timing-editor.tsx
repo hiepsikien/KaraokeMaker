@@ -65,6 +65,7 @@ export function TimingEditor({
   onBack,
   onRealign,
   onFillGaps,
+  onNewProject,
   exportGaps = [],
 }: {
   jobId: string;
@@ -82,6 +83,7 @@ export function TimingEditor({
   onBack: () => void;
   onRealign?: () => void;
   onFillGaps?: () => void;
+  onNewProject?: () => void;
   exportGaps?: string[];
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -97,6 +99,7 @@ export function TimingEditor({
   const [exportDir, setExportDir] = useState(defaultOutputDir);
   const [exportFormat, setExportFormat] = useState<ExportOptions["format"]>("mp4");
   const [browsingOutput, setBrowsingOutput] = useState(false);
+  const [removed, setRemoved] = useState<TimedLine[]>([]);
   const cue = cueAt(lines, time);
 
   useEffect(() => {
@@ -128,6 +131,24 @@ export function TimingEditor({
     setLines((current) => current.map((item, itemIndex) => (itemIndex === index ? line : item)));
   }
 
+  const reorder = useRef<number[] | null>(null);
+
+  function sortLines() {
+    setLines((current) => {
+      const order = current.map((_, index) => index).sort((a, b) => current[a].start - current[b].start || a - b);
+      if (order.every((from, to) => from === to)) return current;
+      reorder.current = order;
+      return order.map((from) => current[from]);
+    });
+  }
+
+  useEffect(() => {
+    const order = reorder.current;
+    if (!order) return;
+    reorder.current = null;
+    setSelectedLine((selected) => (selected == null ? selected : order.indexOf(selected)));
+  }, [lines]);
+
   function changeWord(lineIndex: number, wordIndex: number, text: string) {
     const line = lines[lineIndex];
     const words = line.words.map((word, index) => (index === wordIndex ? { ...word, text } : word));
@@ -151,6 +172,36 @@ export function TimingEditor({
       return;
     }
     replaceLine(lineIndex, syncLine({ ...line, words }));
+  }
+
+  function leaveIfSaved(leave: () => void) {
+    if (dirty && !window.confirm("Timing đã sửa chưa được lưu và sẽ mất. Vẫn rời màn Biên tập?")) return;
+    leave();
+  }
+
+  function removeLine(lineIndex: number) {
+    const line = lines[lineIndex];
+    if (!line) return;
+    markDirty();
+    setRemoved((current) => [...current, line]);
+    setLines((current) => current.filter((_, index) => index !== lineIndex));
+    setSelectedWord(null);
+    setSelectedLine((selected) => {
+      if (selected == null || selected === lineIndex) return null;
+      return selected > lineIndex ? selected - 1 : selected;
+    });
+  }
+
+  function undoRemove() {
+    const line = removed[removed.length - 1];
+    if (!line) return;
+    markDirty();
+    const later = lines.findIndex((item) => item.start > line.start);
+    const index = later < 0 ? lines.length : later;
+    setRemoved(removed.slice(0, -1));
+    setLines([...lines.slice(0, index), line, ...lines.slice(index)]);
+    setSelectedWord(null);
+    setSelectedLine((selected) => (selected != null && selected >= index ? selected + 1 : selected));
   }
 
   useEffect(() => {
@@ -300,37 +351,59 @@ export function TimingEditor({
       onPlayFrom={playFrom}
       onAddLine={addLine}
       onSplitLine={() => splitLine()}
+      onDragEnd={sortLines}
+      onRemoveLine={removeLine}
+      actions={
+        <>
+          {onRealign && (
+            <button
+              type="button"
+              disabled={locked}
+              onClick={() => leaveIfSaved(onRealign)}
+              className="text-sm text-[var(--gold)] hover:text-white disabled:opacity-40"
+            >
+              Ghép chữ lại
+            </button>
+          )}
+          <button type="button" onClick={() => leaveIfSaved(onBack)} className="text-sm text-[var(--muted)] hover:text-white">
+            Sửa tên, ảnh, lời…
+          </button>
+          {onNewProject && (
+            <button type="button" onClick={() => leaveIfSaved(onNewProject)} className="text-sm text-[var(--muted)] hover:text-white">
+              Dự án mới
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={locked || lines.length === 0}
+            onClick={saveTiming}
+            className="rounded-full border border-[var(--gold)] px-4 py-1.5 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
+          >
+            {locked ? "Đang xuất… (lưu sau)" : dirty ? "Lưu dự án •" : "Lưu dự án"}
+          </button>
+          {saveError ? (
+            <span className="text-xs text-red-200">Chưa lưu được</span>
+          ) : savedPath && !dirty ? (
+            <button type="button" className="text-xs text-[var(--muted)] hover:text-[var(--gold)]" onClick={() => onReveal(savedPath)}>
+              Đã lưu
+            </button>
+          ) : null}
+        </>
+      }
     />
     <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
       <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
-            <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            {onRealign && (
-              <button
-                type="button"
-                disabled={locked}
-                onClick={onRealign}
-                className="text-sm text-[var(--gold)] disabled:opacity-40"
-              >
-                Ghép chữ lại
-              </button>
-            )}
-            <button type="button" onClick={onBack} className="text-sm text-[var(--muted)] hover:text-white">
-              Khai báo dự án
-            </button>
-          </div>
+        <div className="mb-4">
+          <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
+          <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
         </div>
         {(exported || outputs) && (
           <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
             {exported && !dirty
-              ? "Đã xuất video. Kéo sửa timing bên dưới — nút Lưu dự án luôn dùng được; xong thì Xuất lại."
+              ? "Đã xuất video. Muốn đổi tên bài, ảnh bìa, ảnh nền: bấm Sửa tên, ảnh, lời… rồi Lưu khai báo và vào biên tập, sau đó Xuất lại. Bài khác: Dự án mới."
               : dirty
                 ? "Đang sửa sau khi xuất. Hãy Lưu dự án, rồi Xuất lại nếu cần video mới."
-                : "Có bản video đã xuất. Bạn vẫn có thể sửa timing và Lưu dự án bất cứ lúc nào."}
+                : "Có bản video đã xuất. Sửa timing tại đây; sửa tên/ảnh/lời ở Sửa tên, ảnh, lời… rồi Xuất lại."}
           </p>
         )}
         <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl bg-black/45 px-4 py-5">
@@ -373,25 +446,38 @@ export function TimingEditor({
             )}
             {line.uncertain && !line.supplemented && (
               <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
-                Câu này được ghép ước lượng. Hãy nghe và kéo lại từng chữ.
+                Câu này được ghép ước lượng. Kéo vùng vàng trên sóng âm để dời cả câu, hoặc kéo từng chữ.
               </p>
             )}
             <div className="mb-3 flex items-center justify-between gap-3 text-xs text-[var(--muted)]">
               <span>
                 Câu {lineIndex + 1} · {formatSeconds(line.start)} – {formatSeconds(line.end)}
               </span>
-              <button
-                type="button"
-                disabled={locked}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  chooseLine(lineIndex);
-                  playFrom(line.start);
-                }}
-                className="text-[var(--gold)] disabled:opacity-40"
-              >
-                Nghe câu này
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={locked}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    chooseLine(lineIndex);
+                    playFrom(line.start);
+                  }}
+                  className="text-[var(--gold)] disabled:opacity-40"
+                >
+                  Nghe câu này
+                </button>
+                <button
+                  type="button"
+                  disabled={locked}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeLine(lineIndex);
+                  }}
+                  className="hover:text-red-200 disabled:opacity-40"
+                >
+                  Xoá câu
+                </button>
+              </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {line.words.map((word, wordIndex) => (
@@ -447,6 +533,22 @@ export function TimingEditor({
       )}
 
       <div className="sticky bottom-3 z-20 space-y-3 rounded-3xl border border-[var(--line)] bg-[var(--panel)]/95 p-4 shadow-lg backdrop-blur">
+        {removed.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-black/30 px-3 py-2 text-sm text-[var(--muted)]">
+            <span className="min-w-0 truncate">
+              {removed.length > 1 ? `Đã xoá ${removed.length} câu. Gần nhất: ` : "Đã xoá câu: "}
+              {removed[removed.length - 1].text}
+            </span>
+            <div className="flex shrink-0 items-center gap-3">
+              <button type="button" disabled={locked} className="text-[var(--gold)] disabled:opacity-40" onClick={undoRemove}>
+                Hoàn tác
+              </button>
+              <button type="button" className="hover:text-white" onClick={() => setRemoved([])}>
+                Ẩn
+              </button>
+            </div>
+          </div>
+        )}
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px] sm:items-end">
           <label className="block min-w-0">
             <span className="mb-1.5 block text-xs font-semibold tracking-[0.14em] text-[var(--gold)] uppercase">
@@ -491,14 +593,6 @@ export function TimingEditor({
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            disabled={locked || lines.length === 0}
-            onClick={saveTiming}
-            className="rounded-2xl border border-[var(--gold)] px-5 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
-          >
-            {locked ? "Đang xuất… (lưu sau)" : "Lưu dự án"}
-          </button>
-          <button
-            type="button"
             disabled={locked || lines.length === 0 || exportGaps.length > 0 || !exportDir.trim()}
             onClick={startExport}
             className="rounded-2xl bg-[var(--gold)] px-5 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
@@ -510,7 +604,7 @@ export function TimingEditor({
           <p className="text-sm text-[var(--muted)]">
             Chưa xuất được vì còn thiếu {exportGaps.join(", ")}.{" "}
             {onFillGaps ? (
-              <button type="button" className="text-[var(--gold)]" onClick={onFillGaps}>
+              <button type="button" className="text-[var(--gold)]" onClick={() => leaveIfSaved(onFillGaps)}>
                 Bổ sung file trong khai báo
               </button>
             ) : (
