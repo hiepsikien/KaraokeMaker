@@ -312,7 +312,7 @@ export function AlignTimeline({
     const { previous, next } = limits(index);
     const span = Math.max(0.2, line.end - line.start);
     if (edge === "move") {
-      const start = Math.min(Math.max(line.start + delta, previous), Math.max(previous, next - span));
+      const start = Math.min(Math.max(line.start + delta, 0), Math.max(0, songLength - span));
       onChangeLine(index, withWords(line, shiftWords(line.words, start - line.start)));
       return;
     }
@@ -389,8 +389,8 @@ export function AlignTimeline({
           </p>
           <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
             {activeIndex == null
-              ? "Kéo cả câu để dời. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ. Chia câu cắt đôi tại vạch phát."
-              : "Kéo chữ tới chỗ hát bắt đầu. Kéo mép chữ để đổi độ dài. Chia câu cắt đôi tại chữ đang chọn. Bấm Các câu để quay lại."}
+              ? "Kéo cả câu để dời, kể cả khi phải đi qua câu khác. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ."
+              : "Kéo vùng vàng trên sóng âm để dời cả câu, kể cả khi lệch xa câu bên cạnh. Kéo từng chữ để chỉnh chỗ hát. Bấm Các câu để quay lại."}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -448,10 +448,17 @@ export function AlignTimeline({
           </div>
           <div className="relative cursor-grab overflow-hidden bg-black/50" style={{ height: WAVE }} onPointerDown={beginPan}>
             <canvas ref={canvasRef} className="h-full w-full" />
-            {selected && (
-              <div
-                className="pointer-events-none absolute top-0 bottom-0 bg-[var(--gold)]/10"
-                style={{ left: selected.start * pps - scrollLeft, width: Math.max(0, (selected.end - selected.start) * pps) }}
+            {selected && activeIndex != null && (
+              <button
+                type="button"
+                disabled={locked}
+                aria-label="Kéo cả câu"
+                title="Kéo để dời cả câu"
+                className="absolute top-0 bottom-0 cursor-grab bg-[var(--gold)]/20 disabled:cursor-default"
+                style={{ left: selected.start * pps - scrollLeft, width: Math.max(8, (selected.end - selected.start) * pps) }}
+                onPointerDown={(event) =>
+                  beginDrag(event, (delta) => applyLine(activeIndex, "move", delta), () => onPlayFrom(selected.start))
+                }
               />
             )}
             {!peaks && !failed && <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--muted)]">Đang vẽ sóng âm…</p>}

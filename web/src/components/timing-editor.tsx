@@ -373,7 +373,7 @@ export function TimingEditor({
             )}
             {line.uncertain && !line.supplemented && (
               <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
-                Câu này được ghép ước lượng. Hãy nghe và kéo lại từng chữ.
+                Câu này được ghép ước lượng. Kéo vùng vàng trên sóng âm để dời cả câu, hoặc kéo từng chữ.
               </p>
             )}
             <div className="mb-3 flex items-center justify-between gap-3 text-xs text-[var(--muted)]">
