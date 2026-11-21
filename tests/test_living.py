@@ -344,7 +344,7 @@ class SmokeSourceTests(unittest.TestCase):
         self.assertEqual(len(sources), 2)
         self.assertTrue(all(source["smoke"] for source in sources))
 
-    def test_smoke_mask_and_warp_skip_objects_inside_the_box(self):
+    def test_smoke_wisps_are_not_clipped_by_object_rectangles(self):
         plan = effect_plan(
             [{"effect": "steam", "target_ids": [], "params": {"intensity": 0.55}}],
             objects=[
@@ -358,10 +358,11 @@ class SmokeSourceTests(unittest.TestCase):
             plan, transform, 100, 100, 4.0, 1234, base, lambda _m: None
         )
         self.assertEqual(len(sources), 1)
-        self.assertIsNotNone(sources[0]["warp"])
-        # Boat box (25..40, 30..50) is cut out of the smoke/warp mask.
-        self.assertEqual(float(sources[0]["mask"][40, 32]), 0.0)
-        self.assertGreater(float(sources[0]["mask"][15, 20]), 0.0)
+        # No painted-smoke warp: it swirled in place instead of rising.
+        self.assertIsNone(sources[0]["warp"])
+        # No rectangular occluder holes that would show as a visible box.
+        self.assertEqual(float(sources[0]["mask"].min()), 1.0)
+        self.assertEqual(float(sources[0]["mask"][40, 32]), 1.0)
 
     def test_sky_backdrop_does_not_zero_the_smoke_mask(self):
         plan = effect_plan(
@@ -378,7 +379,7 @@ class SmokeSourceTests(unittest.TestCase):
         )
         self.assertEqual(len(sources), 1)
         self.assertGreater(float(sources[0]["mask"].max()), 0.0)
-        self.assertIsNotNone(sources[0]["warp"])
+        self.assertIsNone(sources[0]["warp"])
 
     def test_fire_is_only_a_fallback_when_no_smoke_object_covers_it(self):
         covered = self.sources(

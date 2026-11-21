@@ -364,14 +364,18 @@ speed * T = k * span
 - **Studio preview 640 px**: 4 s/5 effect trước mất 38,9 s ở 1080p (proxy timeout →
   “Internal Server Error”); nay render 640×360 trong ~2,6 s. Export Karaoke vẫn full
   profile. Temp file có UUID + lock tuần tự cho preview; traceback in ra terminal.
-- **Smoke bốc lên, không warp thuyền**: tắt warp dao động của khói; particle rising
-  (rise 1.8× box, màu sáng hơn) tạo hướng bốc lên; mask occluder cắt tất cả object rắn
-  (ship/sail/flag/fire/pot). Cache motion bump để không dùng loop cũ.
+- **Smoke bốc lên, không warp thuyền**: tắt warp dao động của khói; chỉ dùng particle
+  rising (màu sáng hơn nền khói tối) để tạo hướng bốc lên. Cache motion bump để không
+  dùng loop cũ.
 - **Nước không warp người/wooden stakes**: inventory v6 thêm người đứng/wading dưới
   nước và stakes; water mask cắt object + edge-protect heuristic cho cấu trúc đứng
   mà inventory có thể bỏ sót. Preview/export dùng mask mới.
-- **Smoke sparse, không khung chữ nhật**: emitter dùng ellipse mềm + pixel tối thật
-  của khói (không dùng trapezoid/box), giảm còn ~30 hạt, spread rộng/ngẫu nhiên.
+- **Smoke sparse, không khung chữ nhật**: nguyên nhân khung vuông là mask khói bị cắt
+  bằng bounding box của object (ship/fire) và ellipse lớn; sprite to (bán kính tới
+  ~100 px) cộng dồn thành mảng mờ hình chữ nhật. Nay plume là các wisp rời, không
+  clip theo box/occluder; bán kính 3,6–14 px ở 640×360, ~11–22 hạt/source, vị trí và
+  pha ngẫu nhiên. Chỉ `prevent` (vùng lyric) được áp một lần lúc composite. Không
+  còn cạnh thẳng nào từ mask khói.
 - **Tàn lửa (`embers`)**: particle nhỏ màu cam vàng bốc lên từ fire object/region,
   loop-quantized, có protect/strip. Prompt `tàn lửa`, `tia lửa`, `embers`, `sparks`
   được map sang `embers`; đã có test riêng. 92 tests pass.

@@ -29,7 +29,7 @@ MAX_DURATION = 30.0
 # The Studio is a preview surface; full-resolution export stays in Karaoke.
 # 640 px keeps a 4 s multi-effect preview well under the proxy timeout.
 PREVIEW_MAX_SIDE = 640
-PREVIEW_VERSION = "preview_v10"
+PREVIEW_VERSION = "preview_v12"
 # Serialize preview renders in this process. Two simultaneous 1080p renders
 # otherwise fight over CPU and can race on cache materialization.
 _PREVIEW_LOCK = threading.Lock()

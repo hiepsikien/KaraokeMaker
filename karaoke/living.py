@@ -184,7 +184,7 @@ EFFECT_LABELS = {
 # v5: first AI Studio / inventory-v3 pass.
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks + painted-smoke billow warp.
-MOTION_CACHE_VERSION = 13
+MOTION_CACHE_VERSION = 15
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1091,32 +1091,6 @@ def _is_background_identity(identity: str) -> bool:
     return any(token in background for token in tokens)
 
 
-def _smoke_occluder_mask(
-    plan: dict,
-    transform: dict,
-    width: int,
-    height: int,
-) -> np.ndarray:
-    """1 where smoke may move, 0 over solid objects (ships, masts, flags)."""
-    mask = Image.new("L", (width, height), 255)
-    draw = ImageDraw.Draw(mask)
-    for entry in _plan_objects(plan, selected_only=False):
-        # Only the smoke itself may be warped. Ships, sails, flags, fire,
-        # pots and containers are solid props and must stay rigid.
-        if _smoke_candidate(entry):
-            continue
-        identity = f"{entry['label']} {entry['id']}".casefold()
-        if _is_background_identity(identity):
-            # Sky/water/background boxes are not solid props; cutting them out
-            # would erase almost the whole smoke mask.
-            continue
-        x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
-        draw.rectangle([x1, y1, x2, y2], fill=0)
-    feather = max(1.0, 2.0 * height / HEIGHT)
-    mask = mask.filter(ImageFilter.GaussianBlur(feather))
-    return np.asarray(mask, dtype=np.float32) / 255.0
-
-
 def _steam_sources(
     plan: dict,
     transform: dict,
@@ -1140,7 +1114,6 @@ def _steam_sources(
     cycles = max(1, int(round(seconds / 3.5)))
     rng = np.random.default_rng(seed ^ 0x5EA)
     sources: list[dict] = []
-    occluder = _smoke_occluder_mask(plan, transform, width, height)
 
     def add_source(entry: dict) -> None:
         smoke = _smoke_candidate(entry) or _fire_smoke_candidate(entry)
@@ -1158,22 +1131,24 @@ def _steam_sources(
             cx = (x1 + x2) / 2.0
             if fire_only:
                 cy = y1
-                rise = max(box_height * 3.0, height * 0.20)
-                rise = min(rise, height * 0.65)
-                base_radius = max(3.0, box_width * 0.15)
-                max_radius = max(base_radius + 3.0, box_width * 0.55)
-                spread = 0.28
+                rise = max(box_height * 2.4, height * 0.18)
+                rise = min(rise, height * 0.6)
+                # Sparse wisps, not a solid cone of translucent smoke.
+                base_radius = max(2.0, height * 0.010)
+                max_radius = max(base_radius + 2.0, height * 0.035)
+                spread = 0.24
                 sample_box = (x1, max(0.0, y1 - box_height * 1.6), x2, y1)
             else:
                 # Keep the plume inside the painted smoke body; starting at
                 # the box bottom would draw over a burning ship below it.
                 cy = y1 + box_height * 0.72
-                rise = max(box_height * 1.8, height * 0.12)
-                rise = min(rise, height * 0.65)
-                plume_scale = max(4.0, min(box_width, box_height * 1.35))
-                base_radius = max(3.0, plume_scale * 0.12)
-                max_radius = max(base_radius + 3.0, plume_scale * 0.52)
-                spread = 0.38
+                rise = max(box_height * 1.2, height * 0.12)
+                rise = min(rise, height * 0.6)
+                # Small, sparse wisps. Large sprites accumulated into a soft
+                # oval that read as a translucent rectangle over the smoke.
+                base_radius = max(2.0, height * 0.010)
+                max_radius = max(base_radius + 2.0, height * 0.040)
+                spread = 0.30
                 sample_box = (
                     x1 + box_width * 0.22,
                     y1 + box_height * 0.42,
@@ -1181,10 +1156,10 @@ def _steam_sources(
                     y2,
                 )
             count = max(
-                12,
+                8,
                 int(
                     round(
-                        30
+                        16
                         * (0.5 + 0.7 * intensity)
                         * (0.55 + min(1.0, box_width / max(1.0, width * 0.24)))
                     )
@@ -1222,84 +1197,35 @@ def _steam_sources(
             base_alpha = 0.16
             color = np.asarray(STEAM_COLOR, dtype=np.float32)
 
-        mask = Image.new("L", (width, height), 0)
-        draw = ImageDraw.Draw(mask)
-        half_bottom = max(3.0, box_width * (0.42 if smoke else 0.28))
-        half_top = max(5.0, box_width * (0.55 if smoke else 0.55))
-        bottom_offset = 0.08 if smoke else 0.12
-        if smoke and not fire_only:
-            # Do not bake a trapezoid/rectangle into the smoke plume. A soft
-            # ellipse is then shaped by the actual dark-smoke pixels below.
-            pad_x = box_width * 0.10
-            pad_y = box_height * 0.06
-            draw.ellipse(
-                [x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y],
-                fill=255,
-            )
+        if smoke:
+            # Rising smoke is drawn as free-floating wisps. Clipping them with
+            # the smoke bounding box or with solid-object rectangles produced
+            # visible straight edges ("khung chữ nhật"). The lyric-safe
+            # `prevent` mask is applied once at composite time instead.
+            stem = np.ones((height, width), dtype=np.float32)
+            warp = None
         else:
+            mask = Image.new("L", (width, height), 0)
+            draw = ImageDraw.Draw(mask)
+            half_bottom = max(3.0, box_width * 0.28)
+            half_top = max(5.0, box_width * 0.55)
             draw.polygon(
                 [
-                    (cx - half_bottom, min(height, cy + box_height * bottom_offset)),
-                    (cx + half_bottom, min(height, cy + box_height * bottom_offset)),
+                    (cx - half_bottom, min(height, cy + box_height * 0.12)),
+                    (cx + half_bottom, min(height, cy + box_height * 0.12)),
                     (cx + half_top, cy - rise),
                     (cx - half_top, cy - rise),
                 ],
                 fill=255,
             )
-        blur = max(1.5, box_width * (0.10 if smoke else 0.09))
-        stem = np.asarray(mask.filter(ImageFilter.GaussianBlur(blur)), dtype=np.float32) / 255.0
-        if smoke:
-            stem *= occluder
-            if prevent is not None:
-                stem *= prevent
-        if smoke and not fire_only and base_array is not None:
-            # A smoke bounding box can include bright sky behind the plume.
-            # Weight the emitter by local darkness so the new motion follows
-            # the painted smoke instead of washing out the whole rectangle.
-            image_height, image_width = base_array.shape[:2]
-            left = max(0, min(image_width - 1, int(math.floor(x1))))
-            right = max(left + 1, min(image_width, int(math.ceil(x2))))
-            top = max(0, min(image_height - 1, int(math.floor(y1))))
-            bottom = max(top + 1, min(image_height, int(math.ceil(y2))))
-            region = base_array[top:bottom, left:right]
-            luminance = (
-                region[:, :, 0] * 0.2126
-                + region[:, :, 1] * 0.7152
-                + region[:, :, 2] * 0.0722
-            ) / 255.0
-            # Only dark smoke pixels may move. Bright wood, flames and sky are
-            # excluded completely instead of keeping a 18% warp floor.
-            weight = np.clip((0.62 - luminance) / 0.42, 0.0, 1.0)
-            content = np.asarray(
-                Image.fromarray(
-                    np.clip(weight * 255.0, 0.0, 255.0).astype(np.uint8), "L"
-                ).filter(ImageFilter.GaussianBlur(max(1.0, box_width * 0.04))),
-                dtype=np.float32,
-            ) / 255.0
-            stem[top:bottom, left:right] *= content
-
-        warp = None
-        if smoke and not fire_only:
-            rows = np.where(stem.max(axis=1) > 0.02)[0]
-            columns = np.where(stem.max(axis=0) > 0.02)[0]
-            if rows.size and columns.size:
-                warp_top = max(0, int(rows[0]))
-                warp_bottom = min(height, int(rows[-1]) + 1)
-                warp_left = max(0, int(columns[0]))
-                warp_right = min(width, int(columns[-1]) + 1)
-                if warp_bottom - warp_top >= 3 and warp_right - warp_left >= 3:
-                    warp = {
-                        "left": warp_left,
-                        "top": warp_top,
-                        "right": warp_right,
-                        "bottom": warp_bottom,
-                        "mask": stem[warp_top:warp_bottom, warp_left:warp_right].copy(),
-                        # The painted smoke stays static; rising particles provide
-                        # the upward motion. A warp here reads as swirling in place.
-                        "amplitude": 0.0,
-                        "cycles": max(1, int(round(seconds / 8.0))),
-                        "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
-                    }
+            blur = max(1.5, box_width * 0.09)
+            stem = (
+                np.asarray(
+                    mask.filter(ImageFilter.GaussianBlur(blur)), dtype=np.float32
+                )
+                / 255.0
+            )
+            warp = None
 
         phases = rng.uniform(0.0, 1.0, count).astype(np.float32)
         jitter = rng.uniform(-1.0, 1.0, count).astype(np.float32)
