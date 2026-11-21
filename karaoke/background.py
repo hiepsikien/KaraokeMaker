@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,8 +45,12 @@ from karaoke.assets import (
     load_asset,
     validate_asset,
 )
+from karaoke.cache import cache_root, prune
 from karaoke.living import (
+    ENCODER_VERSION,
     MOTION_CACHE_VERSION,
+    motion_cache_path,
+    pin_cache_file,
     plan_has_motion,
     render_motion_loop,
     visual_plan_hash,
@@ -55,20 +60,32 @@ from karaoke.media import (
     IMAGE_PREP_VERSION,
     MediaError,
     make_cover,
-    prepare_slide,
     probe_duration,
 )
 from karaoke.profiles import RenderProfile, get_profile
-from karaoke.render import _ambient_kind, _mux, _overlay_text, _run
+from karaoke.render import TEXT_FPS, _ambient_kind, _mux, _overlay_text, _run
+from karaoke.segment import (
+    SEGMENT_ENCODER_VERSION,
+    encode_still,
+    encode_video,
+)
 
 BACKGROUND_SCHEMA_VERSION = 1
-BACKGROUND_BUILDER_VERSION = 1
+BACKGROUND_BUILDER_VERSION = 2
 BACKGROUND_CRF = 18
 BACKGROUND_PRESET = "veryfast"
 BACKGROUND_DIR = Path(".karaoke-media") / "backgrounds"
+PICTURE_DIR = Path(".karaoke-media") / "pictures"
+PICTURE_BUILDER_VERSION = 1
+SEGMENT_CACHE_ROOT = cache_root("segments")
+SEGMENT_CACHE_LIMIT_FILES = 200
+SEGMENT_CACHE_LIMIT_BYTES = 4_000_000_000
 
 _HASH_CACHE: dict[tuple[str, int, int], str] = {}
 _HASH_LOCK = threading.Lock()
+_PROBE_CACHE: dict[tuple[str, int, int], dict] = {}
+_VALIDATE_CACHE: dict[tuple, tuple[bool, str]] = {}
+_PROBE_LOCK = threading.Lock()
 _BUILD_LOCK = threading.Lock()
 
 
@@ -222,6 +239,7 @@ def _motion_identity(
 ) -> str:
     payload = {
         "motion_renderer": MOTION_CACHE_VERSION,
+        "encoder": ENCODER_VERSION,
         "image_hash": image_hash,
         "plan_hash": visual_plan_hash(plan),
         "image_frames": image_frames,
@@ -375,13 +393,23 @@ def _fps_value(value) -> float:
         return 0.0
 
 
+def _probe_key(path: Path) -> tuple[str, int, int]:
+    stat = Path(path).stat()
+    return (str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns)
+
+
 def _probe_video(path: Path) -> dict:
+    key = _probe_key(path)
+    with _PROBE_LOCK:
+        cached = _PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
     command = [
         "ffprobe",
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type,width,height,r_frame_rate,avg_frame_rate,nb_frames,pix_fmt,duration:format=duration",
+        "stream=codec_type,codec_name,profile,level,width,height,r_frame_rate,avg_frame_rate,nb_frames,pix_fmt,duration:format=duration",
         "-of",
         "json",
         str(path),
@@ -390,9 +418,12 @@ def _probe_video(path: Path) -> dict:
     if process.returncode != 0:
         raise MediaError(process.stderr.strip() or "ffprobe không đọc được video.")
     try:
-        return json.loads(process.stdout or "{}")
+        meta = json.loads(process.stdout or "{}")
     except json.JSONDecodeError as error:
         raise MediaError("ffprobe trả dữ liệu không hợp lệ.") from error
+    with _PROBE_LOCK:
+        _PROBE_CACHE[key] = meta
+    return meta
 
 
 def _validate_background(
@@ -405,10 +436,27 @@ def _validate_background(
 ) -> tuple[bool, str]:
     if not path.is_file() or path.stat().st_size <= 0:
         return False, "file không tồn tại"
+    stat = path.stat()
+    key = (
+        str(path.resolve()),
+        stat.st_size,
+        stat.st_mtime_ns,
+        int(width),
+        int(height),
+        int(fps),
+        int(total_frames),
+    )
+    with _PROBE_LOCK:
+        cached = _VALIDATE_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         meta = _probe_video(path)
     except MediaError as error:
-        return False, str(error)
+        result = (False, str(error))
+        with _PROBE_LOCK:
+            _VALIDATE_CACHE[key] = result
+        return result
     streams = meta.get("streams") or []
     videos = [stream for stream in streams if stream.get("codec_type") == "video"]
     audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
@@ -436,22 +484,200 @@ def _validate_background(
             return False, "không đọc được duration"
         if abs(seconds - total_frames / fps) > 1.5 / fps:
             return False, "duration không khớp"
-    return True, ""
+    result = (True, "")
+    with _PROBE_LOCK:
+        _VALIDATE_CACHE[key] = result
+    return result
 
 
-def _render_segment(
+def _segment_cache_path(kind: str, identity: str, frames: int) -> Path:
+    value = _hex_from_hash(identity)[:32]
+    return SEGMENT_CACHE_ROOT / f"{kind}-{value}-{int(frames)}-v{SEGMENT_ENCODER_VERSION}.mp4"
+
+
+def _cached_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _segment_compatible(
+    path: Path,
+    *,
+    frames: int,
+    width: int,
+    height: int,
+    fps: int,
+) -> bool:
+    try:
+        meta = _probe_video(path)
+    except MediaError:
+        return False
+    streams = meta.get("streams") or []
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not videos or audios:
+        return False
+    video = videos[0]
+    if str(video.get("codec_name") or "") != "h264":
+        return False
+    if int(video.get("width") or 0) != width or int(video.get("height") or 0) != height:
+        return False
+    if str(video.get("pix_fmt") or "") != "yuv420p":
+        return False
+    actual_fps = _fps_value(video.get("avg_frame_rate") or video.get("r_frame_rate"))
+    if abs(actual_fps - fps) > 0.05:
+        return False
+    raw_frames = str(video.get("nb_frames") or "").strip()
+    if raw_frames.isdigit() and int(raw_frames) > 0:
+        return int(raw_frames) == frames
+    duration = video.get("duration") or (meta.get("format") or {}).get("duration")
+    try:
+        return abs(float(duration) - frames / fps) <= 1.5 / fps
+    except (TypeError, ValueError):
+        return False
+
+
+def _static_segment(
     image: Path,
+    identity: str,
+    *,
+    image_frames: int,
+    profile: RenderProfile,
+    log,
+) -> tuple[Path, bool]:
+    destination = _segment_cache_path("static", identity, image_frames)
+    if _cached_file(destination):
+        return destination, True
+    encode_still(
+        image,
+        destination,
+        frames=image_frames,
+        width=profile.width,
+        height=profile.height,
+        fps=profile.fps,
+        log=log,
+    )
+    pin_cache_file(destination)
+    return destination, False
+
+
+def _cover_segment(
+    cover_photo: Path,
+    identity: str,
+    *,
+    title: str,
+    artist: str,
+    cover_line: str,
+    cover_frames: int,
+    profile: RenderProfile,
+    work: Path,
+    log,
+) -> tuple[Path, bool]:
+    destination = _segment_cache_path("cover", identity, cover_frames)
+    if _cached_file(destination):
+        return destination, True
+    cover_card = work / "cover.jpg"
+    make_cover(
+        cover_photo,
+        title,
+        artist,
+        cover_line,
+        cover_card,
+        profile=profile,
+    )
+    encode_still(
+        cover_card,
+        destination,
+        frames=cover_frames,
+        width=profile.width,
+        height=profile.height,
+        fps=profile.fps,
+        log=log,
+    )
+    pin_cache_file(destination)
+    return destination, False
+
+
+def _asset_segment(
+    meta: dict,
+    *,
+    image_frames: int,
+    profile: RenderProfile,
+    log,
+) -> tuple[Path, bool]:
+    source = asset_clip_path(meta)
+    if not source.is_file():
+        raise MediaError("Không thấy clip asset.")
+    asset_frames = int(meta.get("asset_frames") or 0)
+    if asset_frames == image_frames:
+        return source, True
+    destination = _segment_cache_path("asset", asset_fingerprint(meta), image_frames)
+    if _cached_file(destination):
+        return destination, True
+    encode_video(
+        source,
+        destination,
+        frames=image_frames,
+        width=profile.width,
+        height=profile.height,
+        fps=profile.fps,
+        log=log,
+    )
+    pin_cache_file(destination)
+    return destination, False
+
+
+def _resolve_segment(
+    segment: dict,
     plan: dict | None,
     *,
     image_frames: int,
     profile: RenderProfile,
     work: Path,
-    index: int,
     progress,
     log,
-) -> tuple[Path, bool, bool]:
-    """Return (media path, is_video, degraded)."""
+) -> tuple[Path, str, bool, bool]:
+    """Return (segment path, kind, degraded, cache_hit)."""
+    image = Path(segment["image_path"])
+    index = int(segment["index"])
+    asset_id = str(segment.get("asset_id") or "").strip()
+    if asset_id:
+        meta = load_asset(asset_id)
+        if meta is not None:
+            try:
+                path, hit = _asset_segment(
+                    meta,
+                    image_frames=image_frames,
+                    profile=profile,
+                    log=log,
+                )
+                segment["asset_reason"] = ""
+                return path, "asset", False, hit
+            except Exception as error:
+                log(f"Không dùng được asset {asset_id}: {error}")
+                segment["asset_reason"] = str(error)
+        segment["asset_id"] = None
+        log(f"Không dùng được asset {asset_id}: {segment.get('asset_reason') or 'không hợp lệ'}")
     if plan is not None and plan_has_motion(plan):
+        image_hash = str(segment.get("image_hash") or "")
+        try:
+            expected = motion_cache_path(
+                image_hash=image_hash,
+                plan=plan,
+                duration=image_frames / max(1, profile.fps),
+                width=profile.width,
+                height=profile.height,
+                fps=profile.fps,
+                fit_mode=profile.fit_mode,
+                strip_rect=(0, 0, 0, 0),
+            )
+            if _cached_file(expected):
+                pin_cache_file(expected)
+                return expected, "motion", False, True
+        except Exception:
+            pass
         destination = work / f"clip-{index:02d}.mp4"
 
         def image_progress(done: int, total: int) -> None:
@@ -478,14 +704,21 @@ def _render_segment(
             log(f"Không tạo được hiệu ứng cho {image.name}: {error}")
             clip = None
         if clip is not None and Path(clip).is_file():
-            return Path(clip), True, False
+            pin_cache_file(Path(clip))
+            return Path(clip), "motion", False, False
         log(f"Hiệu ứng cho {image.name} không resolve được; dùng ảnh tĩnh.")
-    slide = work / f"slide-{index:02d}.jpg"
-    prepare_slide(image, slide, profile=profile)
-    return slide, False, plan is not None and plan_has_motion(plan)
+    path, hit = _static_segment(
+        image,
+        str(segment.get("clip_identity") or ""),
+        image_frames=image_frames,
+        profile=profile,
+        log=log,
+    )
+    degraded = plan is not None and plan_has_motion(plan)
+    return path, "static", degraded, hit
 
 
-def _assemble_background(
+def _assemble_background_filter(
     slots: list[tuple[Path, bool, int]],
     *,
     destination: Path,
@@ -533,6 +766,60 @@ def _assemble_background(
         str(destination),
     ]
     _run(command, log)
+
+
+def _assemble_background(
+    slots: list[tuple[Path, int]],
+    *,
+    destination: Path,
+    width: int,
+    height: int,
+    fps: int,
+    total_frames: int,
+    log,
+) -> None:
+    """Concat already-encoded segments without re-encoding the whole song."""
+    list_path = destination.with_name(f".{destination.name}.concat.txt")
+    lines = []
+    for path, _frames in slots:
+        value = (
+            str(Path(path).resolve())
+            .replace("\\", "/")
+            .replace("'", "'\\''")
+        )
+        lines.append(f"file '{value}'")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(destination),
+    ]
+    try:
+        _run(command, log)
+    except Exception as error:
+        log(f"Concat copy thất bại ({error}); fallback encode lại toàn bài.")
+        _assemble_background_filter(
+            [(path, True, frames) for path, frames in slots],
+            destination=destination,
+            width=width,
+            height=height,
+            fps=fps,
+            total_frames=total_frames,
+            log=log,
+        )
+    finally:
+        list_path.unlink(missing_ok=True)
 
 
 def _plan_background(
@@ -633,6 +920,7 @@ def _plan_background(
         "builder_version": BACKGROUND_BUILDER_VERSION,
         "crf": BACKGROUND_CRF,
         "preset": BACKGROUND_PRESET,
+        "segment_encoder_version": SEGMENT_ENCODER_VERSION,
         "order": [unique[key]["clip_identity"] for key in order],
         "cover": cover_id,
         "profile": profile_id,
@@ -738,8 +1026,10 @@ def _build_background_impl(
                 log(f"Không copy được background cũ: {reason}. Sẽ dựng lại.")
 
     if background_path is None:
-        rendered: dict[str, tuple[Path, bool]] = {}
+        rendered: dict[str, tuple[Path, int]] = {}
         work = Path(tempfile.mkdtemp(prefix=".karaoke-bg-", dir=str(output_dir)))
+        cache_hits = 0
+        clips_started = time.perf_counter()
 
         def segment_progress(index: int, done: int, total: int) -> None:
             if progress is None:
@@ -750,76 +1040,122 @@ def _build_background_impl(
             except Exception:
                 pass
 
+        def render_one(segment: dict, segment_plan: dict | None):
+            key = _image_key(Path(segment["image_path"]))
+            path, kind, is_degraded, hit = _resolve_segment(
+                segment,
+                segment_plan,
+                image_frames=image_frames,
+                profile=profile,
+                work=work,
+                progress=segment_progress,
+                log=log,
+            )
+            return key, path, kind, is_degraded, hit
+
         try:
+            cover_path: Path | None = None
+            cover_hit = False
             if cover_frames > 0 and cover_photo is not None:
-                cover_card = work / "cover.jpg"
-                make_cover(
+                cover_path, cover_hit = _cover_segment(
                     cover_photo,
-                    str(prepared.get("title") or ""),
-                    str(prepared.get("artist") or ""),
-                    str(prepared.get("cover_line") or ""),
-                    cover_card,
-                    profile=profile,
-                )
-            for segment in unique.values():
-                asset_id = str(segment.get("asset_id") or "").strip()
-                if asset_id:
-                    meta = load_asset(asset_id)
-                    if meta is not None:
-                        try:
-                            media = asset_clip_path(meta)
-                        except Exception as error:
-                            log(f"Không dùng được asset {asset_id}: {error}")
-                            media = None
-                        if media is not None and media.is_file():
-                            segment["kind"] = "asset"
-                            rendered[_image_key(Path(segment["image_path"]))] = (media, True)
-                            continue
-                    log(f"Không dùng được asset {asset_id}: {segment.get('asset_reason') or 'không hợp lệ'}")
-                    segment["asset_id"] = None
-                if segment.get("asset_reason"):
-                    log(f"Asset cho {Path(segment['image_path']).name} không hợp lệ: {segment['asset_reason']}")
-                    segment["asset_reason"] = ""
-                if segment.get("kind") == "asset":
-                    segment["kind"] = "static"
-                segment_plan = _effect_plan(effects.get(_image_key(Path(segment["image_path"]))))
-                if segment_plan is not None and plan_has_motion(segment_plan):
-                    segment["kind"] = "motion"
-                media, is_video, is_degraded = _render_segment(
-                    Path(segment["image_path"]),
-                    segment_plan,
-                    image_frames=image_frames,
+                    plan.cover_identity,
+                    title=str(prepared.get("title") or ""),
+                    artist=str(prepared.get("artist") or ""),
+                    cover_line=str(prepared.get("cover_line") or ""),
+                    cover_frames=cover_frames,
                     profile=profile,
                     work=work,
-                    index=int(segment["index"]),
-                    progress=segment_progress,
                     log=log,
                 )
-                segment["kind"] = "static-fallback" if is_degraded else segment["kind"]
+                cache_hits += int(cover_hit)
+
+            jobs = []
+            for segment in unique.values():
+                segment_plan = _effect_plan(effects.get(_image_key(Path(segment["image_path"]))))
+                jobs.append((segment, segment_plan))
+            workers = max(
+                1,
+                min(
+                    int(os.environ.get("KARAOKE_CLIP_WORKERS", "2") or 2),
+                    len(jobs) or 1,
+                ),
+            )
+            if len(jobs) <= 1 or workers == 1:
+                results = [render_one(segment, segment_plan) for segment, segment_plan in jobs]
+            else:
+                results = []
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {
+                        pool.submit(render_one, segment, segment_plan): segment
+                        for segment, segment_plan in jobs
+                    }
+                    for future in as_completed(futures):
+                        results.append(future.result())
+            for key, path, kind, is_degraded, hit in results:
+                cache_hits += int(hit)
+                segment = next(
+                    item for item in unique.values() if _image_key(Path(item["image_path"])) == key
+                )
+                segment["kind"] = "static-fallback" if is_degraded else kind
                 segment["degraded"] = is_degraded
                 degraded = degraded or is_degraded
-                rendered[_image_key(Path(segment["image_path"]))] = (media, is_video)
+                rendered[key] = (path, image_frames)
 
-            slots: list[tuple[Path, bool, int]] = []
-            if cover_frames > 0 and cover_photo is not None:
-                slots.append((work / "cover.jpg", False, cover_frames))
+            clip_seconds = time.perf_counter() - clips_started
+
+            slots: list[tuple[Path, int]] = []
+            if cover_path is not None and cover_frames > 0:
+                slots.append((cover_path, cover_frames))
             remaining = song_frames
             index = 0
             while remaining > 0:
                 key = order[index % len(order)]
-                media, is_video = rendered[key]
+                media, segment_frames = rendered[key]
                 frames = min(image_frames, remaining)
-                slots.append((media, is_video, frames))
+                if not _segment_compatible(
+                    media,
+                    frames=segment_frames,
+                    width=profile.width,
+                    height=profile.height,
+                    fps=profile.fps,
+                ):
+                    normalized = work / f"norm-{index:03d}.mp4"
+                    encode_video(
+                        media,
+                        normalized,
+                        frames=segment_frames,
+                        width=profile.width,
+                        height=profile.height,
+                        fps=profile.fps,
+                        log=log,
+                    )
+                    media = normalized
+                if frames != segment_frames:
+                    tail = work / f"tail-{index:03d}.mp4"
+                    encode_video(
+                        media,
+                        tail,
+                        frames=frames,
+                        width=profile.width,
+                        height=profile.height,
+                        fps=profile.fps,
+                        log=log,
+                    )
+                    media = tail
+                    segment_frames = frames
+                slots.append((media, segment_frames))
                 remaining -= frames
                 index += 1
 
             temporary = target.parent / f".{identity_hex}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
-            log(f"Đang dựng background {total_frames} frame cho {len(unique)} ảnh.")
+            log(f"Đang ghép background {total_frames} frame cho {len(unique)} ảnh.")
             if progress is not None:
                 try:
                     progress(len(unique) * 0.7, len(unique))
                 except Exception:
                     pass
+            assemble_started = time.perf_counter()
             try:
                 _assemble_background(
                     slots,
@@ -830,6 +1166,7 @@ def _build_background_impl(
                     total_frames=total_frames,
                     log=log,
                 )
+                assemble_seconds = time.perf_counter() - assemble_started
                 valid, reason = _validate_background(
                     temporary,
                     width=profile.width,
@@ -840,6 +1177,10 @@ def _build_background_impl(
                 if not valid:
                     raise MediaError(f"Background dựng xong nhưng không hợp lệ: {reason}")
                 os.replace(temporary, target)
+                log(
+                    f"Hiệu ứng: {clip_seconds:.1f}s (cache {cache_hits}/{len(unique) + (1 if cover_path else 0)}), "
+                    f"ghép nền: {assemble_seconds:.1f}s."
+                )
                 if progress is not None:
                     try:
                         progress(len(unique), len(unique))
@@ -848,6 +1189,14 @@ def _build_background_impl(
             finally:
                 temporary.unlink(missing_ok=True)
             background_path = target
+            try:
+                prune(
+                    SEGMENT_CACHE_ROOT,
+                    max_files=SEGMENT_CACHE_LIMIT_FILES,
+                    max_bytes=SEGMENT_CACHE_LIMIT_BYTES,
+                )
+            except Exception:
+                pass
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -991,6 +1340,23 @@ def cleanup_backgrounds(
     return deleted
 
 
+def _picture_identity(background: BackgroundBuild, lines: list[dict]) -> str:
+    payload = {
+        "builder_version": PICTURE_BUILDER_VERSION,
+        "background": background.hash,
+        "profile": background.profile_fingerprint,
+        "total_frames": background.total_frames,
+        "cover_frames": background.cover_frames,
+        "text_fps": TEXT_FPS,
+        "lines": lines,
+    }
+    return _hash_with_prefix(_sha256_text(_canonical(payload)))
+
+
+def _picture_path(output_dir: Path, identity: str) -> Path:
+    return Path(output_dir) / PICTURE_DIR / f"picture-{_hex_from_hash(identity)}.mp4"
+
+
 def render_picture(
     background: BackgroundBuild,
     lines: list[dict],
@@ -1124,14 +1490,38 @@ def render_videos(
                 except Exception:
                     pass
 
-        picture = render_picture(
-            build,
-            lines,
-            profile=profile,
-            destination=work / "picture.mp4",
-            progress=picture_progress,
-            log=log,
+        picture_identity = _picture_identity(build, lines)
+        picture_path = _picture_path(output_dir, picture_identity)
+        picture_path.parent.mkdir(parents=True, exist_ok=True)
+        picture_started = time.perf_counter()
+        valid, _reason = _validate_background(
+            picture_path,
+            width=build.width,
+            height=build.height,
+            fps=build.fps,
+            total_frames=build.total_frames,
         )
+        if valid:
+            picture = picture_path
+            log("Dùng lại picture đã có.")
+        else:
+            temporary = picture_path.with_name(
+                f".{picture_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
+            )
+            try:
+                render_picture(
+                    build,
+                    lines,
+                    profile=profile,
+                    destination=temporary,
+                    progress=picture_progress,
+                    log=log,
+                )
+                os.replace(temporary, picture_path)
+                picture = picture_path
+            finally:
+                temporary.unlink(missing_ok=True)
+        log(f"Picture: {time.perf_counter() - picture_started:.1f}s.")
         total = build.total_frames / build.fps
         ambience = None
         ambient_kind = _ambient_kind(background_effects, background_images)
@@ -1147,6 +1537,7 @@ def render_videos(
                 progress(0.95, 1.0)
             except Exception:
                 pass
+        mux_started = time.perf_counter()
         vocal_out, instrumental_out = mux_outputs(
             picture,
             original_audio=original_audio,
@@ -1159,6 +1550,7 @@ def render_videos(
             loop_ambience=total > MAX_AMBIENT_DURATION,
             log=log,
         )
+        log(f"Mux: {time.perf_counter() - mux_started:.1f}s.")
         if progress is not None:
             try:
                 progress(1.0, 1.0)

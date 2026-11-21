@@ -11,10 +11,15 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 APP_NAME = "KaraokeMaker"
 _PRUNE_LOCK = threading.Lock()
+# Pinned cache files are useful while a project is active. After this age the
+# marker no longer protects the file, so an abandoned project cannot grow the
+# cache without bound.
+PIN_MAX_AGE_SECONDS = 60 * 86400
 
 
 def cache_root(*parts: str) -> Path:
@@ -53,8 +58,26 @@ def _stat_mtime(entry: Path) -> float | None:
         return None
 
 
+def _pin_marker(entry: Path) -> Path:
+    return entry.with_name(f".{entry.name}.pin")
+
+
+def _is_pinned(entry: Path) -> bool:
+    marker = _pin_marker(entry)
+    try:
+        return marker.exists() and time.time() - marker.stat().st_mtime < PIN_MAX_AGE_SECONDS
+    except OSError:
+        return False
+
+
 def prune(directory: Path, *, max_files: int, max_bytes: int | None = None) -> None:
     """Delete the oldest files until ``max_files`` / ``max_bytes`` hold.
+
+    A file with a fresh ``.<name>.pin`` sidecar is pinned: it is always kept and
+    still counts toward the limits, so a pinned segment survives even when it is
+    older than the newest unpinned files. Markers older than
+    ``PIN_MAX_AGE_SECONDS`` no longer protect the file. Pin sidecars themselves
+    are hidden files and are never listed or deleted here.
 
     Best effort: cache cleanup must never break a render, so every OS error is
     swallowed. Files can also disappear between listing and stat while another
@@ -76,9 +99,22 @@ def prune(directory: Path, *, max_files: int, max_bytes: int | None = None) -> N
                 mtimes[entry] = mtime
         entries = list(mtimes)
         entries.sort(key=lambda entry: mtimes[entry], reverse=True)
+        # Pinned files are kept unconditionally and counted first, so the
+        # remaining slots go to the newest unpinned files.
+        pinned: list[Path] = []
+        unpinned: list[Path] = []
+        for entry in entries:
+            (pinned if _is_pinned(entry) else unpinned).append(entry)
         kept = 0
         total = 0
-        for entry in entries:
+        for entry in pinned:
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                continue
+            kept += 1
+            total += size
+        for entry in unpinned:
             try:
                 size = entry.stat().st_size
             except OSError:

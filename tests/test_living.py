@@ -1,14 +1,17 @@
 import json
+import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from karaoke import living
+from karaoke.cache import prune
 
 
 def make_source(path: Path, size=(640, 360)) -> Path:
@@ -227,6 +230,213 @@ class RainLoopTests(unittest.TestCase):
                     height=360,
                     fps=15,
                 )
+
+
+class MotionCacheTests(unittest.TestCase):
+    def test_key_and_path_are_stable_and_encoder_version_is_part_of_the_key(self):
+        plan = base_plan()
+        kwargs = {
+            "image_hash": "sha256:" + "a" * 64,
+            "plan": plan,
+            "duration": 4,
+            "width": 640,
+            "height": 360,
+            "fps": 15,
+            "fit_mode": "contain",
+            "strip_rect": (0, 0, 0, 0),
+        }
+        first = living.motion_cache_key(**kwargs)
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        self.assertEqual(first, living.motion_cache_key(**kwargs))
+        self.assertEqual(
+            living.motion_cache_path(**kwargs), living.CACHE_ROOT / f"{first}.mp4"
+        )
+
+        with patch.object(living, "ENCODER_VERSION", living.ENCODER_VERSION + 1):
+            self.assertNotEqual(first, living.motion_cache_key(**kwargs))
+
+    def test_render_loop_uses_the_shared_key_for_its_cache_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = make_source(root / "scene.png")
+            plan = base_plan()
+            plan["image_hash"] = living._file_hash(image)
+            cache = root / "cache"
+            key = living.motion_cache_key(
+                image_hash=plan["image_hash"],
+                plan=plan,
+                duration=1.0,
+                width=640,
+                height=360,
+                fps=15,
+                fit_mode="contain",
+                strip_rect=None,
+            )
+            with patch.object(living, "CACHE_ROOT", cache):
+                result = living.render_rain_loop(
+                    image,
+                    plan,
+                    root / "rain.mp4",
+                    duration=1.0,
+                    width=640,
+                    height=360,
+                    fps=15,
+                )
+            self.assertIsNotNone(result)
+            self.assertEqual(Path(result).name, f"{key}.mp4")
+            self.assertEqual(Path(result), cache / f"{key}.mp4")
+
+
+class CachePinTests(unittest.TestCase):
+    def test_pinned_file_survives_prune_and_counts_toward_the_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            files = []
+            for index in range(3):
+                path = root / f"clip-{index}.mp4"
+                path.write_bytes(b"x" * (index + 1))
+                # Make the pinned file the oldest so plain mtime pruning would
+                # delete it first.
+                os.utime(path, (1000 + index, 1000 + index))
+                files.append(path)
+
+            living.pin_cache_file(files[0])
+            marker = root / f".{files[0].name}.pin"
+            self.assertTrue(marker.is_file())
+
+            prune(root, max_files=1)
+
+            self.assertTrue(files[0].is_file())
+            self.assertEqual(
+                sorted(
+                    entry.name
+                    for entry in root.iterdir()
+                    if not entry.name.startswith(".")
+                ),
+                [files[0].name],
+            )
+            # Prune never removes pin sidecars.
+            self.assertTrue(marker.is_file())
+
+            living.unpin_cache_file(files[0])
+            self.assertFalse(marker.exists())
+
+
+class SingleFlightTests(unittest.TestCase):
+    def test_two_threads_rendering_the_same_key_encode_only_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = make_source(root / "scene.png")
+            plan = base_plan()
+            plan["image_hash"] = living._file_hash(image)
+            cache = root / "cache"
+            calls: list[Path] = []
+            calls_lock = threading.Lock()
+
+            def fake_encode(frames, destination, width, height, fps, log):
+                with calls_lock:
+                    calls.append(Path(destination))
+                # Consume the generator so frame generation still runs.
+                for _frame in frames:
+                    pass
+                Path(destination).write_bytes(b"fake-mp4")
+
+            barrier = threading.Barrier(2)
+            results: list[Path | None] = []
+            errors: list[BaseException] = []
+
+            def worker(index: int) -> None:
+                try:
+                    barrier.wait(timeout=10)
+                    results.append(
+                        living.render_rain_loop(
+                            image,
+                            plan,
+                            root / f"out-{index}.mp4",
+                            duration=0.4,
+                            width=64,
+                            height=64,
+                            fps=5,
+                        )
+                    )
+                except BaseException as error:  # noqa: BLE001 - surfaced below
+                    errors.append(error)
+
+            with patch.object(living, "CACHE_ROOT", cache), patch.object(
+                living, "_encode", fake_encode
+            ):
+                threads = [
+                    threading.Thread(target=worker, args=(index,)) for index in range(2)
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(30)
+
+            self.assertEqual(errors, [])
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(len(results), 2)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(Path(results[0]), Path(results[1]))
+            self.assertTrue(Path(results[0]).is_file())
+            self.assertTrue((root / "out-0.mp4").is_file())
+            self.assertTrue((root / "out-1.mp4").is_file())
+
+
+class WeatherCanvasTests(unittest.TestCase):
+    def test_rain_and_snow_layers_draw_grayscale_intensity(self):
+        rain_layer = living._make_layers(320, 180, 4.0, 1234)[0]
+        rain_canvas = Image.new("L", (320, 180), 0)
+        living._draw_layer(ImageDraw.Draw(rain_canvas), rain_layer, 0.5, 0.1, 180)
+        rain = np.asarray(rain_canvas)
+        self.assertEqual(rain.shape, (180, 320))
+        self.assertGreater(int(rain.max()), 0)
+        self.assertLessEqual(int(rain.max()), 255)
+
+        snow_layer = living._make_snow_layers(320, 180, 4.0, 1234)[0]
+        snow_canvas = Image.new("L", (320, 180), 0)
+        living._draw_snow_layer(ImageDraw.Draw(snow_canvas), snow_layer, 0.5, 0.1, 180)
+        snow = np.asarray(snow_canvas)
+        self.assertEqual(snow.shape, (180, 320))
+        self.assertGreater(int(snow.max()), 0)
+        self.assertLessEqual(int(snow.max()), 255)
+
+
+class SnowLoopTests(unittest.TestCase):
+    def test_snow_render_writes_a_valid_loop(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = make_source(root / "scene.png")
+            plan = base_plan()
+            plan["image_hash"] = living._file_hash(image)
+            plan["items"] = [
+                {
+                    "effect": "snow",
+                    "target_ids": [],
+                    "params": {"intensity": 0.8, "loop_duration": 8, "audio": False},
+                }
+            ]
+            destination = root / "snow.mp4"
+            with patch.object(living, "CACHE_ROOT", root / "cache"):
+                result = living.render_motion_loop(
+                    image,
+                    plan,
+                    destination,
+                    duration=1.0,
+                    width=320,
+                    height=180,
+                    fps=10,
+                )
+
+            self.assertIsNotNone(result)
+            self.assertTrue(destination.is_file())
+            facts = probe(destination)
+            stream = facts["streams"][0]
+            self.assertEqual(stream["width"], 320)
+            self.assertEqual(stream["height"], 180)
+            self.assertEqual(stream["pix_fmt"], "yuv420p")
+            self.assertEqual(stream["r_frame_rate"], "10/1")
+            self.assertAlmostEqual(float(facts["format"]["duration"]), 1.0, delta=0.2)
 
 
 def object_entry(

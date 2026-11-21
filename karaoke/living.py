@@ -210,7 +210,19 @@ EFFECT_LABELS = {
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
 # v31: visual plan hash ignores non-visual params (audio, legacy loop_duration).
-MOTION_CACHE_VERSION = 31
+MOTION_CACHE_VERSION = 32
+
+# Shared x264 parameters for motion clips. They are part of the cache key via
+# ``ENCODER_VERSION``: bump it whenever any value below changes so old clips are
+# not silently reused with a different encode profile.
+ENCODER_VERSION = 2
+X264_PRESET = "veryfast"
+X264_CRF = 18
+X264_GOP = 60
+X264_PIX_FMT = "yuv420p"
+# B-frames make concat-copy timestamps unreliable when segments have different
+# durations (cover, tail slots). Disable them so the demuxer can copy safely.
+X264_BFRAMES = 0
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -413,6 +425,101 @@ def visual_plan_hash(plan: dict) -> str:
 def _plan_hash(plan: dict) -> str:
     """Backward-compatible alias for the visual-only plan hash."""
     return visual_plan_hash(plan)
+
+
+def _cache_strip_key(strip_rect: tuple[int, int, int, int] | None) -> str:
+    if strip_rect is None:
+        return "-"
+    return ",".join(str(value) for value in strip_rect)
+
+
+def _cache_fit_mode(fit_mode: str | None) -> str:
+    mode = str(fit_mode or "contain").strip().lower()
+    return mode if mode in {"contain", "cover"} else "contain"
+
+
+def motion_cache_key(
+    *,
+    image_hash: str,
+    plan: dict,
+    duration: float,
+    width: int,
+    height: int,
+    fps: int,
+    fit_mode: str = "contain",
+    strip_rect: tuple[int, int, int, int] | None = None,
+) -> str:
+    """Stable cache key for one rendered motion clip.
+
+    Mirrors the key that :func:`_render_loop` builds (visual plan hash, duration,
+    frame size, fps, selected effects, fit mode and strip), plus the encoder
+    version. Background callers use this to know the exact cache file to pin.
+    """
+    seconds, out_width, out_height, rate = _validate(duration, width, height, fps)
+    selection = ",".join(_active_effects(plan))
+    mode = _cache_fit_mode(fit_mode)
+    strip_key = _cache_strip_key(strip_rect)
+    return hashlib.sha256(
+        (
+            f"v{MOTION_CACHE_VERSION}|{image_hash}|{visual_plan_hash(plan)}|{seconds}|"
+            f"{out_width}|{out_height}|{rate}|{selection}|{mode}|{strip_key}|"
+            f"enc{ENCODER_VERSION}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def motion_cache_path(**kwargs) -> Path:
+    """Cache file for a motion clip, keyed by :func:`motion_cache_key`."""
+    return CACHE_ROOT / f"{motion_cache_key(**kwargs)}.mp4"
+
+
+# Process-local single-flight locks, one per cache key. Two threads rendering the
+# same clip must not run ``_encode`` twice; different keys still render in
+# parallel. Cross-process locking is intentionally out of scope.
+_MOTION_LOCKS: dict[str, threading.Lock] = {}
+_MOTION_LOCKS_GUARD = threading.Lock()
+
+
+def _motion_lock(key: str) -> threading.Lock:
+    with _MOTION_LOCKS_GUARD:
+        lock = _MOTION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _MOTION_LOCKS[key] = lock
+        return lock
+
+
+def _pin_marker(path: Path) -> Path:
+    path = Path(path)
+    return path.with_name(f".{path.name}.pin")
+
+
+def pin_cache_file(path: Path) -> None:
+    """Pin a cache file so :func:`karaoke.cache.prune` keeps it.
+
+    The marker lives next to the file as ``.<filename>.pin`` and is written
+    atomically (temporary file + ``os.replace``) so a concurrent prune never
+    sees a half-written sidecar.
+    """
+    path = Path(path)
+    marker = _pin_marker(path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(
+        f".{marker.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_bytes(b"")
+        os.replace(temporary, marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def unpin_cache_file(path: Path) -> None:
+    """Remove the ``.<filename>.pin`` sidecar for a cache file, if present."""
+    try:
+        _pin_marker(path).unlink()
+    except OSError:
+        pass
 
 
 def _finite(value, fallback: float) -> float:
@@ -798,6 +905,12 @@ def _draw_layer(
     u: float,
     height: int,
 ) -> None:
+    """Draw one rain layer as grayscale intensity into an ``L`` canvas.
+
+    The layer is tinted once with :data:`RAIN_COLOR` after all layers have been
+    accumulated, which lets the expensive blur run on one channel instead of
+    three (P0.3).
+    """
     span = layer["span"]
     size_scale = height / HEIGHT
     ys = np.mod(layer["ys"] + layer["speed"] * t, span) - 100.0 * size_scale
@@ -807,14 +920,12 @@ def _draw_layer(
     )
     xs = layer["xs"] + SLANT * ys + gust
     visible = (ys < height + 4.0) & (ys + lengths > -4.0)
-    base_color = np.asarray(RAIN_COLOR, dtype=np.float32)
     for x, y, length, alpha in zip(
         xs[visible], ys[visible], lengths[visible], layer["alphas"][visible]
     ):
         top = (float(x), float(y))
         bottom = (float(x) + SLANT * float(length), float(y) + float(length))
-        color = tuple(int(round(channel * float(alpha) / 255.0)) for channel in base_color)
-        draw.line([top, bottom], fill=color, width=1)
+        draw.line([top, bottom], fill=int(round(float(alpha))), width=1)
 
 
 # --- snow ------------------------------------------------------------------
@@ -877,19 +988,20 @@ def _draw_snow_layer(
     u: float,
     height: int,
 ) -> None:
+    """Draw one snow layer as grayscale intensity into an ``L`` canvas."""
     span = layer["span"]
     ys = np.mod(layer["ys"] + layer["speed"] * t, span) - 100.0 * (height / HEIGHT)
     xs = layer["xs"] + layer["drift"] * np.sin(
         2.0 * math.pi * layer["sway"] * u + layer["phase"]
     )
     radii = layer["radii"]
-    color = tuple(int(round(channel * layer["alpha"] / 255)) for channel in SNOW_COLOR)
+    intensity = int(round(float(layer["alpha"])))
     visible = (ys + radii > -2.0) & (ys - radii < height + 2.0)
     for x, y, radius in zip(xs[visible], ys[visible], radii[visible]):
         radius = max(0.5, float(radius))
         draw.ellipse(
             [float(x) - radius, float(y) - radius, float(x) + radius, float(y) + radius],
-            fill=color,
+            fill=intensity,
         )
 
 
@@ -2749,13 +2861,15 @@ def _encode(frames, destination: Path, width: int, height: int, fps: int, log) -
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        X264_PRESET,
         "-crf",
-        "18",
+        str(X264_CRF),
         "-pix_fmt",
-        "yuv420p",
+        X264_PIX_FMT,
         "-g",
-        "60",
+        str(X264_GOP),
+        "-bf",
+        str(X264_BFRAMES),
         "-movflags",
         "+faststart",
         str(destination),
@@ -2865,14 +2979,7 @@ def _render_loop(
     if not source.is_file():
         raise FileNotFoundError(f"Không thấy ảnh nền: {source}")
 
-    mode = str(fit_mode or "contain").strip().lower()
-    if mode not in {"contain", "cover"}:
-        mode = "contain"
-    strip_key = (
-        ",".join(str(value) for value in strip_rect)
-        if strip_rect is not None
-        else "-"
-    )
+    mode = _cache_fit_mode(fit_mode)
 
     image_hash = _file_hash(source)
     expected_hash = str(plan.get("image_hash") or "").strip()
@@ -2885,291 +2992,314 @@ def _render_loop(
         )
         return None
     plan_hash = visual_plan_hash(plan)
-    selection = ",".join(effect for effect in SUPPORTED_EFFECTS if effect in effects)
-    key = hashlib.sha256(
-        (
-            f"v{MOTION_CACHE_VERSION}|{image_hash}|{plan_hash}|{seconds}|"
-            f"{out_width}|{out_height}|{rate}|{selection}|{mode}|{strip_key}"
-        ).encode("utf-8")
-    ).hexdigest()
+    key = motion_cache_key(
+        image_hash=image_hash,
+        plan=plan,
+        duration=seconds,
+        width=out_width,
+        height=out_height,
+        fps=rate,
+        fit_mode=mode,
+        strip_rect=strip_rect,
+    )
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    cached = CACHE_ROOT / f"{key}.mp4"
+    cached = motion_cache_path(
+        image_hash=image_hash,
+        plan=plan,
+        duration=seconds,
+        width=out_width,
+        height=out_height,
+        fps=rate,
+        fit_mode=mode,
+        strip_rect=strip_rect,
+    )
 
-    if cached.is_file() and cached.stat().st_size > 0:
-        log(f"Dùng lại vòng {label} đã có cho {source.name}.")
-        _materialize(cached, destination)
-        return cached
+    # Single-flight per cache key: acquire before checking the cache and
+    # re-check inside the lock, so two threads rendering the same clip encode it
+    # only once. Different keys use different locks and render in parallel.
+    lock = _motion_lock(key)
+    with lock:
+        if cached.is_file() and cached.stat().st_size > 0:
+            log(f"Dùng lại vòng {label} đã có cho {source.name}.")
+            _materialize(cached, destination)
+            return cached
 
-    with Image.open(source) as opened:
-        source_size = ImageOps.exif_transpose(opened).size
-    # Fit straight into the output frame; resizing a landscape contain-letterbox
-    # into 9:16 would distort the source.
-    base = fit_image(source, (out_width, out_height), mode=mode)
-    base_array = np.asarray(base, dtype=np.float32)
+        with Image.open(source) as opened:
+            source_size = ImageOps.exif_transpose(opened).size
+        # Fit straight into the output frame; resizing a landscape contain-letterbox
+        # into 9:16 would distort the source.
+        base = fit_image(source, (out_width, out_height), mode=mode)
+        base_array = np.asarray(base, dtype=np.float32)
 
-    transform = _fit_transform(plan, source_size, (out_width, out_height), mode)
-    seed = int(hashlib.sha256(f"{image_hash}|{plan_hash}".encode("utf-8")).hexdigest()[:16], 16)
+        transform = _fit_transform(plan, source_size, (out_width, out_height), mode)
+        seed = int(hashlib.sha256(f"{image_hash}|{plan_hash}".encode("utf-8")).hexdigest()[:16], 16)
 
-    # Snow shares rain's outdoor/dry + protect + strip mask: flakes never fall
-    # indoors or over a protected face/text/lyric strip.
-    weather_mask = None
-    if effects.intersection({"rain", "snow"}):
-        weather_mask = _build_mask(plan, transform, out_width, out_height, strip_rect)
+        # Snow shares rain's outdoor/dry + protect + strip mask: flakes never fall
+        # indoors or over a protected face/text/lyric strip.
+        weather_mask = None
+        if effects.intersection({"rain", "snow"}):
+            weather_mask = _build_mask(plan, transform, out_width, out_height, strip_rect)
 
-    rain_layers: list[dict] = []
-    rain_intensity = 1.0
-    if "rain" in effects:
-        rain_items = _effect_items(plan, "rain")
-        rain_intensity = _items_intensity(rain_items, DEFAULT_INTENSITY)
-        if rain_intensity > 1e-3:
-            rain_layers = _make_layers(
+        rain_layers: list[dict] = []
+        rain_intensity = 1.0
+        if "rain" in effects:
+            rain_items = _effect_items(plan, "rain")
+            rain_intensity = _items_intensity(rain_items, DEFAULT_INTENSITY)
+            if rain_intensity > 1e-3:
+                rain_layers = _make_layers(
+                    out_width,
+                    out_height,
+                    seconds,
+                    seed,
+                    density_multiplier=_items_density(rain_items),
+                    speed_multiplier=_items_speed(rain_items),
+                )
+
+        snow_layers: list[dict] = []
+        snow_intensity = 1.0
+        if "snow" in effects:
+            snow_items = _effect_items(plan, "snow")
+            snow_intensity = _items_intensity(snow_items, DEFAULT_INTENSITY)
+            if snow_intensity > 1e-3:
+                snow_layers = _make_snow_layers(
+                    out_width,
+                    out_height,
+                    seconds,
+                    seed,
+                    density_multiplier=_items_density(snow_items),
+                    speed_multiplier=_items_speed(snow_items),
+                )
+
+        prevent = None
+        if effects.intersection(
+            {
+                "steam",
+                "wind",
+                "birds",
+                "fire",
+                "embers",
+                "sunrays",
+                "fog",
+                "light",
+                "water",
+            }
+        ):
+            prevent = _build_protect_mask(plan, transform, out_width, out_height, strip_rect)
+        prevent3 = prevent[:, :, None] if prevent is not None else None
+
+        steam_sources = (
+            _steam_sources(
+                plan,
+                transform,
                 out_width,
                 out_height,
                 seconds,
                 seed,
-                density_multiplier=_items_density(rain_items),
-                speed_multiplier=_items_speed(rain_items),
+                base_array,
+                log,
+                prevent=prevent,
             )
-
-    snow_layers: list[dict] = []
-    snow_intensity = 1.0
-    if "snow" in effects:
-        snow_items = _effect_items(plan, "snow")
-        snow_intensity = _items_intensity(snow_items, DEFAULT_INTENSITY)
-        if snow_intensity > 1e-3:
-            snow_layers = _make_snow_layers(
+            if "steam" in effects
+            else []
+        )
+        wind_specs = (
+            _wind_specs(plan, transform, out_width, out_height, seconds, seed, prevent, log)
+            if "wind" in effects
+            else []
+        )
+        water_spec = (
+            _water_spec(
+                plan,
+                transform,
                 out_width,
                 out_height,
                 seconds,
-                seed,
-                density_multiplier=_items_density(snow_items),
-                speed_multiplier=_items_speed(snow_items),
+                prevent,
+                log,
+                base_array=base_array,
             )
-
-    prevent = None
-    if effects.intersection(
-        {
-            "steam",
-            "wind",
-            "birds",
-            "fire",
-            "embers",
-            "sunrays",
-            "fog",
-            "light",
-            "water",
-        }
-    ):
-        prevent = _build_protect_mask(plan, transform, out_width, out_height, strip_rect)
-    prevent3 = prevent[:, :, None] if prevent is not None else None
-
-    steam_sources = (
-        _steam_sources(
-            plan,
-            transform,
-            out_width,
-            out_height,
-            seconds,
-            seed,
-            base_array,
-            log,
-            prevent=prevent,
+            if "water" in effects
+            else None
         )
-        if "steam" in effects
-        else []
-    )
-    wind_specs = (
-        _wind_specs(plan, transform, out_width, out_height, seconds, seed, prevent, log)
-        if "wind" in effects
-        else []
-    )
-    water_spec = (
-        _water_spec(
-            plan,
-            transform,
-            out_width,
-            out_height,
-            seconds,
-            prevent,
-            log,
-            base_array=base_array,
+        birds_specs = (
+            _birds_spec(
+                plan,
+                transform,
+                out_width,
+                out_height,
+                seconds,
+                prevent,
+                seed,
+                log,
+            )
+            if "birds" in effects
+            else []
         )
-        if "water" in effects
-        else None
-    )
-    birds_specs = (
-        _birds_spec(
-            plan,
-            transform,
-            out_width,
-            out_height,
-            seconds,
-            prevent,
-            seed,
-            log,
+        fire_spec = (
+            _fire_spec(plan, transform, out_width, out_height, seconds, prevent, seed, log)
+            if "fire" in effects
+            else None
         )
-        if "birds" in effects
-        else []
-    )
-    fire_spec = (
-        _fire_spec(plan, transform, out_width, out_height, seconds, prevent, seed, log)
-        if "fire" in effects
-        else None
-    )
-    embers_spec = (
-        _embers_spec(
-            plan,
-            transform,
-            out_width,
-            out_height,
-            seconds,
-            prevent,
-            seed,
-            log,
+        embers_spec = (
+            _embers_spec(
+                plan,
+                transform,
+                out_width,
+                out_height,
+                seconds,
+                prevent,
+                seed,
+                log,
+            )
+            if "embers" in effects
+            else None
         )
-        if "embers" in effects
-        else None
-    )
-    sunrays_spec = (
-        _sunrays_spec(
-            plan,
-            transform,
-            base_array,
-            out_width,
-            out_height,
-            seconds,
-            prevent,
-            seed,
-            log,
+        sunrays_spec = (
+            _sunrays_spec(
+                plan,
+                transform,
+                base_array,
+                out_width,
+                out_height,
+                seconds,
+                prevent,
+                seed,
+                log,
+            )
+            if "sunrays" in effects
+            else None
         )
-        if "sunrays" in effects
-        else None
-    )
-    fog_spec = (
-        _fog_spec(plan, transform, out_width, out_height, seconds, prevent, seed, log)
-        if "fog" in effects
-        else None
-    )
-    if effects == {"water"} and water_spec is None:
-        # Nothing resolvable: let the caller fall back to a static slide.
-        log("Bỏ qua nước: không có vùng nước resolve được.")
-    if effects == {"fire"} and fire_spec is None:
-        # No fire object/region: skip gracefully and let the caller stay static.
-        log("Bỏ qua lửa: không có object/vùng lửa resolve được.")
-    light_spec = _light_spec(plan, base_array, prevent, seconds) if "light" in effects else None
-    resolved = False
-    if (rain_layers or snow_layers) and weather_mask is not None:
-        resolved = float(weather_mask.max()) > 1e-4
-    if water_spec is not None and water_spec["amplitude"] > 0.0:
-        resolved = True
-    if steam_sources or wind_specs:
-        resolved = True
-    if fire_spec is not None and fire_spec["amplitude"] > 0.0:
-        resolved = True
-    if embers_spec is not None and embers_spec["particles"]:
-        resolved = True
-    if birds_specs:
-        resolved = True
-    if sunrays_spec is not None:
-        resolved = True
-    if fog_spec is not None and fog_spec["alpha"] > 0.0:
-        resolved = True
-    if light_spec is not None and light_spec["amplitude"] > 0.0:
-        resolved = True
-    if not resolved:
-        log("Bỏ qua vòng: không có hiệu ứng nào resolve được.")
-        return None
-    sprite_cache: dict = {}
-    frame_count = max(1, int(round(seconds * rate)))
+        fog_spec = (
+            _fog_spec(plan, transform, out_width, out_height, seconds, prevent, seed, log)
+            if "fog" in effects
+            else None
+        )
+        if effects == {"water"} and water_spec is None:
+            # Nothing resolvable: let the caller fall back to a static slide.
+            log("Bỏ qua nước: không có vùng nước resolve được.")
+        if effects == {"fire"} and fire_spec is None:
+            # No fire object/region: skip gracefully and let the caller stay static.
+            log("Bỏ qua lửa: không có object/vùng lửa resolve được.")
+        light_spec = _light_spec(plan, base_array, prevent, seconds) if "light" in effects else None
+        resolved = False
+        if (rain_layers or snow_layers) and weather_mask is not None:
+            resolved = float(weather_mask.max()) > 1e-4
+        if water_spec is not None and water_spec["amplitude"] > 0.0:
+            resolved = True
+        if steam_sources or wind_specs:
+            resolved = True
+        if fire_spec is not None and fire_spec["amplitude"] > 0.0:
+            resolved = True
+        if embers_spec is not None and embers_spec["particles"]:
+            resolved = True
+        if birds_specs:
+            resolved = True
+        if sunrays_spec is not None:
+            resolved = True
+        if fog_spec is not None and fog_spec["alpha"] > 0.0:
+            resolved = True
+        if light_spec is not None and light_spec["amplitude"] > 0.0:
+            resolved = True
+        if not resolved:
+            log("Bỏ qua vòng: không có hiệu ứng nào resolve được.")
+            return None
+        sprite_cache: dict = {}
+        frame_count = max(1, int(round(seconds * rate)))
 
-    def frames():
-        for index in range(frame_count):
-            t = index / rate
-            u = (index / rate) / seconds
-            frame = base_array.copy()
+        def frames():
+            for index in range(frame_count):
+                t = index / rate
+                u = (index / rate) / seconds
+                frame = base_array.copy()
 
-            # Water is a background surface: animate it before rain/snow so
-            # falling streaks stay straight instead of being warped with it.
-            if water_spec is not None:
-                frame = _apply_water(frame, water_spec, u)
+                # Water is a background surface: animate it before rain/snow so
+                # falling streaks stay straight instead of being warped with it.
+                if water_spec is not None:
+                    frame = _apply_water(frame, water_spec, u)
 
-            if weather_mask is not None and rain_layers:
-                overlay = np.zeros((out_height, out_width, 3), dtype=np.float32)
-                for layer in rain_layers:
-                    canvas = Image.new("RGB", (out_width, out_height), (0, 0, 0))
-                    _draw_layer(ImageDraw.Draw(canvas), layer, t, u, out_height)
-                    if layer["blur"] >= 0.3:
-                        canvas = canvas.filter(ImageFilter.GaussianBlur(layer["blur"]))
-                    overlay += np.asarray(canvas, dtype=np.float32)
-                overlay *= weather_mask[:, :, None]
-                if rain_intensity != 1.0:
-                    overlay *= rain_intensity
-                frame += overlay
-
-            if weather_mask is not None and snow_layers:
-                overlay = np.zeros((out_height, out_width, 3), dtype=np.float32)
-                for layer in snow_layers:
-                    canvas = Image.new("RGB", (out_width, out_height), (0, 0, 0))
-                    _draw_snow_layer(ImageDraw.Draw(canvas), layer, t, u, out_height)
-                    if layer["blur"] >= 0.3:
-                        canvas = canvas.filter(ImageFilter.GaussianBlur(layer["blur"]))
-                    overlay += np.asarray(canvas, dtype=np.float32)
-                overlay *= weather_mask[:, :, None]
-                if snow_intensity != 1.0:
-                    overlay *= snow_intensity
-                frame += overlay
-
-            if steam_sources:
-                plume = _steam_frame(steam_sources, u, sprite_cache)
-                if plume is not None:
-                    steam_rgb, steam_alpha = plume
-                    steam_rgb *= prevent3
-                    steam_alpha *= prevent
-                    frame = (
-                        frame * (1.0 - steam_alpha[:, :, None])
-                        + steam_rgb
+                if weather_mask is not None and rain_layers:
+                    overlay = np.zeros((out_height, out_width), dtype=np.float32)
+                    for layer in rain_layers:
+                        canvas = Image.new("L", (out_width, out_height), 0)
+                        _draw_layer(ImageDraw.Draw(canvas), layer, t, u, out_height)
+                        if layer["blur"] >= 0.3:
+                            canvas = canvas.filter(ImageFilter.GaussianBlur(layer["blur"]))
+                        overlay += np.asarray(canvas, dtype=np.float32)
+                    overlay_rgb = overlay[:, :, None] * (
+                        np.asarray(RAIN_COLOR, dtype=np.float32) / 255.0
                     )
+                    overlay_rgb *= weather_mask[:, :, None]
+                    if rain_intensity != 1.0:
+                        overlay_rgb *= rain_intensity
+                    frame += overlay_rgb
 
-            if wind_specs:
-                frame_u8 = np.clip(frame, 0.0, 255.0).astype(np.uint8)
-                warped = _wind_frame(Image.fromarray(frame_u8, "RGB"), wind_specs, u)
-                frame = np.asarray(warped, dtype=np.float32)
+                if weather_mask is not None and snow_layers:
+                    overlay = np.zeros((out_height, out_width), dtype=np.float32)
+                    for layer in snow_layers:
+                        canvas = Image.new("L", (out_width, out_height), 0)
+                        _draw_snow_layer(ImageDraw.Draw(canvas), layer, t, u, out_height)
+                        if layer["blur"] >= 0.3:
+                            canvas = canvas.filter(ImageFilter.GaussianBlur(layer["blur"]))
+                        overlay += np.asarray(canvas, dtype=np.float32)
+                    overlay_rgb = overlay[:, :, None] * (
+                        np.asarray(SNOW_COLOR, dtype=np.float32) / 255.0
+                    )
+                    overlay_rgb *= weather_mask[:, :, None]
+                    if snow_intensity != 1.0:
+                        overlay_rgb *= snow_intensity
+                    frame += overlay_rgb
 
-            if birds_specs:
-                frame = _apply_birds(frame, birds_specs, u)
+                if steam_sources:
+                    plume = _steam_frame(steam_sources, u, sprite_cache)
+                    if plume is not None:
+                        steam_rgb, steam_alpha = plume
+                        steam_rgb *= prevent3
+                        steam_alpha *= prevent
+                        frame = (
+                            frame * (1.0 - steam_alpha[:, :, None])
+                            + steam_rgb
+                        )
 
-            frame = _apply_fire(frame, fire_spec, u)
-            frame = _apply_embers(frame, embers_spec, u, sprite_cache)
-            frame = _apply_sunrays(frame, sunrays_spec, u)
-            frame = _apply_fog(frame, fog_spec, u)
-            frame = _apply_light(frame, light_spec, u)
-            np.clip(frame, 0.0, 255.0, out=frame)
-            if index % 48 == 0:
-                log(f"Vẽ {label} {index + 1}/{frame_count}.")
-            if progress is not None and (
-                index % 8 == 0 or index + 1 == frame_count
-            ):
-                try:
-                    progress(index + 1, frame_count)
-                except Exception:
-                    pass
-            yield np.ascontiguousarray(frame, dtype=np.uint8).tobytes()
+                if wind_specs:
+                    frame_u8 = np.clip(frame, 0.0, 255.0).astype(np.uint8)
+                    warped = _wind_frame(Image.fromarray(frame_u8, "RGB"), wind_specs, u)
+                    frame = np.asarray(warped, dtype=np.float32)
 
-    temporary = CACHE_ROOT / f".{key}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
-    log(f"Đang tạo vòng {label} {seconds:.1f}s cho {source.name}.")
-    try:
-        _encode(frames(), temporary, out_width, out_height, rate, log)
-        os.replace(temporary, cached)
+                if birds_specs:
+                    frame = _apply_birds(frame, birds_specs, u)
+
+                frame = _apply_fire(frame, fire_spec, u)
+                frame = _apply_embers(frame, embers_spec, u, sprite_cache)
+                frame = _apply_sunrays(frame, sunrays_spec, u)
+                frame = _apply_fog(frame, fog_spec, u)
+                frame = _apply_light(frame, light_spec, u)
+                np.clip(frame, 0.0, 255.0, out=frame)
+                if index % 48 == 0:
+                    log(f"Vẽ {label} {index + 1}/{frame_count}.")
+                if progress is not None and (
+                    index % 8 == 0 or index + 1 == frame_count
+                ):
+                    try:
+                        progress(index + 1, frame_count)
+                    except Exception:
+                        pass
+                yield np.ascontiguousarray(frame, dtype=np.uint8).tobytes()
+
+        temporary = CACHE_ROOT / f".{key}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
+        log(f"Đang tạo vòng {label} {seconds:.1f}s cho {source.name}.")
         try:
-            prune(CACHE_ROOT, max_files=40, max_bytes=2_000_000_000)
-        except Exception:
-            pass
-    finally:
-        temporary.unlink(missing_ok=True)
+            _encode(frames(), temporary, out_width, out_height, rate, log)
+            os.replace(temporary, cached)
+            try:
+                prune(CACHE_ROOT, max_files=40, max_bytes=2_000_000_000)
+            except Exception:
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
 
-    _materialize(cached, destination)
-    log(f"Đã tạo vòng {label} cho {source.name}.")
-    return cached
+        _materialize(cached, destination)
+        log(f"Đã tạo vòng {label} cho {source.name}.")
+        return cached
 
 
 def render_motion_loop(
