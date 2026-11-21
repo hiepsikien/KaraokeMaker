@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 APP_NAME = "KaraokeMaker"
+_PRUNE_LOCK = threading.Lock()
 
 
 def cache_root(*parts: str) -> Path:
@@ -29,35 +31,50 @@ def cache_root(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+def _stat_mtime(entry: Path) -> float | None:
+    try:
+        return entry.stat().st_mtime
+    except OSError:
+        return None
+
+
 def prune(directory: Path, *, max_files: int, max_bytes: int | None = None) -> None:
     """Delete the oldest files until ``max_files`` / ``max_bytes`` hold.
 
     Best effort: cache cleanup must never break a render, so every OS error is
-    swallowed.
+    swallowed. Files can also disappear between listing and stat while another
+    render prunes the same directory; those entries are simply dropped.
     """
-    try:
-        entries = [
-            entry
-            for entry in Path(directory).iterdir()
-            if entry.is_file() and not entry.name.startswith(".")
-        ]
-    except OSError:
-        return
-    entries.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
-    kept = 0
-    total = 0
-    for entry in entries:
+    with _PRUNE_LOCK:
         try:
-            size = entry.stat().st_size
+            entries = [
+                entry
+                for entry in Path(directory).iterdir()
+                if entry.is_file() and not entry.name.startswith(".")
+            ]
         except OSError:
-            continue
-        too_many = kept >= max_files
-        too_large = max_bytes is not None and total + size > max_bytes
-        if too_many or too_large:
+            return
+        mtimes: dict[Path, float] = {}
+        for entry in entries:
+            mtime = _stat_mtime(entry)
+            if mtime is not None:
+                mtimes[entry] = mtime
+        entries = list(mtimes)
+        entries.sort(key=lambda entry: mtimes[entry], reverse=True)
+        kept = 0
+        total = 0
+        for entry in entries:
             try:
-                entry.unlink()
+                size = entry.stat().st_size
             except OSError:
-                pass
-            continue
-        kept += 1
-        total += size
+                continue
+            too_many = kept >= max_files
+            too_large = max_bytes is not None and total + size > max_bytes
+            if too_many or too_large:
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+                continue
+            kept += 1
+            total += size

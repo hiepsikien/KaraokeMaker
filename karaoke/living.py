@@ -2,8 +2,9 @@
 
 P0 shipped rain only: three depth layers, a loop that is seamless by
 construction (``speed * duration`` is an integer number of vertical spans), an
-effect mask built from the plan (dry regions, protect boxes, lyric strip), and
-an H.264/yuv420p/faststart encode streamed through FFmpeg.
+effect mask built from the plan (dry regions and protect boxes), and an
+H.264/yuv420p/faststart encode streamed through FFmpeg. Effects render before
+the lyric overlay, so they may animate behind the lyric strip.
 
 P1a adds three micro-motion recipes that share the same encode/mask/cache
 pipeline:
@@ -208,7 +209,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 27
+MOTION_CACHE_VERSION = 28
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -329,7 +330,8 @@ def _active_effects(plan: dict | None) -> tuple[str, ...]:
 
 
 def plan_has_motion(plan: dict | None) -> bool:
-    """True for rain/snow/water/steam/wind/fire/fog/light items.
+    """True for any supported motion item (rain/snow/water/steam/wind/birds/fire/
+    embers/sunrays/fog/light).
 
     ``water`` counts here even when the plan has no liquid region: the renderer
     logs and falls back to a static slide, while Studio can still validate the
@@ -717,7 +719,9 @@ def _make_layers(
     rng = np.random.default_rng(seed)
     layers: list[dict] = []
     for count, speed, length, alpha, blur in RAIN_LAYERS:
-        particles = max(1, int(round(count * density * density_multiplier)))
+        particles = max(0, int(round(count * density * density_multiplier)))
+        if particles == 0:
+            continue
         # Quantize so each particle travels a whole number of spans in the loop.
         cycles = max(
             1,
@@ -797,7 +801,9 @@ def _make_snow_layers(
     base_sway = max(1, int(round(duration / 4.0)))
     layers: list[dict] = []
     for count, speed, radius, alpha, blur in SNOW_LAYERS:
-        particles = max(1, int(round(count * density * density_multiplier)))
+        particles = max(0, int(round(count * density * density_multiplier)))
+        if particles == 0:
+            continue
         # Quantize so every flake travels a whole number of spans in the loop.
         cycles = max(
             1,
@@ -1147,14 +1153,17 @@ def _steam_sources(
     items = _effect_items(plan, "steam")
     if not items:
         return []
+    intensity = _items_intensity(items, DEFAULT_INTENSITY)
+    density = _items_density(items)
+    if intensity <= 1e-3 or density <= 0.0:
+        log("Bỏ qua khói: intensity hoặc density bằng 0.")
+        return []
     objects = _plan_objects(plan)
     if not objects:
         log("Bỏ qua khói/hơi: plan không có objects.")
         return []
     targets = _target_ids(items)
-    intensity = _items_intensity(items, DEFAULT_INTENSITY)
     speed = _items_speed(items)
-    density = _items_density(items)
     cycles = max(1, int(round(seconds / 3.5 * speed)))
     rng = np.random.default_rng(seed ^ 0x5EA)
     sources: list[dict] = []
@@ -1477,6 +1486,9 @@ def _wind_specs(
         return []
     targets = _target_ids(items)
     intensity = _items_intensity(items, DEFAULT_INTENSITY)
+    if intensity <= 1e-3:
+        log("Bỏ qua gió: intensity bằng 0.")
+        return []
     speed = _items_speed(items)
     cycles = max(1, int(round(seconds / 3.0 * speed)))
     rng = np.random.default_rng(seed ^ 0x51D)
@@ -1486,12 +1498,15 @@ def _wind_specs(
         targeted = [entry for entry in objects if entry["id"] in targets]
         wind_entries = list(targeted)
         # A sail target should also move the flag on the same mast; generic
-        # pivot-proximity expansion avoids per-image object ids.
-        for candidate in objects:
-            if candidate["id"] in targets or not _cloth_candidate(candidate):
-                continue
-            if any(_same_support(candidate, target) for target in targeted):
-                wind_entries.append(candidate)
+        # pivot-proximity expansion avoids per-image object ids. Only cloth
+        # targets expand, so a lantern target does not pull in nearby curtains.
+        cloth_targets = [target for target in targeted if _cloth_candidate(target)]
+        if cloth_targets:
+            for candidate in objects:
+                if candidate["id"] in targets or not _cloth_candidate(candidate):
+                    continue
+                if any(_same_support(candidate, target) for target in cloth_targets):
+                    wind_entries.append(candidate)
     else:
         wind_entries = [entry for entry in objects if _wind_candidate(entry)]
     for entry in wind_entries:
@@ -1649,6 +1664,9 @@ def _birds_spec(
         return []
 
     intensity = _items_intensity(items, 0.3)
+    if intensity <= 1e-3:
+        log("Bỏ qua đàn chim: intensity bằng 0.")
+        return []
     speed = _items_speed(items)
     # The prompt's "nhẹ" default is ~0.30-0.35. Treat 0.30 as the reference
     # so the default motion is very soft and the slider has real headroom.
@@ -2193,6 +2211,11 @@ def _embers_spec(
     items = _effect_items(plan, "embers")
     if not items:
         return None
+    intensity = _items_intensity(items, 0.5)
+    density_multiplier = _items_density(items)
+    if intensity <= 1e-3 or density_multiplier <= 0.0:
+        log("Bỏ qua tàn lửa: intensity hoặc density bằng 0.")
+        return None
     shapes = _fire_shapes(plan, _target_ids(items))
     if not shapes:
         log("Bỏ qua tàn lửa: không có object/vùng lửa khớp target.")
@@ -2223,10 +2246,11 @@ def _embers_spec(
         log("Bỏ qua tàn lửa: vùng lửa quá nhỏ.")
         return None
 
-    intensity = _items_intensity(items, 0.5)
     speed = _items_speed(items)
-    density = math.sqrt((width * height) / (WIDTH * HEIGHT)) * _items_density(items)
-    count = max(4, int(round(95 * density * (0.5 + 0.9 * intensity))))
+    density = math.sqrt((width * height) / (WIDTH * HEIGHT)) * density_multiplier
+    count = max(0, int(round(95 * density * (0.5 + 0.9 * intensity))))
+    if count == 0:
+        return None
     total_area = sum(emitter["area"] for emitter in emitters)
     rng = np.random.default_rng(seed ^ 0xE0B5)
     particles: list[dict] = []
@@ -2802,28 +2826,30 @@ def _render_loop(
     if "rain" in effects:
         rain_items = _effect_items(plan, "rain")
         rain_intensity = _items_intensity(rain_items, DEFAULT_INTENSITY)
-        rain_layers = _make_layers(
-            out_width,
-            out_height,
-            seconds,
-            seed,
-            density_multiplier=_items_density(rain_items),
-            speed_multiplier=_items_speed(rain_items),
-        )
+        if rain_intensity > 1e-3:
+            rain_layers = _make_layers(
+                out_width,
+                out_height,
+                seconds,
+                seed,
+                density_multiplier=_items_density(rain_items),
+                speed_multiplier=_items_speed(rain_items),
+            )
 
     snow_layers: list[dict] = []
     snow_intensity = 1.0
     if "snow" in effects:
         snow_items = _effect_items(plan, "snow")
         snow_intensity = _items_intensity(snow_items, DEFAULT_INTENSITY)
-        snow_layers = _make_snow_layers(
-            out_width,
-            out_height,
-            seconds,
-            seed,
-            density_multiplier=_items_density(snow_items),
-            speed_multiplier=_items_speed(snow_items),
-        )
+        if snow_intensity > 1e-3:
+            snow_layers = _make_snow_layers(
+                out_width,
+                out_height,
+                seconds,
+                seed,
+                density_multiplier=_items_density(snow_items),
+                speed_multiplier=_items_speed(snow_items),
+            )
 
     prevent = None
     if effects.intersection(
@@ -2937,7 +2963,7 @@ def _render_loop(
         log("Bỏ qua lửa: không có object/vùng lửa resolve được.")
     light_spec = _light_spec(plan, base_array, prevent, seconds) if "light" in effects else None
     resolved = False
-    if effects.intersection({"rain", "snow"}) and weather_mask is not None:
+    if (rain_layers or snow_layers) and weather_mask is not None:
         resolved = float(weather_mask.max()) > 1e-4
     if water_spec is not None and water_spec["amplitude"] > 0.0:
         resolved = True
@@ -3039,7 +3065,10 @@ def _render_loop(
     try:
         _encode(frames(), temporary, out_width, out_height, rate, log)
         os.replace(temporary, cached)
-        prune(CACHE_ROOT, max_files=40, max_bytes=2_000_000_000)
+        try:
+            prune(CACHE_ROOT, max_files=40, max_bytes=2_000_000_000)
+        except Exception:
+            pass
     finally:
         temporary.unlink(missing_ok=True)
 

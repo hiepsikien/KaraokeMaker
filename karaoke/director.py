@@ -27,6 +27,7 @@ import requests
 from PIL import Image, ImageOps
 
 from karaoke.cache import cache_root, prune
+from karaoke.profiles import normalize_profile_id
 
 DEFAULT_MODEL = "gemini-3.8-flash"
 INTENT_MODEL = "gemini-3.1-flash-lite"
@@ -488,7 +489,12 @@ def _clean_list(value: Any) -> list[str]:
 
 
 def _scaled(values: list[float]) -> list[float]:
-    """Gemini uses a 0..1000 grid; tolerate already-normalized input too."""
+    """Gemini uses a 0..1000 grid; tolerate already-normalized input too.
+
+    When every value is <= 1 we treat the payload as normalized. This is
+    deliberate for a full-frame box ``[0, 0, 1, 1]``: a 1x1-pixel box on the
+    1000 grid is never useful to the renderer.
+    """
     scale = 1000.0 if values and max(abs(item) for item in values) > 1.0 else 1.0
     return [max(0.0, min(1.0, item / scale)) for item in values]
 
@@ -820,7 +826,13 @@ def keyword_intent(prompt: str) -> dict:
         found.append("snow")
     if "tàn lửa" in text or "tia lửa" in text or "embers" in text or "sparks" in text:
         found.append("embers")
-    if "lửa" in text or "cháy" in text or "fire" in text or "flame" in text:
+    fire_text = text.replace("tàn lửa", " ").replace("tia lửa", " ")
+    if (
+        "lửa" in fire_text
+        or "cháy" in fire_text
+        or "fire" in fire_text
+        or "flame" in fire_text
+    ):
         found.append("fire")
     if (
         "chim" in text
@@ -949,7 +961,7 @@ def build_effect_plan(
     return {
         "version": 1,
         "image_hash": image_hash,
-        "profile_id": output_profile,
+        "profile_id": normalize_profile_id(output_profile),
         "fit_transform": build_fit_transform(width, height),
         "objects": [dict(item) for item in objects],
         "regions": [dict(item) for item in regions],

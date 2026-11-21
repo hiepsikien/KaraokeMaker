@@ -21,6 +21,9 @@ class RenderProfile:
     fps: int
     fit_mode: str
     strip_rect: tuple[int, int, int, int]
+    # safe_top/safe_bottom describe the app's top/bottom chrome; strip_rect is
+    # positioned within them (validated by tests). safe_left/safe_right are
+    # applied directly to the lyric text/bar layout.
     safe_top: int
     safe_bottom: int
     safe_left: int

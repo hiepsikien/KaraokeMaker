@@ -174,7 +174,19 @@ export function ProjectSetup({
             onBrowse={() => onBrowse("cover")}
           />
           {fields.cover_image && (
-            <ImageCards paths={[fields.cover_image]} onRemove={() => setFields((current) => ({ ...current, cover_image: "" }))} outputProfile={fields.output_profile} />
+            <ImageCards
+              paths={[fields.cover_image]}
+              onRemove={() =>
+                setFields((current) => ({
+                  ...current,
+                  cover_image: "",
+                  background_effects: current.background_effects.filter(
+                    (effect) => effect.image_path !== current.cover_image
+                  ),
+                }))
+              }
+              outputProfile={fields.output_profile}
+            />
           )}
           <div>
             <div className="mb-1.5 flex items-center justify-between">

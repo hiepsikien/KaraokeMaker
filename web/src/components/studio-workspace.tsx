@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AiEffects } from "@/components/ai-effects";
 import { ImageCards } from "@/components/image-cards";
@@ -71,6 +71,13 @@ export function StudioWorkspace() {
   const [renderingMode, setRenderingMode] = useState<"preview" | "standard" | "">("");
   const [renderHint, setRenderHint] = useState("");
   const [previews, setPreviews] = useState<Record<string, PreviewResult>>({});
+  const renderAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      renderAbortRef.current?.abort();
+    };
+  }, []);
 
   async function pickImages() {
     if (busyBrowse) return;
@@ -108,6 +115,7 @@ export function StudioWorkspace() {
   }
 
   function changeProfile(value: string) {
+    if (renderingPath) return;
     setProfile(value);
     // A preview is tied to the output profile and the plan; drop stale videos.
     setPreviews({});
@@ -120,6 +128,8 @@ export function StudioWorkspace() {
     setRenderingMode("preview");
     setRenderHint("");
     setError("");
+    const controller = new AbortController();
+    renderAbortRef.current = controller;
     try {
       const response = await fetch("/api/studio/render", {
         method: "POST",
@@ -130,6 +140,7 @@ export function StudioWorkspace() {
           duration: PREVIEW_DURATION,
           output_profile: profile,
         }),
+        signal: controller.signal,
       });
       if (!response.ok) {
         setError(await readError(response));
@@ -138,8 +149,11 @@ export function StudioWorkspace() {
       const data = (await response.json()) as PreviewResult;
       setPreviews((current) => ({ ...current, [effect.image_path]: data }));
     } catch {
-      setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");
+      if (!controller.signal.aborted) {
+        setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");
+      }
     } finally {
+      if (renderAbortRef.current === controller) renderAbortRef.current = null;
       setRenderingPath("");
       setRenderingMode("");
     }
@@ -153,6 +167,8 @@ export function StudioWorkspace() {
       `Đang render bản chuẩn ${STANDARD_DURATION}s ở ${PROFILE_SIZE[profile] || profile}; có thể mất 1–2 phút.`,
     );
     setError("");
+    const controller = new AbortController();
+    renderAbortRef.current = controller;
     try {
       const response = await fetch("/api/studio/render", {
         method: "POST",
@@ -164,6 +180,7 @@ export function StudioWorkspace() {
           output_profile: profile,
           full_resolution: true,
         }),
+        signal: controller.signal,
       });
       if (!response.ok) {
         setError(await readError(response));
@@ -175,7 +192,9 @@ export function StudioWorkspace() {
         // Full renders run in a background job; poll until done.
         for (let attempt = 0; attempt < 480; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 1500));
-          const statusResponse = await fetch(`/api/studio/render-job/${jobId}`);
+          const statusResponse = await fetch(`/api/studio/render-job/${jobId}`, {
+            signal: controller.signal,
+          });
           if (statusResponse.status === 404) {
             setError("Không thấy job render (server có thể đã restart). Bấm lại nút Bản chuẩn 16s.");
             return;
@@ -213,8 +232,11 @@ export function StudioWorkspace() {
         setRenderHint("");
       }
     } catch {
-      setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");
+      if (!controller.signal.aborted) {
+        setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");
+      }
     } finally {
+      if (renderAbortRef.current === controller) renderAbortRef.current = null;
       setRenderingPath("");
       setRenderingMode("");
     }
@@ -252,7 +274,12 @@ export function StudioWorkspace() {
 
         <label className="block">
           <span className="mb-1.5 block text-sm text-[var(--muted)]">Định dạng preview</span>
-          <select className={fieldClass} value={profile} onChange={(event) => changeProfile(event.target.value)}>
+          <select
+            className={fieldClass}
+            value={profile}
+            disabled={Boolean(renderingPath)}
+            onChange={(event) => changeProfile(event.target.value)}
+          >
             {PROFILE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}

@@ -73,7 +73,9 @@ server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
   1080p/9:16/1:1/4:5.
 - Model: `gemini-3.8-flash` cho inventory ảnh, `gemini-3.1-flash-lite` cho intent.
 - Chi phí tham khảo: ~1 cent/ảnh (xem `docs/ai-scene-director.md` §4.2).
-- Cache: `~/Library/Caches/KaraokeMaker/director` và `.../living`.
+- Cache: dùng thư mục cache theo platform (`~/Library/Caches/KaraokeMaker` trên macOS,
+  `%LOCALAPPDATA%\KaraokeMaker\Cache` trên Windows, `~/.cache/karaokemaker` trên Linux);
+  override bằng `KARAOKE_CACHE_DIR`.
 - Ảnh nằm ngoài thư mục nhạc/`KARAOKE_ALLOWED_ROOTS` phải được chọn qua hộp thoại
   của ứng dụng, giống các file khác.
 

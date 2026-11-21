@@ -25,10 +25,12 @@ TEXT_FPS = 12
 # Keep these in sync with web/src/lib/cue.ts (LONG_GAP_SECONDS, COUNTDOWN_SECONDS).
 LONG_GAP = 8.0
 COUNTDOWN = 5.0
-# One size for every lyric line; long lines wrap to at most two rows.
+# One shared font size; long lines wrap to as many rows as the strip fits.
 LYRIC_FONT_SIZE = 56
 MAX_LYRIC_WIDTH = 1700
 LYRIC_ROW_GAP = 10
+TEXT_PADDING_X = 4
+BAR_PADDING_Y = 36
 
 
 def _run(command: list[str], log) -> None:
@@ -85,9 +87,9 @@ def _wrap_word_rows(widths: list[float], space: float, max_width: float) -> list
 
 
 def _available_lyric_width(profile: RenderProfile) -> int:
-    """Usable text width between the profile's left/right safe margins."""
+    """Usable text width between safe margins, minus the text bitmap padding."""
     usable = profile.width - max(0, profile.safe_left) - max(0, profile.safe_right)
-    return max(1, min(profile.max_lyric_width, usable))
+    return max(1, min(profile.max_lyric_width, usable) - TEXT_PADDING_X)
 
 
 def _fit_lyric_font_size(lines: list[dict], profile: RenderProfile) -> int:
@@ -104,10 +106,12 @@ def _fit_lyric_font_size(lines: list[dict], profile: RenderProfile) -> int:
         space = float(font.getlength(" "))
         ascent, descent = font.getmetrics()
         row_height = ascent + descent + 8
+        # The bar adds BAR_PADDING_Y; leave a small margin so it is never
+        # clipped by the strip bitmap.
         max_rows = max(
             1,
             int(
-                (strip_height - 16)
+                (strip_height - BAR_PADDING_Y - 8)
                 // max(1, row_height + profile.lyric_row_gap)
             ),
         )
@@ -159,7 +163,7 @@ def _render_text_pair(
     row_widths = []
     for row in rows:
         row_widths.append(_row_width([widths[index] for index in row], space))
-    image_width = max(1, int(max(row_widths) + 4))
+    image_width = max(1, int(max(row_widths) + TEXT_PADDING_X))
     image_height = max(
         1,
         int(row_height * len(rows) + profile.lyric_row_gap * max(0, len(rows) - 1)),
@@ -255,8 +259,8 @@ def _draw_strip(layout: dict, song_time: float, profile: RenderProfile | None = 
     strip = Image.new("RGBA", (width, strip_height), (0, 0, 0, 0))
     text = layout["white"]
     bar_width = min(usable, text.width + 56)
-    bar_height = text.height + 36
-    bar = Image.new("RGBA", (bar_width, bar_height), (8, 6, 4, 168))
+    bar_height = text.height + BAR_PADDING_Y
+    bar = Image.new("RGBA", (bar_width, bar_height), (8, 6, 4, 196))
     bar_x = safe_left + max(0, (usable - bar_width) // 2)
     bar_y = (strip_height - bar_height) // 2
     strip.alpha_composite(bar, (bar_x, bar_y))
@@ -573,8 +577,8 @@ def render_videos(
                         fit_mode=profile.fit_mode,
                         # Background effects render before the lyric overlay.
                         # A zero-height strip explicitly means "do not mask the
-                        # bottom"; the opaque text/bar drawn later keeps lyrics
-                        # readable. Passing None would enable the legacy
+                        # bottom"; the semi-opaque text/bar drawn later keeps
+                        # lyrics readable. Passing None would enable the legacy
                         # bottom-280px mask instead.
                         strip_rect=(0, 0, 0, 0),
                         log=log,

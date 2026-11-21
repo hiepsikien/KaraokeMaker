@@ -607,6 +607,83 @@ class EffectParamTests(unittest.TestCase):
         self.assertLess(base["amp_x"], 0.6)
         self.assertLess(base["amp_y"], 0.4)
 
+    def test_zero_intensity_and_density_disable_effects(self):
+        transform = living._fit_transform(base_plan(), (640, 360))
+        prevent = np.ones((360, 640), dtype=np.float32)
+
+        steam_plan = effect_plan(
+            [{"effect": "steam", "target_ids": [], "params": {"intensity": 0.0}}],
+            objects=[object_entry("pot-1", "pot", (0.2, 0.3, 0.4, 0.5), opening=(0.3, 0.3))],
+        )
+        steam_transform = living._fit_transform(steam_plan, (640, 360))
+        self.assertEqual(
+            living._steam_sources(
+                steam_plan,
+                steam_transform,
+                640,
+                360,
+                4.0,
+                1234,
+                None,
+                lambda _m: None,
+                prevent=prevent,
+            ),
+            [],
+        )
+
+        wind_plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.0}}],
+            objects=[object_entry("flag-1", "flag", (0.6, 0.05, 0.9, 0.3), pivot=(0.6, 0.05))],
+        )
+        wind_transform = living._fit_transform(wind_plan, (640, 360))
+        self.assertEqual(
+            living._wind_specs(
+                wind_plan, wind_transform, 640, 360, 4.0, 1234, prevent, lambda _m: None
+            ),
+            [],
+        )
+
+        birds_plan = effect_plan(
+            [{"effect": "birds", "target_ids": [], "params": {"intensity": 0.0}}],
+            objects=[object_entry("flock-1", "bird flock", (0.35, 0.2, 0.65, 0.4))],
+        )
+        birds_transform = living._fit_transform(birds_plan, (640, 360))
+        self.assertEqual(
+            living._birds_spec(
+                birds_plan, birds_transform, 640, 360, 4.0, prevent, 1234, lambda _m: None
+            ),
+            [],
+        )
+
+        rain_layers = living._make_layers(640, 360, 4.0, 1234, density_multiplier=0.0)
+        self.assertEqual(sum(len(layer["xs"]) for layer in rain_layers), 0)
+
+        embers_plan = effect_plan(
+            [{"effect": "embers", "target_ids": [], "params": {"density": 0.0}}],
+            objects=[object_entry("fire-1", "fire", (0.4, 0.5, 0.6, 0.8), affordances=["burn"])],
+        )
+        embers_transform = living._fit_transform(embers_plan, (640, 360))
+        self.assertIsNone(
+            living._embers_spec(
+                embers_plan, embers_transform, 640, 360, 4.0, prevent, 1234, lambda _m: None
+            )
+        )
+
+    def test_wind_target_lantern_does_not_pull_in_nearby_flags(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["lantern-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry("lantern-1", "lantern", (0.6, 0.2, 0.7, 0.35), affordances=["swayable"]),
+                object_entry("flag-1", "flag", (0.6, 0.05, 0.7, 0.15), pivot=(0.65, 0.06)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual([spec["id"] for spec in specs], ["lantern-1"])
+
     def test_rain_density_changes_particle_count(self):
         low = living._make_layers(640, 360, 4.0, 1234, density_multiplier=0.4)
         high = living._make_layers(640, 360, 4.0, 1234, density_multiplier=1.4)

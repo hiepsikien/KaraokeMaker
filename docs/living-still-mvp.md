@@ -323,10 +323,10 @@ speed * T = k * span
 
 1. **P1a — xong**: steam, wind/sway, light trong `karaoke/living.py` +
    `render.py`; smoke test all-effects 640×360 1 s = 0.325 s; 1080p 1 s ≈ 8.4 s;
-   80 tests pass. Steam plan thật từ nồi đã hiển thị đúng.
+   80 tests pass (tại thời điểm). Steam plan thật từ nồi đã hiển thị đúng.
 2. **P1b — xong**: `RenderProfile` 16:9/9:16, UI selector, safe area, tên file
    `(dọc)`, cover=0 đã sửa. Smoke: portrait 1080×1920/30fps, lyric trên safe bottom,
-   16:9 vẫn 1920×1080; 80 tests pass.
+   16:9 vẫn 1920×1080; 80 tests pass (tại thời điểm).
 3. **P1c — xong**: tab **AI Studio** (`/studio`), preview endpoint
    `/api/studio/render`, video preview; chưa lưu asset vào dự án Karaoke.
 4. **P1d — xong**: ambient audio procedural (rain/water/wind), default off,
@@ -337,7 +337,7 @@ speed * T = k * span
    liquid/water). Smoke protect boxes respected; test suite pass; 1080p 8 s: snow 39.3 s,
    water 14.9 s; plan thật snow/water render đúng.
 7. **P2b — xong**: fire (glow/flicker theo object/region) + fog (noise drift),
-   expose trong intent (`lửa/cháy`, `sương mù/fog`); 80 tests pass; smoke
+   expose trong intent (`lửa/cháy`, `sương mù/fog`); 80 tests pass (tại thời điểm); smoke
    protect boxes respected; fire thật trên ảnh wildfire đã render.
 8. **P3 còn lại**:
    - SAM 2 + Depth masks (thay box/ellipse).
@@ -376,17 +376,17 @@ speed * T = k * span
   pha ngẫu nhiên. Chỉ `prevent` (vùng lyric) được áp một lần lúc composite. Không
   còn cạnh thẳng nào từ mask khói.
 - **Tàn lửa (`embers`)**: particle nhỏ màu cam vàng bốc lên từ fire object/region,
-  loop-quantized, có protect/strip. Prompt `tàn lửa`, `tia lửa`, `embers`, `sparks`
+  loop-quantized, có protect box; effect render trước lyric nên không mask strip. Prompt `tàn lửa`, `tia lửa`, `embers`, `sparks`
   được map sang `embers`; đã có test riêng.
 - **Đàn chim (`birds`)**: inventory v7 nhận `bird flock` (box cả đàn); renderer dịch
-  nhẹ cả patch có mask ellipse feather (drift ngang 1–3 px + bob dọc 1–2 px ở 640×360),
+  nhẹ cả patch có mask ellipse feather (mốc 0.30: drift ~0,4 px + bob ~0,2 px ở 640×360),
   chu kỳ nguyên để loop khít. **Chỉ bật khi prompt yêu cầu** (`chim`, `đàn chim`,
   `birds`, `flock`); ảnh có chim không tự động thêm effect.
 - **Tia nắng (`sunrays`)**: inventory v7 nhận `sun`/`light source`; fallback là vùng
   sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
   thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
   `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
-- 112 tests pass.
+- 121 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -394,7 +394,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - Intent: rain, fire, water, wind.
 - Inventory: 2 ships, 2 sails, fire, smoke, flag, boats.
 - Wind target_ids: `sail_right`, `sail_left_mid`.
-- Preview: mưa, lửa, nước sát foreground, buồm rung; 88 tests pass.
+- Preview: mưa, lửa, nước sát foreground, buồm rung; 88 tests pass (tại thời điểm).
 
 ## 10.2 Sửa vòng 2 theo feedback ảnh hải chiến
 
@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=27`, `PREVIEW_VERSION=preview_v23`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=28`, `PREVIEW_VERSION=preview_v24`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -459,7 +459,19 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   `speed` (20–200%). Slider chỉ sửa `effect_plan.items[].params` cục bộ, không gọi
   lại Gemini; bấm Áp dụng để lưu. `intensity` điều khiển biên độ/alpha/glow,
   `density` điều khiển số hạt, `speed` điều khiển chu kỳ (vẫn quantize nguyên để
-  loop khít). Mức 0% tắt riêng effect đó (chim/nắng có guard rõ ràng).
+  loop khít).
+- **0% thực sự tắt**: steam/wind/birds/embers early-return khi intensity = 0;
+  rain/snow/embers trả 0 hạt khi density = 0; `resolved` chỉ true khi còn layer/
+  spec thật. Nếu toàn bộ effect đều 0, Studio báo không có hiệu ứng render được.
+- **Lyric bar**: `_fit_lyric_font_size` trừ `BAR_PADDING_Y` nên bar không bị cắt;
+  text width trừ `TEXT_PADDING_X`; bar alpha tăng lên 196 (~77%) để chữ đọc được
+  trên effect phía sau.
+- **Cache prune best-effort**: bọc lock + stat/sort trong try; file biến mất giữa
+  lúc prune không làm fail render.
+- **Studio job**: disable select profile khi đang render; polling dùng AbortController
+  và dừng khi rời trang.
+- **Dọn dẹp**: xoá cover cũng prune effect; wind “same support” chỉ expand cho
+  cloth target; `profile_id` được normalize; keyword “tàn lửa” không tự thêm fire.
 - **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung
   sẽ bỏ qua effect và yêu cầu phân tích lại thay vì áp box cũ.
 - **Inspect ảnh**: `fits_frame`/note tính theo `output_profile`; thêm 4:5. Preview

@@ -39,7 +39,8 @@ portrait_4x5
   cover_title 58, cover_artist 32, cover_line 24, cover_max_width 900
 ```
 
-- `strip_rect` là vùng cấm effect; effect mask phải zero trong đó.
+- `strip_rect` là vị trí lyric strip. Effect render **trước** lyric overlay nên có
+  thể chạy phía sau; text/bar bán trong suốt vẽ sau đảm bảo đọc được.
 - P1b chỉ hỗ trợ `contain` và `cover`; `blur-fill` để P2.
 - `output_profile` lưu trong project; default `landscape_1080p`.
 - Unknown profile -> fallback `landscape_1080p`.
@@ -123,6 +124,6 @@ def normalize_profile_id(profile_id: str | None) -> str
 ## Smoke tests
 
 - 16:9: render 1 s with synthetic audio; output 1920×1080.
-- 9:16: render 1 s with synthetic audio; output 1080×1920; strip zero; no text overflow.
+- 9:16: render 1 s with synthetic audio; output 1080×1920; text nằm trong safe area; no text overflow.
 - Ảnh 16:9 -> 9:16 contain; ảnh 9:16 -> 16:9 contain.
 - Existing 80 tests must stay green.

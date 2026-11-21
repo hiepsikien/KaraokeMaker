@@ -450,6 +450,26 @@ class TargetResolutionTests(unittest.TestCase):
         )
 
 
+class ScaledCoordinateTests(unittest.TestCase):
+    def test_unit_box_is_treated_as_normalized_full_frame(self):
+        self.assertEqual(director._scaled([0.0, 0.0, 1.0, 1.0]), [0.0, 0.0, 1.0, 1.0])
+
+    def test_thousand_grid_is_scaled(self):
+        self.assertEqual(director._scaled([0.0, 0.0, 500.0, 1000.0]), [0.0, 0.0, 0.5, 1.0])
+
+
+class IntentKeywordTests(unittest.TestCase):
+    def test_embers_only_does_not_also_add_fire(self):
+        effects = [item["type"] for item in director.keyword_intent("tàn lửa bốc bay")["effects"]]
+        self.assertIn("embers", effects)
+        self.assertNotIn("fire", effects)
+
+    def test_explicit_fire_still_adds_fire(self):
+        effects = [item["type"] for item in director.keyword_intent("lửa cháy và tàn lửa")["effects"]]
+        self.assertIn("embers", effects)
+        self.assertIn("fire", effects)
+
+
 class EffectParamPlanTests(unittest.TestCase):
     def test_plan_items_include_density_and_speed_defaults(self):
         plan = director.build_effect_plan(
@@ -465,6 +485,19 @@ class EffectParamPlanTests(unittest.TestCase):
         self.assertEqual(params["intensity"], 0.5)
         self.assertEqual(params["density"], 1.0)
         self.assertEqual(params["speed"], 1.0)
+
+    def test_unknown_profile_is_normalized_in_the_plan(self):
+        plan = director.build_effect_plan(
+            "sha256:" + "a" * 64,
+            {"effects": [{"type": "rain", "intensity": 0.5, "audio": False}]},
+            [],
+            [],
+            [],
+            640,
+            360,
+            output_profile="not-a-profile",
+        )
+        self.assertEqual(plan["profile_id"], "landscape_1080p")
 
 
 class EnvLoadingTests(unittest.TestCase):

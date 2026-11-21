@@ -34,10 +34,12 @@ from karaoke.pipeline import (
 )
 from dataclasses import replace
 
+from karaoke.cache import prune
 from karaoke.media import _ratio_label, inspect_image
 from karaoke.profiles import get_profile
 from karaoke.project import load_project, project_from_fields, project_path_for, save_project, sync_project_file
 from karaoke.render import (
+    BAR_PADDING_Y,
     COUNTDOWN,
     LONG_GAP,
     LYRIC_FONT_SIZE,
@@ -1015,7 +1017,10 @@ class LyricLayoutTests(unittest.TestCase):
         layout = _render_text_pair(line, profile, size)
         usable = profile.width - profile.safe_left - profile.safe_right
         self.assertLessEqual(layout["white"].width, usable + 4)
-        self.assertLessEqual(layout["white"].height, profile.strip_rect[3])
+        self.assertLessEqual(
+            layout["white"].height + BAR_PADDING_Y,
+            profile.strip_rect[3],
+        )
 
     def test_draw_strip_centers_text_inside_horizontal_safe_area(self):
         profile = replace(get_profile("portrait_1080x1920"), safe_left=100, safe_right=120)
@@ -1041,6 +1046,27 @@ class ProfileSafeAreaTests(unittest.TestCase):
             _x, top, _width, height = profile.strip_rect
             self.assertGreaterEqual(top, profile.safe_top, profile_id)
             self.assertLessEqual(top + height, profile.height - profile.safe_bottom, profile_id)
+
+
+class CachePruneTests(unittest.TestCase):
+    def test_prune_evicts_old_files_and_survives_vanished_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for index in range(3):
+                (root / f"{index}.mp4").write_bytes(b"x" * (index + 1))
+            # One file disappears between listing and stat; prune must not raise
+            # and still evicts among the entries it could stat.
+            with patch("karaoke.cache._stat_mtime", side_effect=[None, 1.0, 2.0]):
+                prune(root, max_files=1)
+            self.assertLessEqual(len(list(root.iterdir())), 2)
+
+    def test_prune_respects_max_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for index in range(4):
+                (root / f"{index}.mp4").write_bytes(b"x")
+            prune(root, max_files=2)
+            self.assertEqual(len(list(root.iterdir())), 2)
 
 
 class InspectImageTests(unittest.TestCase):
