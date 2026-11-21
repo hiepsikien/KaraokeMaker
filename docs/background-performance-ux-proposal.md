@@ -279,8 +279,9 @@ Không nên hứa 90–100s chỉ với P0.
 
 ### P1 — Tăng tốc thêm (2–3 ngày)
 
-- **Render clip song song có giới hạn** (2–3 worker): các ảnh độc lập, có thể giảm tiếp khâu
-  clip xuống ~25–35s. Cần giới hạn RAM và tắt prune trong worker.
+- **Render clip song song**: đã bật mặc định **2 worker** trong P0.2 (`KARAOKE_CLIP_WORKERS`).
+  Đo nhanh 4 clip mưa @960×540: 1 worker 1,47s / 2 worker 1,01s / 4 worker 0,82s
+  (~1,4–1,8x). Phần vẽ particle là Python-level nên không nên hứa 2,5–3x; cần đo lại @1080p.
 - **Picture cache**: key gồm `background.hash + hash(nội dung lines) + profile_fingerprint +
   total_frames + cover_frames + TEXT_FPS + PICTURE_BUILDER_VERSION`; chỉ tái dùng khi tất cả
   khớp. Hữu ích khi chỉ đổi audio/format. Thiếu `background.hash` là dễ tái dùng picture cũ
@@ -297,8 +298,8 @@ hơn x264 veryfast (26s vs 16s cho 4 phút), nên chỉ nên là tuỳ chọn.
 
 ## 3. Phương án làm gọn luồng (P2)
 
-Mục tiêu: **từ 5 phase + 1 trang Studio riêng → 2 màn hình chính**, mỗi màn một hành động
-chính.
+Mục tiêu: **giảm 5 phase xuống 3 nhóm bước** (Chuẩn bị → Biên tập → Xuất), gộp nhãn
+restore/align vào “Chuẩn bị”; màn align vẫn tồn tại cho tới khi có editor chạy nền.
 
 ### 3.1. Luồng đích
 
@@ -363,7 +364,7 @@ Home
   “Làm hiệu ứng”, thay vì panel dài chỉ cho ảnh đang chọn.
 
 **Kỳ vọng:** từ ~14 bước / 2 màn hình cho một hiệu ứng xuống **2–3 bước / 1 drawer**;
-từ 5 phase xuống 2 màn hình.
+stepper từ 5 phase xuống 3 nhóm bước (màn align vẫn còn).
 
 ---
 
@@ -445,7 +446,7 @@ khoảng **4,5–6,5 ngày**.
 | Hạng mục | Trước | Sau |
 |---|---|---|
 | Clip mưa 8s @1080p30 | ~21,0s | **~11,6s** (~1,8x) |
-| Background 1 ảnh tĩnh, 1 slot 240s | ~41s | **~6,7s** (decode-once + concat) |
+| Background 1 ảnh tĩnh, 1 slot 240s | ~41s | **~6,7–12,5s** tuỳ texture ảnh (decode-once + concat) |
 | Background 8 ảnh tĩnh unique + cover, bài 4 phút | ~41s | **~2,2s** |
 | Ghép 30 slot motion/asset đã encode | ~17,1s | **~0,2s** |
 | Picture cache (cùng lời/nền) | encode lại ~30s | **reuse, ~0s** |

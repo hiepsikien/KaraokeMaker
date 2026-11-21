@@ -515,6 +515,26 @@ export function AiEffects({
     const parsed = Number(imageDuration);
     const duration = Number.isFinite(parsed) && parsed > 0 ? parsed : 8;
 
+    if (!force) {
+      // Reuse an existing asset with the same image/plan duration instead of
+      // rendering and saving another copy.
+      const reusable = assets.find((asset) => {
+        if (asset.image_hash !== imageHash || asset.profile_id !== outputProfile) return false;
+        const seconds = asset.asset_frames && asset.fps ? asset.asset_frames / asset.fps : asset.loop_duration;
+        if (typeof seconds !== "number") return false;
+        return Math.abs(seconds - duration) <= 0.5 / Math.max(1, Number(asset.fps || 30));
+      });
+      if (reusable) {
+        onEffectsChange((current) =>
+          current.map((item) =>
+            item.image_path === imagePath ? { ...item, asset_id: reusable.id } : item,
+          ),
+        );
+        setImageRender(imagePath, { status: "done" });
+        return;
+      }
+    }
+
     const previousTarget = renderTargetRef.current;
     renderAbortRef.current?.abort();
     if (previousTarget && previousTarget !== imagePath) setImageRender(previousTarget, null);

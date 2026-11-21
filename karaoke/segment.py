@@ -15,15 +15,16 @@ import os
 import uuid
 from pathlib import Path
 
+from karaoke.living import (
+    ENCODER_VERSION as SEGMENT_ENCODER_VERSION,
+    X264_BFRAMES as SEGMENT_BFRAMES,
+    X264_CRF as SEGMENT_CRF,
+    X264_GOP as SEGMENT_GOP,
+    X264_PIX_FMT as SEGMENT_PIX_FMT,
+    X264_PRESET as SEGMENT_PRESET,
+)
 from karaoke.media import MediaError
 from karaoke.render import _run
-
-SEGMENT_ENCODER_VERSION = 2
-SEGMENT_PRESET = "veryfast"
-SEGMENT_CRF = 18
-SEGMENT_GOP = 60
-SEGMENT_PIX_FMT = "yuv420p"
-SEGMENT_BFRAMES = 0
 
 
 def segment_output_args() -> list[str]:

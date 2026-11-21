@@ -15,8 +15,10 @@ from karaoke.assets import (
     assets_usage,
     cleanup_assets,
     delete_asset,
+    known_project_paths,
     list_assets,
     load_asset,
+    register_project_path,
     save_asset_from_preview,
     validate_asset,
 )
@@ -209,6 +211,14 @@ class AssetQuotaTests(unittest.TestCase):
 
         self.assertEqual(usage["count"], 3)
         self.assertEqual(usage["bytes"], 100 + 250 + 75)
+
+
+    def test_project_registry_round_trips_existing_paths(self):
+        project = self.data_root / "song.karaoke.json"
+        project.write_text("{}", encoding="utf-8")
+        register_project_path(project)
+        register_project_path(project)
+        self.assertEqual(known_project_paths(), [project.resolve()])
 
 
 class AssetStoreTests(unittest.TestCase):

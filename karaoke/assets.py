@@ -47,6 +47,7 @@ META_FILE = "meta.json"
 ASSET_MAX_FILES = 100
 ASSET_MAX_BYTES = 2_000_000_000
 ASSET_MIN_AGE_DAYS = 7.0
+PROJECTS_FILE = ".projects.json"
 _LOCK = threading.Lock()
 _SHA_CACHE: dict[tuple[str, int, int], str] = {}
 
@@ -445,6 +446,55 @@ def assets_usage() -> dict:
         "count": len(entries),
         "bytes": sum(entry["bytes"] for entry in entries),
     }
+
+
+def register_project_path(path: Path) -> None:
+    """Remember a project file so asset GC can scan it even when closed."""
+    root = assets_root()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / PROJECTS_FILE
+    entry = str(Path(path).expanduser().resolve())
+    with _file_lock(root / ".assets.lock"):
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = []
+        if not isinstance(existing, list):
+            existing = []
+        if entry in existing:
+            return
+        existing.append(entry)
+        temporary = target.with_name(
+            f".{PROJECTS_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def known_project_paths() -> list[Path]:
+    """Return existing project files recorded by :func:`register_project_path`."""
+    target = assets_root() / PROJECTS_FILE
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    paths: list[Path] = []
+    for item in data:
+        try:
+            path = Path(str(item)).expanduser()
+        except (TypeError, ValueError):
+            continue
+        if path.is_file():
+            paths.append(path)
+    return paths
 
 
 def cleanup_assets(

@@ -1,7 +1,9 @@
 import json
+import os
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,7 @@ from karaoke.background import (
     _motion_identity,
     background_status,
     build_background,
+    cleanup_pictures,
     profile_fingerprint,
     render_videos,
 )
@@ -350,6 +353,38 @@ class BackgroundBuildTests(unittest.TestCase):
             )
         self.assertTrue(valid)
         probe_mock.assert_not_called()
+
+    def test_cleanup_pictures_keeps_current_and_recent(self):
+        root = self.root / ".karaoke-media" / "pictures"
+        root.mkdir(parents=True)
+        old = root / "picture-old.mp4"
+        current = root / "picture-current.mp4"
+        old.write_bytes(b"old")
+        current.write_bytes(b"new")
+        older = time.time() - 10 * 86400
+        os.utime(old, (older, older))
+        deleted = cleanup_pictures(self.root, keep=[current], max_files=1, min_age_days=0)
+        self.assertTrue(current.is_file())
+        self.assertFalse(old.is_file())
+        self.assertEqual(deleted, [old.name])
+
+    def test_invalid_clip_workers_env_falls_back(self):
+        second = make_image(self.root / "bg2.png", color=(200, 10, 10))
+        prepared = dict(self.prepared)
+        prepared["background_images"] = [str(self.image), str(second)]
+        prepared["image_duration"] = 0.5
+        logs: list[str] = []
+        with patch.dict(os.environ, {"KARAOKE_CLIP_WORKERS": "not-a-number"}), patch(
+            "karaoke.background.SEGMENT_CACHE_ROOT", self.root / "segments"
+        ):
+            build = build_background(
+                prepared,
+                output_dir=self.root,
+                profile=self.profile,
+                log=logs.append,
+            )
+        self.assertTrue(build.path.is_file())
+        self.assertTrue(any("không hợp lệ" in line for line in logs), logs)
 
     def test_force_rebuilds_and_changed_image_changes_hash(self):
         first = build_background(

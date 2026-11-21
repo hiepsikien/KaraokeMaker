@@ -287,6 +287,92 @@ class MotionCacheTests(unittest.TestCase):
             self.assertEqual(Path(result), cache / f"{key}.mp4")
 
 
+    def test_render_rain_loop_does_not_reuse_a_full_plan_clip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = make_source(root / "scene.png")
+            plan = base_plan()
+            plan["image_hash"] = living._file_hash(image)
+            plan["items"].append(
+                {
+                    "effect": "snow",
+                    "target_ids": [],
+                    "params": {"intensity": 0.5, "audio": False},
+                }
+            )
+            cache = root / "cache"
+            rain_key = living.motion_cache_key(
+                image_hash=plan["image_hash"],
+                plan=plan,
+                duration=1.0,
+                width=640,
+                height=360,
+                fps=15,
+                fit_mode="contain",
+                strip_rect=None,
+                effects=frozenset({"rain"}),
+            )
+            full_key = living.motion_cache_key(
+                image_hash=plan["image_hash"],
+                plan=plan,
+                duration=1.0,
+                width=640,
+                height=360,
+                fps=15,
+                fit_mode="contain",
+                strip_rect=None,
+            )
+            self.assertNotEqual(rain_key, full_key)
+            with patch.object(living, "CACHE_ROOT", cache):
+                rain = living.render_rain_loop(
+                    image,
+                    plan,
+                    root / "rain.mp4",
+                    duration=1.0,
+                    width=640,
+                    height=360,
+                    fps=15,
+                )
+                full = living.render_motion_loop(
+                    image,
+                    plan,
+                    root / "full.mp4",
+                    duration=1.0,
+                    width=640,
+                    height=360,
+                    fps=15,
+                )
+            self.assertEqual(Path(rain), cache / f"{rain_key}.mp4")
+            self.assertEqual(Path(full), cache / f"{full_key}.mp4")
+            self.assertNotEqual(Path(rain), Path(full))
+
+    def test_full_pinned_cache_does_not_delete_a_new_clip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = make_source(root / "scene.png")
+            plan = base_plan()
+            plan["image_hash"] = living._file_hash(image)
+            cache = root / "cache"
+            cache.mkdir()
+            for index in range(40):
+                path = cache / f"pinned-{index}.mp4"
+                path.write_bytes(b"x")
+                living.pin_cache_file(path)
+            with patch.object(living, "CACHE_ROOT", cache):
+                result = living.render_rain_loop(
+                    image,
+                    plan,
+                    root / "rain.mp4",
+                    duration=1.0,
+                    width=640,
+                    height=360,
+                    fps=15,
+                )
+            self.assertIsNotNone(result)
+            self.assertTrue(Path(result).is_file())
+            self.assertTrue((root / "rain.mp4").is_file())
+
+
 class CachePinTests(unittest.TestCase):
     def test_pinned_file_survives_prune_and_counts_toward_the_limit(self):
         with tempfile.TemporaryDirectory() as folder:

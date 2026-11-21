@@ -194,7 +194,7 @@ def render_preview(
     if not destination.is_file() or destination.stat().st_size <= 0:
         raise StudioError("Không tạo được file preview.")
 
-    prune(CACHE_ROOT, max_files=100, max_bytes=1_500_000_000)
+    prune(CACHE_ROOT, max_files=100, max_bytes=1_500_000_000, min_age_seconds=300)
     return {
         "id": preview_id,
         "path": str(destination),

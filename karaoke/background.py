@@ -522,6 +522,10 @@ def _segment_compatible(
     video = videos[0]
     if str(video.get("codec_name") or "") != "h264":
         return False
+    if str(video.get("profile") or "") != "High":
+        # Our encoder emits High profile. Normalise anything else rather than
+        # risking concat-copy with mismatched SPS/PPS.
+        return False
     if int(video.get("width") or 0) != width or int(video.get("height") or 0) != height:
         return False
     if str(video.get("pix_fmt") or "") != "yuv420p":
@@ -549,6 +553,7 @@ def _static_segment(
 ) -> tuple[Path, bool]:
     destination = _segment_cache_path("static", identity, image_frames)
     if _cached_file(destination):
+        pin_cache_file(destination)
         return destination, True
     encode_still(
         image,
@@ -577,6 +582,7 @@ def _cover_segment(
 ) -> tuple[Path, bool]:
     destination = _segment_cache_path("cover", identity, cover_frames)
     if _cached_file(destination):
+        pin_cache_file(destination)
         return destination, True
     cover_card = work / "cover.jpg"
     make_cover(
@@ -615,6 +621,7 @@ def _asset_segment(
         return source, True
     destination = _segment_cache_path("asset", asset_fingerprint(meta), image_frames)
     if _cached_file(destination):
+        pin_cache_file(destination)
         return destination, True
     encode_video(
         source,
@@ -699,6 +706,7 @@ def _resolve_segment(
                 strip_rect=(0, 0, 0, 0),
                 log=log,
                 progress=image_progress,
+                pin=True,
             )
         except Exception as error:  # keep export usable if one effect fails
             log(f"Không tạo được hiệu ứng cho {image.name}: {error}")
@@ -709,7 +717,7 @@ def _resolve_segment(
         log(f"Hiệu ứng cho {image.name} không resolve được; dùng ảnh tĩnh.")
     path, hit = _static_segment(
         image,
-        str(segment.get("clip_identity") or ""),
+        _static_identity(str(segment.get("image_hash") or ""), profile),
         image_frames=image_frames,
         profile=profile,
         log=log,
@@ -1030,13 +1038,20 @@ def _build_background_impl(
         work = Path(tempfile.mkdtemp(prefix=".karaoke-bg-", dir=str(output_dir)))
         cache_hits = 0
         clips_started = time.perf_counter()
+        progress_lock = threading.Lock()
+        progress_last = {"value": 0.0}
 
         def segment_progress(index: int, done: int, total: int) -> None:
             if progress is None:
                 return
             try:
-                fraction = index + (done / total if total else 1.0)
-                progress(fraction * 0.7, len(unique))
+                fraction = (index + (done / total if total else 1.0)) / max(1, len(unique))
+                fraction = max(0.0, min(0.85, fraction * 0.85))
+                with progress_lock:
+                    if fraction <= progress_last["value"]:
+                        return
+                    progress_last["value"] = fraction
+                progress(fraction, 1.0)
             except Exception:
                 pass
 
@@ -1074,13 +1089,12 @@ def _build_background_impl(
             for segment in unique.values():
                 segment_plan = _effect_plan(effects.get(_image_key(Path(segment["image_path"]))))
                 jobs.append((segment, segment_plan))
-            workers = max(
-                1,
-                min(
-                    int(os.environ.get("KARAOKE_CLIP_WORKERS", "2") or 2),
-                    len(jobs) or 1,
-                ),
-            )
+            try:
+                requested_workers = int(os.environ.get("KARAOKE_CLIP_WORKERS", "2") or 2)
+            except (TypeError, ValueError):
+                requested_workers = 2
+                log("KARAOKE_CLIP_WORKERS không hợp lệ; dùng 2 worker.")
+            workers = max(1, min(requested_workers, len(jobs) or 1))
             if len(jobs) <= 1 or workers == 1:
                 results = [render_one(segment, segment_plan) for segment, segment_plan in jobs]
             else:
@@ -1152,7 +1166,7 @@ def _build_background_impl(
             log(f"Đang ghép background {total_frames} frame cho {len(unique)} ảnh.")
             if progress is not None:
                 try:
-                    progress(len(unique) * 0.7, len(unique))
+                    progress(0.85, 1.0)
                 except Exception:
                     pass
             assemble_started = time.perf_counter()
@@ -1183,7 +1197,7 @@ def _build_background_impl(
                 )
                 if progress is not None:
                     try:
-                        progress(len(unique), len(unique))
+                        progress(1.0, 1.0)
                     except Exception:
                         pass
             finally:
@@ -1194,6 +1208,7 @@ def _build_background_impl(
                     SEGMENT_CACHE_ROOT,
                     max_files=SEGMENT_CACHE_LIMIT_FILES,
                     max_bytes=SEGMENT_CACHE_LIMIT_BYTES,
+                    min_age_seconds=300,
                 )
             except Exception:
                 pass
@@ -1202,7 +1217,7 @@ def _build_background_impl(
 
     if progress is not None:
         try:
-            progress(len(unique), len(unique))
+            progress(1.0, 1.0)
         except Exception:
             pass
 
@@ -1341,6 +1356,23 @@ def cleanup_backgrounds(
 
 
 def _picture_identity(background: BackgroundBuild, lines: list[dict]) -> str:
+    simplified = [
+        {
+            "text": line.get("text") or "",
+            "start": float(line.get("start") or 0),
+            "end": float(line.get("end") or 0),
+            "words": [
+                {
+                    "text": word.get("text") or "",
+                    "start": float(word.get("start") or 0),
+                    "end": float(word.get("end") or 0),
+                }
+                for word in (line.get("words") or [])
+                if isinstance(word, dict)
+            ],
+        }
+        for line in lines
+    ]
     payload = {
         "builder_version": PICTURE_BUILDER_VERSION,
         "background": background.hash,
@@ -1348,13 +1380,49 @@ def _picture_identity(background: BackgroundBuild, lines: list[dict]) -> str:
         "total_frames": background.total_frames,
         "cover_frames": background.cover_frames,
         "text_fps": TEXT_FPS,
-        "lines": lines,
+        "lines": simplified,
     }
     return _hash_with_prefix(_sha256_text(_canonical(payload)))
 
 
 def _picture_path(output_dir: Path, identity: str) -> Path:
     return Path(output_dir) / PICTURE_DIR / f"picture-{_hex_from_hash(identity)}.mp4"
+
+
+def cleanup_pictures(
+    output_dir: Path,
+    *,
+    keep: list[Path] | None = None,
+    max_files: int = 5,
+    min_age_days: float = 2.0,
+) -> list[str]:
+    """Delete old derived picture files, keeping the current export's picture."""
+    root = Path(output_dir).expanduser() / PICTURE_DIR
+    if not root.is_dir():
+        return []
+    keep_paths = {Path(path).resolve() for path in (keep or []) if Path(path).is_file()}
+    cutoff = time.time() - max(0.0, float(min_age_days)) * 86400
+    entries: list[tuple[float, Path]] = []
+    for path in root.glob("picture-*.mp4"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            entries.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    entries.sort(key=lambda item: item[0], reverse=True)
+    deleted: list[str] = []
+    for index, (mtime, path) in enumerate(entries):
+        if path.resolve() in keep_paths:
+            continue
+        if index < max_files or mtime > cutoff:
+            continue
+        try:
+            path.unlink()
+            deleted.append(path.name)
+        except OSError:
+            continue
+    return deleted
 
 
 def render_picture(
@@ -1551,6 +1619,10 @@ def render_videos(
             log=log,
         )
         log(f"Mux: {time.perf_counter() - mux_started:.1f}s.")
+        try:
+            cleanup_pictures(output_dir, keep=[picture])
+        except Exception:
+            pass
         if progress is not None:
             try:
                 progress(1.0, 1.0)

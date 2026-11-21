@@ -42,7 +42,10 @@ _PROBE_LOCK = threading.Lock()
 
 
 def _probe_key(path: Path) -> tuple[str, int, int]:
-    stat = Path(path).stat()
+    try:
+        stat = Path(path).stat()
+    except OSError as error:
+        raise MediaError(f"Không đọc được file: {Path(path).name}") from error
     return (str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns)
 
 

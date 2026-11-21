@@ -448,15 +448,19 @@ def motion_cache_key(
     fps: int,
     fit_mode: str = "contain",
     strip_rect: tuple[int, int, int, int] | None = None,
+    effects: frozenset[str] | set[str] | None = None,
 ) -> str:
     """Stable cache key for one rendered motion clip.
 
     Mirrors the key that :func:`_render_loop` builds (visual plan hash, duration,
     frame size, fps, selected effects, fit mode and strip), plus the encoder
-    version. Background callers use this to know the exact cache file to pin.
+    version. ``effects`` defaults to all active effects in the plan; wrappers
+    such as :func:`render_rain_loop` pass a narrower set so a rain-only clip is
+    never reused for a plan that also asks for snow.
     """
     seconds, out_width, out_height, rate = _validate(duration, width, height, fps)
-    selection = ",".join(_active_effects(plan))
+    selected = effects if effects is not None else _active_effects(plan)
+    selection = ",".join(effect for effect in SUPPORTED_EFFECTS if effect in selected)
     mode = _cache_fit_mode(fit_mode)
     strip_key = _cache_strip_key(strip_rect)
     return hashlib.sha256(
@@ -2966,6 +2970,7 @@ def _render_loop(
     fit_mode: str = "contain",
     strip_rect: tuple[int, int, int, int] | None = None,
     progress=None,
+    pin: bool = False,
 ) -> Path | None:
     """Render every requested overlay in one shared encode pass.
 
@@ -3001,6 +3006,7 @@ def _render_loop(
         fps=rate,
         fit_mode=mode,
         strip_rect=strip_rect,
+        effects=effects,
     )
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     cached = motion_cache_path(
@@ -3012,6 +3018,7 @@ def _render_loop(
         fps=rate,
         fit_mode=mode,
         strip_rect=strip_rect,
+        effects=effects,
     )
 
     # Single-flight per cache key: acquire before checking the cache and
@@ -3290,8 +3297,15 @@ def _render_loop(
         try:
             _encode(frames(), temporary, out_width, out_height, rate, log)
             os.replace(temporary, cached)
+            if pin:
+                pin_cache_file(cached)
             try:
-                prune(CACHE_ROOT, max_files=40, max_bytes=2_000_000_000)
+                prune(
+                    CACHE_ROOT,
+                    max_files=40,
+                    max_bytes=2_000_000_000,
+                    min_age_seconds=300,
+                )
             except Exception:
                 pass
         finally:
@@ -3315,6 +3329,7 @@ def render_motion_loop(
     strip_rect: tuple[int, int, int, int] | None = None,
     log=None,
     progress=None,
+    pin: bool = False,
 ) -> Path | None:
     """Render all supported motion items in one loop/encode pass.
 
@@ -3345,6 +3360,7 @@ def render_motion_loop(
         fit_mode=fit_mode,
         strip_rect=strip_rect,
         progress=progress,
+        pin=pin,
     )
 
 
