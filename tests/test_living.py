@@ -822,6 +822,44 @@ class WindFlagTests(unittest.TestCase):
         self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
         self.assertTrue(specs[0]["cloth"])
 
+    def test_detected_wind_pivot_stays_attached(self):
+        for label in ("flag", "lantern"):
+            base = Image.new("RGB", (400, 400), (30, 60, 90))
+            draw = ImageDraw.Draw(base)
+            draw.rectangle([120, 120, 280, 280], fill=(220, 40, 40))
+            draw.ellipse([194, 114, 206, 126], fill=(255, 255, 255))
+            plan = effect_plan(
+                [{"effect": "wind", "target_ids": ["detected-1"], "params": {"intensity": 0.55, "speed": 0.55}}],
+                objects=[
+                    object_entry(
+                        "detected-1",
+                        label,
+                        (0.30, 0.30, 0.70, 0.70),
+                        pivot=(0.50, 0.30),
+                    )
+                ],
+            )
+            transform = living._fit_transform(plan, (400, 400), (400, 400), "contain")
+            prevent = np.ones((400, 400), dtype=np.float32)
+            specs = living._wind_specs(
+                plan, transform, 400, 400, 4.0, 1234, prevent, lambda _m: None
+            )
+
+            def pivot_centroid(u: float) -> np.ndarray:
+                frame = np.asarray(living._wind_frame(base.copy(), specs, u), dtype=np.float32)
+                white = (
+                    (frame[:, :, 0] > 235)
+                    & (frame[:, :, 1] > 235)
+                    & (frame[:, :, 2] > 235)
+                )
+                points = np.argwhere(white)
+                self.assertGreater(len(points), 0, label)
+                return points.mean(axis=0)
+
+            first = pivot_centroid(0.0)
+            second = pivot_centroid(0.25)
+            self.assertLess(float(np.linalg.norm(first - second)), 1.5, label)
+
     def test_manual_object_has_visible_translation_for_cloth_and_rigid(self):
         base = Image.new("RGB", (400, 400), (30, 60, 90))
         draw = ImageDraw.Draw(base)

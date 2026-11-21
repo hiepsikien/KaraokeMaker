@@ -24,7 +24,6 @@ const PROFILE_OPTIONS = [
   { value: "portrait_4x5", label: "Dọc 4:5 · 1080×1350" },
 ];
 
-const PREVIEW_DURATION = 4;
 const PROFILE_SIZE: Record<string, string> = {
   landscape_1080p: "1920×1080",
   portrait_1080x1920: "1080×1920",
@@ -152,7 +151,7 @@ export function StudioWorkspace() {
     }
     if (opened.asset_frames && opened.fps) {
       const seconds = opened.asset_frames / opened.fps;
-      setStandardDuration(Math.max(1, Math.round(seconds)));
+      setStandardDuration(Math.max(0.5, Math.min(30, Number(seconds.toFixed(1)))));
     }
     setEffects((current) => [
       ...current.filter((item) => item.image_path !== opened.source_image),
@@ -231,7 +230,7 @@ export function StudioWorkspace() {
         body: JSON.stringify({
           image_path: effect.image_path,
           effect_plan: effect.effect_plan,
-          duration: PREVIEW_DURATION,
+          duration: standardDuration,
           output_profile: profile,
         }),
         signal: controller.signal,
@@ -458,6 +457,7 @@ export function StudioWorkspace() {
               // The old preview belongs to the previous plan; never show it
               // as if it reflected the newly applied effects.
               setPreviews({});
+              setResumeAsset(null);
             }}
           />
         </div>
@@ -467,7 +467,7 @@ export function StudioWorkspace() {
         <section className="space-y-3 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Preview</h2>
-            <span className="text-xs text-[var(--muted)]">{PREVIEW_DURATION}s</span>
+            <span className="text-xs text-[var(--muted)]">{standardDuration}s</span>
           </div>
 
           {effects.length === 0 ? (
@@ -495,7 +495,7 @@ export function StudioWorkspace() {
                         disabled={Boolean(renderingPath)}
                         className="rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] transition hover:bg-black/25 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {rendering && renderingMode === "preview" ? "Đang render…" : `Preview ${PREVIEW_DURATION}s`}
+                        {rendering && renderingMode === "preview" ? "Đang render…" : `Preview ${standardDuration}s`}
                       </button>
                       <button
                         type="button"
@@ -561,9 +561,8 @@ export function StudioWorkspace() {
         </section>
 
         <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 text-xs leading-5 text-[var(--muted)]">
-          Preview là video ngắn {PREVIEW_DURATION} giây, lặp lại. Render bản chuẩn rồi bấm “Lưu thành asset” để dùng
-          clip đó trong phần Hiệu ứng nền của dự án Karaoke. Tốc độ gió trên preview ngắn có thể khác bản chuẩn
-          8/16 giây; render bản chuẩn khi cần kiểm tra đúng tốc độ.
+          Preview dùng cùng thời lượng với bản chuẩn ({standardDuration}s) ở độ phân giải thấp để tốc độ gió khớp.
+          Render bản chuẩn rồi bấm “Lưu thành asset” để dùng clip đó trong phần Hiệu ứng nền của dự án Karaoke.
         </section>
       </aside>
       </div>

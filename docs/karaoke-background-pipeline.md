@@ -517,7 +517,7 @@ Quy tắc:
   "fps": 30,
   "fit_mode": "contain",
   "strip_rect": [0, 0, 0, 0],
-  "renderer_version": 32,
+  "renderer_version": 33,
   "loop_duration": 16.0,
   "asset_frames": 480,
   "clip_file": "loop.mp4",

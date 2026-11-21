@@ -576,7 +576,7 @@ export function AiEffects({
     setDrawMode(false);
     setDraftBox(null);
     setManualName("");
-  }, [selectedImage, resumeAsset?.token]);
+  }, [selectedImage]);
 
   useEffect(() => {
     if (!resumeAsset) return;
@@ -695,14 +695,41 @@ export function AiEffects({
       if (!current) return current;
       const source = current.objects.find((object) => object.id === id);
       const objects = current.objects.map(update);
-      const protect = (current.protect || []).map((item) =>
-        source && item.label === source.label ? { ...item, box } : item,
-      );
+      const mapProtect = (item: { label: string; box: DirectorBox }) => {
+        if (!source) return item;
+        const oldBox = source.box;
+        const centerX = (item.box.x1 + item.box.x2) / 2;
+        const centerY = (item.box.y1 + item.box.y2) / 2;
+        if (
+          centerX < oldBox.x1 ||
+          centerX > oldBox.x2 ||
+          centerY < oldBox.y1 ||
+          centerY > oldBox.y2
+        ) {
+          return item;
+        }
+        const scaleX = (box.x2 - box.x1) / Math.max(1e-6, oldBox.x2 - oldBox.x1);
+        const scaleY = (box.y2 - box.y1) / Math.max(1e-6, oldBox.y2 - oldBox.y1);
+        const mapped = {
+          x1: box.x1 + (item.box.x1 - oldBox.x1) * scaleX,
+          y1: box.y1 + (item.box.y1 - oldBox.y1) * scaleY,
+          x2: box.x1 + (item.box.x2 - oldBox.x1) * scaleX,
+          y2: box.y1 + (item.box.y2 - oldBox.y1) * scaleY,
+        };
+        return {
+          ...item,
+          box: {
+            x1: Math.max(0, Math.min(1, mapped.x1)),
+            y1: Math.max(0, Math.min(1, mapped.y1)),
+            x2: Math.max(0, Math.min(1, mapped.x2)),
+            y2: Math.max(0, Math.min(1, mapped.y2)),
+          },
+        };
+      };
+      const protect = (current.protect || []).map(mapProtect);
       const planObjects = current.effect_plan.objects;
       const effectObjects = planObjects ? planObjects.map(update) : objects;
-      const planProtect = (current.effect_plan.protect || []).map((item) =>
-        source && item.label === source.label ? { ...item, box } : item,
-      );
+      const planProtect = (current.effect_plan.protect || []).map(mapProtect);
       return {
         ...current,
         objects,

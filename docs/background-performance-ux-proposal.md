@@ -187,7 +187,7 @@ decode lại JPEG mỗi frame.
    - `living._encode` vẫn dùng pipe rawvideo nhưng dùng cùng bộ tham số/version.
 3. Thêm `SEGMENT_ENCODER_VERSION` (hoặc đưa `-g`, preset, CRF, pix_fmt, `-bf` vào key) cho
    `motion_cache_key`, static/cover key **và `background_identity`**; bump khi đổi tham số
-   encoder. Đã bump `MOTION_CACHE_VERSION` 31 → 32 và `ENCODER_VERSION` 1 → 2 vì
+   encoder. Đã bump `MOTION_CACHE_VERSION` 31 → 33 và `ENCODER_VERSION` 1 → 2 vì
    blur L-channel đổi pixel đầu ra.
 4. Cache segment theo identity:
    - motion: `living.motion_cache_key(...)`;
@@ -460,7 +460,7 @@ khoảng **4,5–6,5 ngày**.
   render clip song song (`KARAOKE_CLIP_WORKERS`, mặc định 2), picture cache,
   instrumentation theo stage, probe/validate cache.
 - `living.py`: `motion_cache_key`/`motion_cache_path`, single-flight theo key, pin/prune,
-  blur L-channel, `MOTION_CACHE_VERSION = 32`, `ENCODER_VERSION = 2`.
+  blur L-channel, `MOTION_CACHE_VERSION = 33`, `ENCODER_VERSION = 2`.
 - `media.py`: cache `probe_duration`/`probe_channels`.
 - `server.py`: cache background status 2s, dọn asset sau khi lưu, endpoint
   `GET /api/studio/assets/usage` và `POST /api/studio/assets/cleanup`.

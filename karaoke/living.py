@@ -210,7 +210,7 @@ EFFECT_LABELS = {
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
 # v31: visual plan hash ignores non-visual params (audio, legacy loop_duration).
-MOTION_CACHE_VERSION = 32
+MOTION_CACHE_VERSION = 33
 
 # Shared x264 parameters for motion clips. They are part of the cache key via
 # ``ENCODER_VERSION``: bump it whenever any value below changes so old clips are
@@ -1673,7 +1673,9 @@ def _warp_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
     flutter = np.cos(2.0 * math.pi * (local_x * 1.6 - local_y * 0.6) + phase + 0.9)
     sway = float(spec.get("sway") or 0.0) * np.sin(phase)
     sway_y = float(spec.get("sway") or 0.0) * 0.25 * np.cos(phase)
-    weight = 0.25 + 0.75 * pin
+    # Detected flags/lanterns stay attached at their pivot. A manual object's
+    # pivot is the top-center the editor assigns, so keep a little net motion.
+    weight = (0.25 + 0.75 * pin) if spec.get("manual") else pin ** 0.7
     sample_x = grid_x + sway * weight + spec["amplitude"] * pin * wave
     sample_y = grid_y + sway_y * weight + spec["amplitude"] * 0.35 * pin * flutter
 
@@ -1759,7 +1761,7 @@ def _wind_specs(
         # The mask must be wider than the object, otherwise the feathered edge
         # keeps the original silhouette pinned and the object only ripples
         # inside its own box.
-        expand = int(math.ceil(amplitude + feather)) if sway > 0.0 else 0
+        expand = int(math.ceil(1.6 * amplitude + feather)) if sway > 0.0 else 0
         pad = max(int(round(max(box_width, box_height) * 0.10)) + 2, expand + 2)
         left = max(0, int(math.floor(x1)) - pad)
         top = max(0, int(math.floor(y1)) - pad)
@@ -1776,7 +1778,7 @@ def _wind_specs(
             min(right - left, int(math.ceil(x2 - left + expand))),
             min(bottom - top, int(math.ceil(y2 - top + expand))),
         ]
-        if cloth:
+        if cloth or manual:
             draw.rectangle(local, fill=255)
         else:
             draw.ellipse(local, fill=255)
@@ -1857,11 +1859,17 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
                 fillcolor=fill,
             )
             sway = float(spec.get("sway") or 0.0)
-            warped = _shift_crop(
-                np.asarray(rotated, dtype=np.float32),
-                sway * math.sin(phase),
-                sway * 0.25 * math.cos(phase),
+            crop_height, crop_width = rotated.size[1], rotated.size[0]
+            shear = (sway * 0.8 / max(1, crop_height)) * math.sin(phase)
+            pivot_y = spec["pivot_local"][1]
+            rotated = rotated.transform(
+                (crop_width, crop_height),
+                Image.Transform.AFFINE,
+                (1, shear, -shear * pivot_y, 0, 1, 0),
+                resample=Image.Resampling.BICUBIC,
+                fillcolor=fill,
             )
+            warped = np.asarray(rotated, dtype=np.float32)
         mask = spec["mask"][:, :, None]
         blended = original * (1.0 - mask) + warped * mask
         # Rigid flags/banners rotate as a whole (lettering stays rigid, not

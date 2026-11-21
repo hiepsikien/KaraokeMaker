@@ -918,6 +918,16 @@ def _plan_background(
         asset_reason = ""
         if asset_id:
             meta = load_asset(asset_id)
+            if (
+                meta is not None
+                and _asset_is_newer_than_effect(effect, meta)
+                and isinstance(meta.get("effect_plan"), dict)
+            ):
+                # The project still carries the old plan but the user selected
+                # an asset created after it. Use the asset's plan as the source
+                # of truth. If the asset clip itself is stale (e.g. old
+                # renderer version), the inline render still gets the new plan.
+                plan = meta["effect_plan"]
             valid, reason = validate_asset(
                 meta,
                 image_hash=image_hash_prefixed,
@@ -925,23 +935,6 @@ def _plan_background(
                 profile=profile,
                 plan=plan,
             )
-            if (
-                not valid
-                and reason == "effect plan đã đổi"
-                and _asset_is_newer_than_effect(effect, meta)
-            ):
-                # The project still carries the old plan but the user selected
-                # an asset created after it. The asset itself is the newer
-                # source of truth for the clip.
-                valid, reason = validate_asset(
-                    meta,
-                    image_hash=image_hash_prefixed,
-                    image_frames=image_frames,
-                    profile=profile,
-                    plan=None,
-                )
-                if valid:
-                    asset_reason = ""
             if valid and meta is not None:
                 identity = asset_fingerprint(meta)
                 kind = "asset"
