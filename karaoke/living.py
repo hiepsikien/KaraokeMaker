@@ -1183,6 +1183,7 @@ def _plan_objects(plan: dict | None, selected_only: bool = True) -> list[dict]:
                     "opening": _object_anchor(entry, "opening"),
                 },
                 "affordances": [str(item).strip().casefold() for item in affordances if str(item).strip()],
+                "source": str(entry.get("source") or ""),
             }
         )
     selected = plan.get("selected_object_ids")
@@ -1617,6 +1618,11 @@ def _steam_frame(
 
 
 def _wind_candidate(entry: dict) -> bool:
+    affordances = [str(value).casefold() for value in entry.get("affordances") or []]
+    if str(entry.get("source") or "").casefold() == "manual":
+        # A manual object only flutters when the user ticks wind_movable; a
+        # matching label alone must not override that choice.
+        return any("wind_movable" in value for value in affordances)
     return _matches_hints(entry, WIND_AFFORDANCES, WIND_LABELS)
 
 
@@ -1735,7 +1741,12 @@ def _wind_specs(
         bottom = min(height, int(math.ceil(y2)) + pad)
         if right - left < 4 or bottom - top < 4:
             continue
-        cloth = _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS) or box_width > box_height * 1.15
+        manual = str(entry.get("source") or "").casefold() == "manual"
+        cloth = (
+            _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS)
+            or box_width > box_height * 1.15
+            or (manual and _wind_candidate(entry))
+        )
 
         mask_image = Image.new("L", (right - left, bottom - top), 0)
         draw = ImageDraw.Draw(mask_image)

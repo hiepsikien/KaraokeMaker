@@ -533,6 +533,7 @@ def object_entry(
     affordances: list[str] | None = None,
     pivot: tuple[float, float] | None = None,
     opening: tuple[float, float] | None = None,
+    source: str | None = None,
 ) -> dict:
     return {
         "id": object_id,
@@ -543,6 +544,7 @@ def object_entry(
             "opening": {"x": opening[0], "y": opening[1]} if opening else None,
         },
         "affordances": affordances or [],
+        "source": source or "",
     }
 
 
@@ -771,6 +773,33 @@ class WindFlagTests(unittest.TestCase):
             {"headband-1", "hair-1", "coat-1"},
         )
         self.assertTrue(all(spec["cloth"] for spec in specs))
+
+    def test_manual_object_respects_wind_movable_choice(self):
+        base_objects = [
+            object_entry(
+                "manual-1",
+                "khăn",
+                (0.55, 0.10, 0.75, 0.40),
+                pivot=(0.65, 0.11),
+                source="manual",
+            )
+        ]
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.55}}],
+            objects=base_objects,
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        self.assertEqual(
+            living._wind_specs(plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None),
+            [],
+        )
+        plan["objects"][0]["affordances"] = ["wind_movable"]
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
+        self.assertTrue(specs[0]["cloth"])
 
     def test_manual_wind_movable_object_is_targeted(self):
         plan = effect_plan(
