@@ -208,7 +208,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 23
+MOTION_CACHE_VERSION = 25
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1630,6 +1630,8 @@ def _birds_spec(
 
 def _apply_birds(frame: np.ndarray, specs: list[dict], u: float) -> np.ndarray:
     for spec in specs:
+        if spec.get("intensity", 1.0) <= 0.0:
+            continue
         left, top = spec["left"], spec["top"]
         right, bottom = spec["right"], spec["bottom"]
         crop = frame[top:bottom, left:right]
@@ -2288,6 +2290,8 @@ def _sunrays_spec(
         return None
     targets = _target_ids(items)
     intensity = _items_intensity(items, 0.35)
+    if intensity <= 0.0:
+        return None
     cx, cy = _sun_center(plan, base_array, transform, width, height, targets)
     cx = min(float(width), max(0.0, cx))
     cy = min(float(height), max(0.0, cy))
@@ -2634,8 +2638,12 @@ def _render_loop(
     effects: frozenset[str],
     fit_mode: str = "contain",
     strip_rect: tuple[int, int, int, int] | None = None,
+    progress=None,
 ) -> Path | None:
-    """Render every requested overlay in one shared encode pass."""
+    """Render every requested overlay in one shared encode pass.
+
+    ``progress(done, total)`` is called periodically for long background jobs.
+    """
     if not effects:
         return None
     label = _effect_label(effects)
@@ -2909,6 +2917,13 @@ def _render_loop(
             np.clip(frame, 0.0, 255.0, out=frame)
             if index % 48 == 0:
                 log(f"Vẽ {label} {index + 1}/{frame_count}.")
+            if progress is not None and (
+                index % 8 == 0 or index + 1 == frame_count
+            ):
+                try:
+                    progress(index + 1, frame_count)
+                except Exception:
+                    pass
             yield np.ascontiguousarray(frame, dtype=np.uint8).tobytes()
 
     temporary = CACHE_ROOT / f".{key}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
@@ -2937,6 +2952,7 @@ def render_motion_loop(
     fit_mode: str = "contain",
     strip_rect: tuple[int, int, int, int] | None = None,
     log=None,
+    progress=None,
 ) -> Path | None:
     """Render all supported motion items in one loop/encode pass.
 
@@ -2966,6 +2982,7 @@ def render_motion_loop(
         effects=effects,
         fit_mode=fit_mode,
         strip_rect=strip_rect,
+        progress=progress,
     )
 
 

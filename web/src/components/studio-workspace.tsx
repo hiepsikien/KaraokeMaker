@@ -176,6 +176,10 @@ export function StudioWorkspace() {
         for (let attempt = 0; attempt < 480; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 1500));
           const statusResponse = await fetch(`/api/studio/render-job/${jobId}`);
+          if (statusResponse.status === 404) {
+            setError("Không thấy job render (server có thể đã restart). Bấm lại nút Bản chuẩn 16s.");
+            return;
+          }
           if (!statusResponse.ok) {
             setError(await readError(statusResponse));
             return;
@@ -184,7 +188,13 @@ export function StudioWorkspace() {
             status: string;
             result?: PreviewResult;
             error?: string;
+            percent?: number;
           };
+          if (typeof status.percent === "number" && status.percent > 0) {
+            setRenderHint(
+              `Đang render bản chuẩn ${STANDARD_DURATION}s ở ${PROFILE_SIZE[profile] || profile}: ${status.percent}%`,
+            );
+          }
           if (status.status === "done" && status.result) {
             setPreviews((current) => ({ ...current, [effect.image_path]: status.result! }));
             setRenderHint("");

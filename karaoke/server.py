@@ -527,6 +527,14 @@ def _run_studio_job(
     path: Path,
     body: StudioRenderRequest,
 ) -> None:
+    def progress(done: int, total: int) -> None:
+        with _lock:
+            record = _studio_jobs.get(job_id)
+            if record is not None:
+                record["done"] = done
+                record["total"] = total
+                record["percent"] = round(100.0 * done / max(1, total))
+
     try:
         result = render_preview(
             path,
@@ -534,6 +542,7 @@ def _run_studio_job(
             duration=body.duration,
             output_profile=body.output_profile,
             full_resolution=True,
+            progress=progress,
         )
         payload = _preview_payload(result)
         with _lock:
@@ -541,6 +550,7 @@ def _run_studio_job(
             if record is not None:
                 record["status"] = "done"
                 record["result"] = payload
+                record["percent"] = 100
     except Exception:
         traceback.print_exc()
         with _lock:
@@ -578,6 +588,9 @@ def studio_render(body: StudioRenderRequest):
                 "created": time.time(),
                 "error": "",
                 "result": None,
+                "done": 0,
+                "total": 0,
+                "percent": 0,
             }
         thread = threading.Thread(
             target=_run_studio_job,
@@ -623,6 +636,9 @@ def studio_render_job(job_id: str):
             "created": record["created"],
             "error": record["error"],
             "result": record["result"],
+            "done": record.get("done", 0),
+            "total": record.get("total", 0),
+            "percent": record.get("percent", 0),
         }
 
 

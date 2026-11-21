@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=23`, `PREVIEW_VERSION=preview_v20`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=25`, `PREVIEW_VERSION=preview_v21`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -448,7 +448,13 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   chữ không bị warp và cờ vẫn rung.
 - **Bản chuẩn 16 s**: Studio có nút `Bản chuẩn 16s`, render đúng resolution của
   profile (1920×1080, 1080×1920, 1080×1080, 1080×1350). Render chạy job nền +
-  polling nên không bị timeout proxy; preview nhanh 4 s / 640 px vẫn giữ.
+  polling + % tiến độ nên không bị timeout proxy. 4 s/1080p nhiều effect mất
+  ~35 s, nên 16 s thường ~2–2,5 phút. Preview nhanh 4 s / 640 px vẫn giữ.
+- **Thanh trượt cường độ**: sau khi phân tích, panel AI hiện slider 0–100% cho
+  từng effect. Slider chỉ sửa `effect_plan.items[].params.intensity` cục bộ,
+  không gọi lại Gemini; bấm Áp dụng để lưu. Renderer dùng intensity cho biên độ
+  (chim, gió, nước), alpha (nắng, sương), mật độ (mưa, tàn lửa), glow (lửa).
+  Mức 0% tắt riêng effect đó (chim/nắng có guard rõ ràng).
 - **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung
   sẽ bỏ qua effect và yêu cầu phân tích lại thay vì áp box cũ.
 - **Inspect ảnh**: `fits_frame`/note tính theo `output_profile`; thêm 4:5. Preview

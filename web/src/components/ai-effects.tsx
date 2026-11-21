@@ -22,6 +22,23 @@ type InspectFact = {
 };
 
 const QUICK_PROMPTS = ["mưa nhẹ", "khói bát mỳ", "gió đèn lồng", "sóng biển"];
+const EFFECT_NAMES: Record<string, string> = {
+  rain: "Mưa",
+  snow: "Tuyết",
+  water: "Nước",
+  steam: "Khói",
+  wind: "Gió / rung",
+  birds: "Đàn chim",
+  fire: "Lửa",
+  embers: "Tàn lửa",
+  sunrays: "Tia nắng",
+  fog: "Sương mù",
+  light: "Nhịp sáng",
+};
+
+function effectLabel(effect: string) {
+  return EFFECT_NAMES[effect] || effect;
+}
 
 const PROFILE_LABELS: Record<string, string> = {
   landscape_1080p: "Ngang 16:9",
@@ -377,6 +394,24 @@ export function AiEffects({
     }
   }
 
+  function updateIntensity(index: number, percent: number) {
+    setAnalysis((current) => {
+      if (!current) return current;
+      const items = current.effect_plan.items.map((item, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...item,
+              params: { ...(item.params || {}), intensity: percent / 100 },
+            }
+          : item,
+      );
+      return {
+        ...current,
+        effect_plan: { ...current.effect_plan, items },
+      };
+    });
+  }
+
   function applyEffect() {
     if (!analysis || !selectedImage) return;
     const effect: BackgroundEffect = {
@@ -547,6 +582,39 @@ export function AiEffects({
         </div>
       )}
 
+      {analysis && (analysis.effect_plan.items || []).length > 0 && (
+        <div className="space-y-2 rounded-xl border border-[var(--line)] bg-black/20 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm">Cường độ hiệu ứng</span>
+            <span className="text-[11px] text-[var(--muted)]">chỉnh trước khi Áp dụng</span>
+          </div>
+          {analysis.effect_plan.items.map((item, index) => {
+            const raw = item.params?.intensity;
+            const value = typeof raw === "number" ? Math.round(raw * 100) : 55;
+            return (
+              <label key={`${item.effect}-${index}`} className="block">
+                <span className="flex items-center justify-between text-xs">
+                  <span>{effectLabel(item.effect)}</span>
+                  <span className="text-[var(--muted)]">{value}%</span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={value}
+                  onChange={(event) => updateIntensity(index, Number(event.target.value))}
+                  className="mt-1 w-full accent-[var(--gold)]"
+                />
+              </label>
+            );
+          })}
+          <p className="text-[11px] leading-4 text-[var(--muted)]">
+            Thanh trượt chỉ đổi kế hoạch cục bộ, không gọi lại Gemini. Bấm Áp dụng để lưu.
+          </p>
+        </div>
+      )}
+
       {existingEffect && (
         <div className="flex items-start justify-between gap-3 rounded-xl border border-[var(--gold)] bg-black/25 px-3 py-2">
           <div>
@@ -636,7 +704,7 @@ export function AiEffects({
             disabled={busy}
             className="w-full rounded-xl bg-[var(--gold)] px-4 py-2.5 text-sm font-semibold text-[#1a1206] transition hover:brightness-105 disabled:opacity-50"
           >
-            Áp dụng
+            {existingEffect ? "Áp dụng lại" : "Áp dụng"}
           </button>
           <p className="mt-1 text-center text-[11px] leading-4 text-[var(--muted)]">
             Sau khi chọn object, bấm Áp dụng rồi Render preview (Studio) hoặc Xuất video (Karaoke).
