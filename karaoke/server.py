@@ -3,20 +3,24 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
+from karaoke.director import DirectorError, analyze_scene
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
 from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
 from karaoke.separate_runner import separate_kim2
 from karaoke.align import fit_lines_to_voice
+from karaoke.studio import StudioError, cache_path, is_preview_id, render_preview
 from karaoke.pipeline import (
     JobError,
     align_job,
@@ -39,6 +43,9 @@ from karaoke.project import (
     save_project,
     sync_project_file,
 )
+
+# `.env` wins over a stale GEMINI_API_KEY exported in the shell.
+load_dotenv(override=True)
 
 app = FastAPI(title="KaraokeMaker")
 app.add_middleware(
@@ -72,6 +79,8 @@ class ProjectFieldsRequest(BaseModel):
     instrumental_audio: str = ""
     lyrics: str = ""
     background_images: list[str] = Field(default_factory=list)
+    background_effects: list[dict] = Field(default_factory=list)
+    output_profile: str = "landscape_1080p"
     cover_image: str = ""
     output_dir: str = ""
     cover_duration: float = 5
@@ -107,6 +116,8 @@ class OpenSavedRequest(BaseModel):
     vocal_audio: str = ""
     instrumental_audio: str = ""
     background_images: list[str] = Field(default_factory=list)
+    background_effects: list[dict] = Field(default_factory=list)
+    output_profile: str = "landscape_1080p"
     cover_image: str = ""
     output_dir: str = ""
     cover_duration: float = 5
@@ -119,6 +130,20 @@ class RevealRequest(BaseModel):
 
 class ImageInspectRequest(BaseModel):
     paths: list[str] = Field(default_factory=list)
+
+
+class DirectorRequest(BaseModel):
+    image_path: str = ""
+    prompt: str = ""
+    consent: bool = False
+    model: str = ""
+
+
+class StudioRenderRequest(BaseModel):
+    image_path: str = ""
+    effect_plan: dict = Field(default_factory=dict)
+    duration: float = 8
+    output_profile: str = "landscape_1080p"
 
 
 class WordIn(BaseModel):
@@ -358,6 +383,7 @@ def inspect_images(body: ImageInspectRequest):
                     "fits_frame": False,
                     "note": "Ảnh nằm ngoài thư mục được phép. Hãy chọn lại bằng hộp thoại.",
                     "thumbnail": "",
+                    "preview": "",
                 }
             )
             continue
@@ -371,6 +397,7 @@ def inspect_images(body: ImageInspectRequest):
                     "fits_frame": False,
                     "note": "Không đọc được ảnh này.",
                     "thumbnail": "",
+                    "preview": "",
                 }
             )
             continue
@@ -386,9 +413,82 @@ def inspect_images(body: ImageInspectRequest):
                     "fits_frame": False,
                     "note": "Không đọc được ảnh này.",
                     "thumbnail": "",
+                    "preview": "",
                 }
             )
     return {"images": facts}
+
+
+@app.post("/api/director/analyze")
+def director_analyze(body: DirectorRequest):
+    if not body.consent:
+        raise HTTPException(
+            status_code=400,
+            detail="Cần đồng ý gửi ảnh lên Google trước khi phân tích.",
+        )
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh để phân tích.")
+    try:
+        path = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh này.")
+    try:
+        return analyze_scene(
+            path,
+            body.prompt,
+            consent=body.consent,
+            model=(body.model or "").strip() or None,
+        )
+    except DirectorError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/studio/render")
+def studio_render(body: StudioRenderRequest):
+    """Render an independent Studio preview loop (no Gemini call, no consent)."""
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh để render preview.")
+    try:
+        path = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh này.")
+    try:
+        result = render_preview(
+            path,
+            body.effect_plan,
+            duration=body.duration,
+            output_profile=body.output_profile,
+        )
+    except StudioError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Không render được preview: {error}") from error
+    preview_id = result["id"]
+    return {
+        "id": preview_id,
+        "url": f"/api/studio/preview/{preview_id}",
+        "width": result["width"],
+        "height": result["height"],
+        "duration": result["duration"],
+    }
+
+
+@app.get("/api/studio/preview/{preview_id}")
+def studio_preview(preview_id: str):
+    """Serve a rendered Studio preview from the cache."""
+    if not is_preview_id(preview_id):
+        raise HTTPException(status_code=404, detail="Không thấy preview.")
+    path = cache_path(preview_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy preview. Hãy render lại.")
+    return FileResponse(path, media_type="video/mp4", filename=f"{preview_id}.mp4")
 
 
 def _public_job(record: dict) -> dict:
@@ -476,8 +576,17 @@ def project_session(body: ProjectFieldsRequest):
             "device",
             "no_speech_threshold",
             "whisper_retry",
+            "output_profile",
+            "background_effects",
         ):
-            if key in payload:
+            if key not in payload:
+                continue
+            # Older clients do not send background_effects; keep the saved plans.
+            if key == "background_effects" and key not in body.model_fields_set:
+                continue
+            if key == "background_effects":
+                prepared[key] = [dict(item) for item in payload[key] or [] if isinstance(item, dict)]
+            else:
                 prepared[key] = payload[key]
         prepared["background_images"] = list(payload.get("background_images") or [])
         prepared["project_path"] = path_text
@@ -870,6 +979,10 @@ def _restore_record(project: dict, path: Path) -> dict:
         "vocal_audio": project.get("vocal_audio") or "",
         "instrumental_audio": project.get("instrumental_audio") or "",
         "background_images": list(project.get("background_images") or []),
+        "background_effects": [
+            dict(item) for item in project.get("background_effects") or [] if isinstance(item, dict)
+        ],
+        "output_profile": project.get("output_profile") or "landscape_1080p",
         "cover_image": project.get("cover_image") or "",
         "output_dir": project.get("output_dir") or "",
         "cover_duration": project.get("cover_duration") or 5,
@@ -911,8 +1024,13 @@ def _require_restore_job(job_id: str) -> dict:
 
 @app.post("/api/restore/session")
 def restore_session(body: ProjectFieldsRequest):
+    payload = body.model_dump()
+    # Older clients do not send these fields; keep plans already stored in the project.
+    for key in ("background_effects", "output_profile"):
+        if key not in body.model_fields_set:
+            payload.pop(key, None)
     try:
-        project, path = _save_project_fields(body.model_dump())
+        project, path = _save_project_fields(payload)
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {

@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 from karaoke.access import audio_root
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
+from karaoke.profiles import RenderProfile, get_profile
 
 WIDTH = 1920
 HEIGHT = 1080
@@ -134,9 +135,31 @@ def probe_channels(path: Path) -> int:
     return channels if channels > 0 else 2
 
 
-def fit_image(source: Path, size: tuple[int, int] = (WIDTH, HEIGHT)) -> Image.Image:
+def _open_rgb(source: Path) -> Image.Image:
+    """Open an image post-EXIF and composite alpha before dropping it."""
     with Image.open(source) as opened:
-        image = ImageOps.exif_transpose(opened).convert("RGB")
+        image = ImageOps.exif_transpose(opened)
+        has_alpha = image.mode in {"RGBA", "LA"} or (
+            image.mode == "P" and "transparency" in image.info
+        )
+        if has_alpha:
+            rgba = image.convert("RGBA")
+            canvas = Image.new("RGBA", rgba.size, (12, 10, 8, 255))
+            canvas.alpha_composite(rgba)
+            return canvas.convert("RGB")
+        return image.convert("RGB")
+
+
+def fit_image(
+    source: Path,
+    size: tuple[int, int] = (WIDTH, HEIGHT),
+    mode: str = "contain",
+) -> Image.Image:
+    """Fit an image into ``size``. ``contain`` letterboxes; ``cover`` crops."""
+    image = _open_rgb(source)
+    normalized = str(mode or "contain").strip().lower()
+    if normalized == "cover":
+        return ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
     contained = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
     canvas = Image.new("RGB", size, (12, 10, 8))
     canvas.paste(contained, ((size[0] - contained.width) // 2, (size[1] - contained.height) // 2))
@@ -160,22 +183,34 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, li
     return lines
 
 
-def make_cover(photo: Path, title: str, artist: str, cover_line: str, destination: Path) -> None:
-    base = fit_image(photo).convert("RGBA")
+def make_cover(
+    photo: Path,
+    title: str,
+    artist: str,
+    cover_line: str,
+    destination: Path,
+    profile: RenderProfile | None = None,
+) -> None:
+    profile = profile or get_profile(None)
+    base = fit_image(
+        photo,
+        (profile.width, profile.height),
+        mode=profile.fit_mode,
+    ).convert("RGBA")
     darkened = ImageEnhance.Brightness(base).enhance(0.42)
     veil = Image.new("RGBA", base.size, (0, 0, 0, 70))
     darkened.alpha_composite(veil)
     draw = ImageDraw.Draw(darkened)
-    title_font = load_font(78)
-    artist_font = load_font(40)
-    line_font = load_font(30)
+    title_font = load_font(profile.cover_title_size)
+    artist_font = load_font(profile.cover_artist_size)
+    line_font = load_font(profile.cover_line_size)
     blocks: list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int]]] = []
     for text, font, fill in (
         (title, title_font, (255, 244, 220, 255)),
         (artist, artist_font, (231, 177, 90, 255)),
         (cover_line, line_font, (232, 224, 210, 255)),
     ):
-        for line in _wrap(draw, text.strip(), font, 1500):
+        for line in _wrap(draw, text.strip(), font, profile.cover_max_width):
             blocks.append((line, font, fill))
     heights = []
     for line, font, _fill in blocks:
@@ -183,11 +218,11 @@ def make_cover(photo: Path, title: str, artist: str, cover_line: str, destinatio
         heights.append(box[3] - box[1])
     gap = 18
     total = sum(heights) + gap * (len(blocks) - 1 if blocks else 0)
-    y = (HEIGHT - total) // 2
+    y = (profile.height - total) // 2
     for (line, font, fill), height in zip(blocks, heights):
         box = draw.textbbox((0, 0), line, font=font)
         width = box[2] - box[0]
-        x = (WIDTH - width) // 2
+        x = (profile.width - width) // 2
         draw.text((x + 2, y + 3), line, font=font, fill=(0, 0, 0, 160))
         draw.text((x, y), line, font=font, fill=fill)
         y += height + gap
@@ -195,8 +230,17 @@ def make_cover(photo: Path, title: str, artist: str, cover_line: str, destinatio
     darkened.convert("RGB").save(destination, quality=95)
 
 
-def prepare_slide(source: Path, destination: Path) -> None:
-    fit_image(source).save(destination, quality=95)
+def prepare_slide(
+    source: Path,
+    destination: Path,
+    profile: RenderProfile | None = None,
+) -> None:
+    profile = profile or get_profile(None)
+    fit_image(
+        source,
+        (profile.width, profile.height),
+        mode=profile.fit_mode,
+    ).save(destination, quality=95)
 
 
 def _ratio_label(width: int, height: int) -> str:
@@ -217,16 +261,23 @@ def _ratio_label(width: int, height: int) -> str:
     return f"{value:.2f}:1"
 
 
+def _data_url(image: Image.Image, size: tuple[int, int], quality: int) -> str:
+    preview = image.convert("RGB")
+    preview.thumbnail(size, Image.Resampling.LANCZOS)
+    buffer = BytesIO()
+    preview.save(buffer, format="JPEG", quality=quality)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
 def inspect_image(source: Path) -> dict:
-    """Size, aspect, and a small preview. The video frame is 1920×1080."""
+    """Size, aspect, a 360×202 thumbnail, and a ~1280 preview. The frame is 1920×1080."""
     with Image.open(source) as opened:
         image = ImageOps.exif_transpose(opened)
         width, height = image.size
-        preview = image.convert("RGB")
-    preview.thumbnail((360, 202), Image.Resampling.LANCZOS)
-    buffer = BytesIO()
-    preview.save(buffer, format="JPEG", quality=80)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        oriented = image.convert("RGB")
+    thumbnail = _data_url(oriented, (360, 202), 80)
+    preview = _data_url(oriented, (1280, 1280), 85)
     ratio = _ratio_label(width, height)
     fits = ratio == "16:9"
     if fits:
@@ -240,7 +291,8 @@ def inspect_image(source: Path) -> dict:
         "ratio": ratio,
         "fits_frame": fits,
         "note": note,
-        "thumbnail": f"data:image/jpeg;base64,{encoded}",
+        "thumbnail": thumbnail,
+        "preview": preview,
     }
 
 

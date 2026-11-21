@@ -8,10 +8,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from karaoke.ambient import synthesize as synthesize_ambience
+from karaoke.living import plan_has_motion, render_motion_loop
 from karaoke.media import (
-    HEIGHT,
-    STRIP_HEIGHT,
-    WIDTH,
     MediaError,
     load_font,
     make_cover,
@@ -19,6 +18,7 @@ from karaoke.media import (
     probe_channels,
     probe_duration,
 )
+from karaoke.profiles import RenderProfile, get_profile
 
 TEXT_FPS = 12
 # Keep these in sync with web/src/lib/cue.ts (LONG_GAP_SECONDS, COUNTDOWN_SECONDS).
@@ -77,9 +77,10 @@ def _wrap_word_rows(widths: list[float], space: float, max_width: float) -> list
     return [list(range(best_split)), list(range(best_split, count))]
 
 
-def _render_text_pair(line: dict):
+def _render_text_pair(line: dict, profile: RenderProfile | None = None):
+    profile = profile or get_profile(None)
     words = list(line.get("words") or [])
-    font = load_font(LYRIC_FONT_SIZE)
+    font = load_font(profile.lyric_font_size)
     space = float(font.getlength(" "))
     widths = [float(font.getlength(word["text"])) for word in words]
     if not words:
@@ -95,14 +96,17 @@ def _render_text_pair(line: dict):
             "words": [],
         }
 
-    rows = _wrap_word_rows(widths, space, MAX_LYRIC_WIDTH)
+    rows = _wrap_word_rows(widths, space, profile.max_lyric_width)
     ascent, descent = font.getmetrics()
     row_height = ascent + descent + 8
     row_widths = []
     for row in rows:
         row_widths.append(_row_width([widths[index] for index in row], space))
     image_width = max(1, int(max(row_widths) + 4))
-    image_height = max(1, int(row_height * len(rows) + LYRIC_ROW_GAP * max(0, len(rows) - 1)))
+    image_height = max(
+        1,
+        int(row_height * len(rows) + profile.lyric_row_gap * max(0, len(rows) - 1)),
+    )
     white = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
     gold = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
     white_draw = ImageDraw.Draw(white)
@@ -110,7 +114,7 @@ def _render_text_pair(line: dict):
     boxes: list[dict] = [{"x": 0.0, "y": 0.0, "width": 0.0, "height": float(row_height)} for _ in words]
 
     for row_index, row in enumerate(rows):
-        y = row_index * (row_height + LYRIC_ROW_GAP)
+        y = row_index * (row_height + profile.lyric_row_gap)
         x = max(0.0, (image_width - row_widths[row_index]) / 2)
         for word_index in row:
             word = words[word_index]
@@ -184,17 +188,20 @@ def _word_fill(word: dict, song_time: float) -> float:
     return (song_time - start) / (end - start)
 
 
-def _draw_strip(layout: dict, song_time: float) -> Image.Image:
-    strip = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
+def _draw_strip(layout: dict, song_time: float, profile: RenderProfile | None = None) -> Image.Image:
+    profile = profile or get_profile(None)
+    width = profile.width
+    strip_height = profile.strip_rect[3]
+    strip = Image.new("RGBA", (width, strip_height), (0, 0, 0, 0))
     text = layout["white"]
     bar_width = text.width + 56
     bar_height = text.height + 36
     bar = Image.new("RGBA", (bar_width, bar_height), (8, 6, 4, 168))
-    bar_x = (WIDTH - bar_width) // 2
-    bar_y = (STRIP_HEIGHT - bar_height) // 2
+    bar_x = (width - bar_width) // 2
+    bar_y = (strip_height - bar_height) // 2
     strip.alpha_composite(bar, (bar_x, bar_y))
-    text_x = (WIDTH - text.width) // 2
-    text_y = (STRIP_HEIGHT - text.height) // 2
+    text_x = (width - text.width) // 2
+    text_y = (strip_height - text.height) // 2
     strip.alpha_composite(layout["white"], (text_x, text_y))
     boxes = layout.get("boxes") or []
     for index, word in enumerate(layout["words"]):
@@ -215,35 +222,52 @@ def _draw_strip(layout: dict, song_time: float) -> Image.Image:
     return strip
 
 
-def _draw_countdown(layout: dict, number: int) -> Image.Image:
-    strip = _draw_strip(layout, layout["start"] - 1)
+def _draw_countdown(layout: dict, number: int, profile: RenderProfile | None = None) -> Image.Image:
+    profile = profile or get_profile(None)
+    strip = _draw_strip(layout, layout["start"] - 1, profile)
     font = load_font(72)
     digit = str(number)
     draw = ImageDraw.Draw(strip)
     box = draw.textbbox((0, 0), digit, font=font)
     x = 56
-    y = (STRIP_HEIGHT - (box[3] - box[1])) // 2 - box[1]
+    y = (profile.strip_rect[3] - (box[3] - box[1])) // 2 - box[1]
     draw.text((x + 2, y + 3), digit, font=font, fill=(0, 0, 0, 190))
     draw.text((x, y), digit, font=font, fill=(255, 196, 72, 255))
     return strip
 
 
-def _frame_at(layouts: list[dict], song_time: float, blank: Image.Image) -> Image.Image:
+def _frame_at(
+    layouts: list[dict],
+    song_time: float,
+    blank: Image.Image,
+    profile: RenderProfile | None = None,
+) -> Image.Image:
     if song_time < 0:
         return blank
     mode, layout, number = cue_at(layouts, song_time)
     if mode == "sing" and layout is not None:
-        return _draw_strip(layout, song_time)
+        return _draw_strip(layout, song_time, profile)
     if mode == "countdown" and layout is not None:
-        return _draw_countdown(layout, number)
+        return _draw_countdown(layout, number, profile)
     return blank
 
 
-def _overlay_text(lines: list[dict], total_duration: float, cover_duration: float, slideshow: Path, destination: Path, log) -> None:
+def _overlay_text(
+    lines: list[dict],
+    total_duration: float,
+    cover_duration: float,
+    slideshow: Path,
+    destination: Path,
+    log,
+    profile: RenderProfile | None = None,
+) -> None:
     """Stream lyric frames into FFmpeg. Nothing is written as a PNG sequence."""
-    layouts = [_render_text_pair(line) for line in lines]
+    profile = profile or get_profile(None)
+    strip_height = profile.strip_rect[3]
+    strip_top = profile.strip_rect[1]
+    layouts = [_render_text_pair(line, profile) for line in lines]
     frame_count = max(1, int(round(total_duration * TEXT_FPS)))
-    blank = Image.new("RGBA", (WIDTH, STRIP_HEIGHT), (0, 0, 0, 0))
+    blank = Image.new("RGBA", (profile.width, strip_height), (0, 0, 0, 0))
     command = [
         "ffmpeg",
         "-y",
@@ -254,13 +278,16 @@ def _overlay_text(lines: list[dict], total_duration: float, cover_duration: floa
         "-pixel_format",
         "rgba",
         "-video_size",
-        f"{WIDTH}x{STRIP_HEIGHT}",
+        f"{profile.width}x{strip_height}",
         "-framerate",
         str(TEXT_FPS),
         "-i",
         "pipe:0",
         "-filter_complex",
-        "[1:v]fps=30,format=rgba[text];[0:v][text]overlay=0:main_h-overlay_h:format=auto:shortest=1,format=yuv420p",
+        (
+            f"[1:v]fps={profile.fps},format=rgba[text];"
+            f"[0:v][text]overlay=0:{strip_top}:format=auto:shortest=1,format=yuv420p"
+        ),
         "-c:v",
         "libx264",
         "-preset",
@@ -293,7 +320,7 @@ def _overlay_text(lines: list[dict], total_duration: float, cover_duration: floa
     try:
         for index in range(frame_count):
             song_time = index / TEXT_FPS - cover_duration
-            frame = _frame_at(layouts, song_time, blank)
+            frame = _frame_at(layouts, song_time, blank, profile)
             process.stdin.write(frame.tobytes())
             if index % 96 == 0:
                 log(f"Vẽ chữ karaoke {index + 1}/{frame_count}.")
@@ -307,7 +334,15 @@ def _overlay_text(lines: list[dict], total_duration: float, cover_duration: floa
         raise MediaError(tail[-1] if tail else "FFmpeg dừng với lỗi.")
 
 
-def _mux(video: Path, audio: Path, destination: Path, cover_duration: float, log, label: str) -> None:
+def _mux(
+    video: Path,
+    audio: Path,
+    destination: Path,
+    cover_duration: float,
+    log,
+    label: str,
+    ambience: Path | None = None,
+) -> None:
     log(f"Đang ghép tiếng cho bản {label}.")
     delay = int(round(cover_duration * 1000))
     channels = probe_channels(audio)
@@ -319,8 +354,19 @@ def _mux(video: Path, audio: Path, destination: Path, cover_duration: float, log
         str(video),
         "-i",
         str(audio),
+    ]
+    if ambience is not None:
+        command += ["-i", str(ambience)]
+        filter_graph = (
+            f"[1:a]{delay_filter},apad[music];"
+            "[2:a]volume=-32dB,highpass=f=180[amb];"
+            "[music][amb]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+        )
+    else:
+        filter_graph = f"[1:a]{delay_filter},apad[a]"
+    command += [
         "-filter_complex",
-        f"[1:a]{delay_filter},apad[a]",
+        filter_graph,
         "-map",
         "0:v:0",
         "-map",
@@ -339,6 +385,56 @@ def _mux(video: Path, audio: Path, destination: Path, cover_duration: float, log
     _run(command, log)
 
 
+def _image_key(path: Path) -> str:
+    try:
+        return str(Path(path).expanduser().resolve())
+    except OSError:
+        return str(path)
+
+
+def _effect_plan(effect: dict | None) -> dict | None:
+    if not isinstance(effect, dict):
+        return None
+    plan = effect.get("effect_plan")
+    return plan if isinstance(plan, dict) else None
+
+
+# Ambience is opt-in per effect item via ``params.audio = true``. When several
+# kinds ask for it, rain wins over water, and water over wind.
+AMBIENT_EFFECTS = ("rain", "water", "wind")
+
+
+def _audio_requested(value) -> bool:
+    """Accept the plan's boolean plus the common JSON/string spellings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "1", "yes", "on"}
+    return False
+
+
+def _ambient_kind(background_effects: list[dict] | None) -> str | None:
+    """Pick the ambience bed requested by the plans, honouring the priority."""
+    plans: list[dict] = []
+    for effect in background_effects or []:
+        plan = _effect_plan(effect)
+        if plan is not None:
+            plans.append(plan)
+    for kind in AMBIENT_EFFECTS:
+        for plan in plans:
+            for item in plan.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("effect") or "").strip().casefold() != kind:
+                    continue
+                params = item.get("params")
+                if isinstance(params, dict) and _audio_requested(params.get("audio")):
+                    return kind
+    return None
+
+
 def render_videos(
     *,
     lines: list[dict],
@@ -354,11 +450,14 @@ def render_videos(
     instrumental_name: str,
     cover_duration: float,
     image_duration: float,
+    background_effects: list[dict] | None = None,
+    output_profile: str = "landscape_1080p",
     log,
 ) -> tuple[Path, Path]:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise MediaError("Chưa có ffmpeg hoặc ffprobe trong PATH.")
 
+    profile = get_profile(output_profile)
     work = output_dir / ".karaoke-work"
     if work.exists():
         shutil.rmtree(work)
@@ -368,30 +467,85 @@ def render_videos(
     try:
         log("Đang dựng trang bìa.")
         cover_card = slides / "cover.jpg"
-        make_cover(cover_photo, title, artist, cover_line, cover_card)
-        prepared = []
+        make_cover(cover_photo, title, artist, cover_line, cover_card, profile=profile)
+
+        effect_by_path: dict[str, dict] = {}
+        for effect in background_effects or []:
+            if not isinstance(effect, dict):
+                continue
+            raw = str(effect.get("image_path") or "").strip()
+            if not raw:
+                continue
+            effect_by_path[_image_key(Path(raw))] = effect
+
+        prepared: list[tuple[Path, bool]] = []
         for index, image in enumerate(background_images):
-            destination = slides / f"bg-{index:02d}.jpg"
-            prepare_slide(image, destination)
-            prepared.append(destination)
+            plan = _effect_plan(effect_by_path.get(_image_key(image)))
+            clip: Path | None = None
+            if plan is not None and plan_has_motion(plan):
+                try:
+                    clip = render_motion_loop(
+                        image,
+                        plan,
+                        slides / f"bg-{index:02d}.mp4",
+                        duration=image_duration,
+                        width=profile.width,
+                        height=profile.height,
+                        fps=profile.fps,
+                        fit_mode=profile.fit_mode,
+                        strip_rect=profile.strip_rect,
+                        log=log,
+                    )
+                except Exception as error:  # keep export usable if the effect fails
+                    log(f"Không tạo được hiệu ứng cho {image.name}: {error}")
+                    clip = None
+            if clip is not None and Path(clip).is_file():
+                prepared.append((Path(clip), True))
+            else:
+                destination = slides / f"bg-{index:02d}.jpg"
+                prepare_slide(image, destination, profile=profile)
+                prepared.append((destination, False))
+        if not prepared:
+            raise MediaError("Chưa có ảnh nền để dựng slideshow.")
 
         song_length = max(probe_duration(original_audio), probe_duration(instrumental_audio))
+        # FFmpeg -t 0 does not produce a zero-length input; skip the cover clip.
+        cover_duration = max(0.0, float(cover_duration))
+        if cover_duration < 0.05:
+            cover_duration = 0.0
         total = cover_duration + song_length
-        clips: list[tuple[Path, float]] = [(cover_card, cover_duration)]
+
+        ambience: Path | None = None
+        ambient_kind = _ambient_kind(background_effects)
+        if ambient_kind is not None:
+            try:
+                log(f"Đang tạo tiếng nền {ambient_kind} rất nhỏ.")
+                ambience = synthesize_ambience(ambient_kind, total, work / "ambience.wav")
+            except Exception as error:  # ambience is optional; keep the export usable
+                log(f"Không tạo được tiếng nền: {error}")
+                ambience = None
+
+        clips: list[tuple[Path, float, bool]] = []
+        if cover_duration > 0:
+            clips.append((cover_card, cover_duration, False))
         remaining = song_length
         index = 0
         while remaining > 0.05:
             duration = min(image_duration, remaining)
-            clips.append((prepared[index % len(prepared)], duration))
+            media, is_video = prepared[index % len(prepared)]
+            clips.append((media, duration, is_video))
             remaining -= duration
             index += 1
         log("Đang dựng hình nền.")
         slideshow = work / "slideshow.mp4"
         slide_command = ["ffmpeg", "-y"]
-        for image, duration in clips:
-            slide_command += ["-loop", "1", "-t", f"{duration:.3f}", "-i", str(image)]
+        for media, duration, is_video in clips:
+            if is_video:
+                slide_command += ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(media)]
+            else:
+                slide_command += ["-loop", "1", "-t", f"{duration:.3f}", "-i", str(media)]
         filters = [
-            f"[{index}:v]fps=30,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
+            f"[{index}:v]fps={profile.fps},scale={profile.width}:{profile.height},setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
             for index in range(len(clips))
         ]
         filters.append("".join(f"[v{index}]" for index in range(len(clips))) + f"concat=n={len(clips)}:v=1:a=0[v]")
@@ -413,12 +567,28 @@ def render_videos(
 
         silent = work / "picture.mp4"
         log("Đang vẽ chữ và ghép lên hình.")
-        _overlay_text(lines, total, cover_duration, slideshow, silent, log)
+        _overlay_text(lines, total, cover_duration, slideshow, silent, log, profile=profile)
 
         vocal_out = output_dir / vocal_name
         instrumental_out = output_dir / instrumental_name
-        _mux(silent, original_audio, vocal_out, cover_duration, log, "có giọng")
-        _mux(silent, instrumental_audio, instrumental_out, cover_duration, log, "không lời")
+        _mux(
+            silent,
+            original_audio,
+            vocal_out,
+            cover_duration,
+            log,
+            "có giọng",
+            ambience=ambience,
+        )
+        _mux(
+            silent,
+            instrumental_audio,
+            instrumental_out,
+            cover_duration,
+            log,
+            "không lời",
+            ambience=ambience,
+        )
         return vocal_out, instrumental_out
     finally:
         shutil.rmtree(work, ignore_errors=True)

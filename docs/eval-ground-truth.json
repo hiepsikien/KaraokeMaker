@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "note": "Core 10 eval images from docs/eval-manifest.json. Labels are lowercase substrings matched against the inventory object label/id. Effects are the P0 effect types the prompt is expected to request (rain, steam, wind, water).",
+  "images": {
+    "still-era02-le-cuoi": {
+      "labels": ["person", "fire"],
+      "effects": ["steam"],
+      "note": "Campfire interior; prompt asks for steam/smoke from a pot."
+    },
+    "still-era02-qua-doi": {
+      "labels": ["person", "fire", "pot"],
+      "effects": ["steam"],
+      "note": "Interior with smoke and several people; prompt asks for steam/smoke."
+    },
+    "disaster_flash_flood": {
+      "labels": ["water", "sky", "ground"],
+      "effects": ["rain"],
+      "note": "Flood/storm landscape; prompt asks for light rain."
+    },
+    "disaster_great_blizzard": {
+      "labels": ["sky", "mountain"],
+      "effects": ["snow"],
+      "note": "Snow recipe is supported in P2a; prompt asks for light snow."
+    },
+    "disaster_wildfire_lightning": {
+      "labels": ["fire", "tree", "sky"],
+      "effects": ["wind"],
+      "note": "Wildfire; prompt asks for wind moving the flames."
+    },
+    "still-era06-song-cuon-bach-dang": {
+      "labels": ["water", "boat", "flag"],
+      "effects": ["water"],
+      "note": "River/boats; prompt asks for light water motion."
+    },
+    "still-era03-dem-suong-nui-nua": {
+      "labels": ["person", "fire"],
+      "effects": ["wind"],
+      "note": "Cave camp with people; prompt asks for wind moving the fire."
+    },
+    "still-era06-hoi-nghi-dien-hong": {
+      "labels": ["person", "light"],
+      "effects": ["light"],
+      "note": "Light/dust recipe is supported in P1a; prompt asks for light and dust."
+    },
+    "still-era07-bat-song-moc-thanh": {
+      "labels": ["water", "sky", "ground"],
+      "effects": ["rain"],
+      "note": "Stormy fortress; prompt asks for light rain."
+    },
+    "hero-nguyen-trai": {
+      "labels": ["person", "face", "book"],
+      "effects": ["wind"],
+      "note": "Character portrait; prompt asks for wind moving the robe."
+    }
+  }
+}

@@ -31,7 +31,7 @@ ffprobe -version
 cd web && npm install
 ```
 
-`requirements-karaoke.txt` gồm `stable-ts`, `torch`, Pillow, FastAPI và Uvicorn. Lần cài đầu có thể mất vài phút vì `torch` lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
+`requirements-karaoke.txt` gồm `stable-ts`, `torch`, Pillow, FastAPI, Uvicorn, `requests`, `python-dotenv` và `numpy`. Lần cài đầu có thể mất vài phút vì `torch` lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
 
 Thư mục nhạc mặc định là `~/Downloads/Audio` nếu thư mục đó tồn tại, kể cả tên có một dấu cách ở cuối. Đổi bằng:
 
@@ -44,6 +44,37 @@ export KARAOKE_AUDIO_ROOT="$HOME/Music/Karaoke"
 Môi trường `.venv` của UVR và `.venv-karaoke` tách riêng. UVR khóa `numpy` 1.23.5, còn thư viện căn lời cần bản mới hơn.
 
 Sau khi sửa code Python, tắt server bằng Ctrl+C rồi chạy lại `.venv-karaoke/bin/python -m karaoke`. Trang web tải lại là đủ khi chỉ sửa giao diện.
+
+## Hiệu ứng nền AI (thử nghiệm)
+
+Trong bước **Khai báo** có mục **Hiệu ứng nền (AI)**. Ứng dụng gửi ảnh nền đang chọn
+lên Google Gemini để nhận diện object/vùng, rồi lưu một `effect_plan` vào dự án.
+Hiện đã render **mưa, tuyết, nước (W1 shimmer), khói, gió/sway, lửa, sương mù và nhịp sáng**.
+
+Bật bằng cách tạo file `.env` ở thư mục gốc (đã có trong `.gitignore`):
+
+```bash
+cp .env.example .env
+# rồi điền GEMINI_API_KEY=...
+```
+
+Hoặc đặt biến môi trường trước khi chạy server. Sau khi đổi `.env`, tắt và chạy lại
+server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
+
+- Ảnh chỉ được gửi khi bạn bật ô đồng ý trong mục Hiệu ứng nền.
+- **Định dạng video**: Ngang 16:9 (1920×1080), Dọc 9:16 (1080×1920), Vuông 1:1
+  (1080×1080), Dọc 4:5 (1080×1350). 9:16 có hậu tố `(dọc)` và dải lời nằm trên vùng
+  an toàn đáy; 1:1/4:5 có hậu tố `(vuông)`/`(4x5)`.
+- **Ambient audio**: mặc định tắt; nếu prompt có "tiếng mưa/tiếng sóng/âm thanh" thì
+  mix rất nhỏ (-32 dB) dưới nhạc.
+- Tab **AI Studio** (`/studio`) để thử nền động và preview loop độc lập. Preview
+  render ở tối đa 640 px (4 s) để phản hồi nhanh; video Karaoke xuất vẫn đúng profile
+  1080p/9:16/1:1/4:5.
+- Model: `gemini-3.8-flash` cho inventory ảnh, `gemini-3.1-flash-lite` cho intent.
+- Chi phí tham khảo: ~1 cent/ảnh (xem `docs/ai-scene-director.md` §4.2).
+- Cache: `~/Library/Caches/KaraokeMaker/director` và `.../living`.
+- Ảnh nằm ngoài thư mục nhạc/`KARAOKE_ALLOWED_ROOTS` phải được chọn qua hộp thoại
+  của ứng dụng, giống các file khác.
 
 ## Cách dùng
 
