@@ -4,6 +4,7 @@ import math
 import unicodedata
 import wave
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -361,9 +362,9 @@ def _fold_token(text: str) -> str:
     return "".join(char for char in folded if unicodedata.category(char) != "Mn")
 
 
-def _token_score(lyric: str, heard: str) -> float:
-    left = _fold_token(lyric)
-    right = _fold_token(heard)
+@lru_cache(maxsize=65536)
+def _folded_similarity(left: str, right: str) -> float:
+    """Likeness of two tone-folded syllables, 0 to 1."""
     if not left or not right:
         return 0.0
     if left == right:
@@ -372,56 +373,157 @@ def _token_score(lyric: str, heard: str) -> float:
         shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
         if len(shorter) / len(longer) >= 0.75:
             return 0.85
-    ratio = SequenceMatcher(None, left, right).ratio()
-    return ratio if ratio >= 0.72 else 0.0
+    return SequenceMatcher(None, left, right).ratio()
 
 
-def _window_score(tokens: list[str], words: list[dict]) -> float:
-    """How well this lyric line matches a heard phrase, in order."""
-    if not tokens or not words or abs(len(words) - len(tokens)) > 2:
-        return 0.0
-    if _token_score(tokens[0], words[0]["text"]) < 0.72:
-        return 0.0
-    if _token_score(tokens[-1], words[-1]["text"]) < 0.72:
-        return 0.0
-    cursor = 0
-    scores: list[float] = []
-    hits = 0
-    for token in tokens:
-        best = 0.0
-        best_at = cursor
-        for index in range(cursor, len(words)):
-            score = _token_score(token, words[index]["text"])
-            if score > best:
-                best = score
-                best_at = index
-                if score == 1.0:
-                    break
-        scores.append(best)
-        if best >= 0.72:
-            hits += 1
-            cursor = best_at + 1
-    if hits < max(1, (len(tokens) + 1) // 2):
-        return 0.0
-    return sum(scores) / len(tokens)
+# A pair scores 2 * likeness - 1, so a misheard syllable that is at least 35% alike
+# still beats leaving both words unpaired.
+_SKIP = -0.15
+_SURE = 0.72
+_CLUSTER_GAP = 6.0
 
 
-def _find_heard_window(tokens: list[str], words: list[dict], cursor: int, threshold: float) -> tuple[int, int, float] | None:
-    """Earliest heard phrase that matches this lyric line. Later repeats stay for later lines."""
-    for start in range(cursor, len(words)):
-        best_score = 0.0
-        best_end = start + 1
-        for length in range(max(1, len(tokens) - 1), len(tokens) + 3):
-            end = start + length
-            if end > len(words):
-                break
-            score = _window_score(tokens, words[start:end])
-            if score > best_score:
-                best_score = score
-                best_end = end
-        if best_score >= threshold:
-            return start, best_end, best_score
-    return None
+def _align_tokens(typed: list[str], heard: list[str]) -> list[tuple[int | None, float]]:
+    """Pair every typed syllable with a heard one, in song order, across the whole song."""
+    rows = len(typed)
+    cols = len(heard)
+    previous = [col * _SKIP for col in range(cols + 1)]
+    moves: list[bytearray] = []
+    for row in range(1, rows + 1):
+        current = [row * _SKIP] + [0.0] * cols
+        move = bytearray(cols + 1)
+        move[0] = 1
+        token = typed[row - 1]
+        for col in range(1, cols + 1):
+            pair = previous[col - 1] + 2 * _folded_similarity(token, heard[col - 1]) - 1
+            skip_typed = previous[col] + _SKIP
+            skip_heard = current[col - 1] + _SKIP
+            if pair >= skip_typed and pair >= skip_heard:
+                current[col] = pair
+            elif skip_typed >= skip_heard:
+                current[col] = skip_typed
+                move[col] = 1
+            else:
+                current[col] = skip_heard
+                move[col] = 2
+        moves.append(move)
+        previous = current
+
+    pairs: list[tuple[int | None, float]] = [(None, 0.0)] * rows
+    row, col = rows, cols
+    while row > 0:
+        step = moves[row - 1][col] if col > 0 else 1
+        if step == 0:
+            pairs[row - 1] = (col - 1, _folded_similarity(typed[row - 1], heard[col - 1]))
+            row -= 1
+            col -= 1
+        elif step == 1:
+            row -= 1
+        else:
+            col -= 1
+    return pairs
+
+
+def _trusted(anchors: list[tuple[int, int, float]], token_count: int) -> bool:
+    """A few pairs borrowed from a neighbour's tail are not this line being sung."""
+    if len(anchors) < max(1, math.ceil(token_count * 0.4)):
+        return False
+    return any(score >= _SURE for _position, _heard, score in anchors)
+
+
+_LONGEST_WORD = 4.0
+
+
+def _held_long(word: dict) -> bool:
+    return word["end"] - word["start"] > _LONGEST_WORD
+
+
+def _plausible_heard(text: str) -> bool:
+    """Drop Whisper's hallucinations in a non-Latin script. Long held words are judged after pairing."""
+    for char in text:
+        if char.isalpha() and "LATIN" not in unicodedata.name(char, ""):
+            return False
+    return True
+
+
+def _after_previous(line: dict, previous_end: float) -> dict:
+    """Keep a line from starting before the line above it ends."""
+    if line["start"] >= previous_end:
+        return line
+    start = previous_end + 0.02
+    if line["end"] - start < 0.08 * len(line["words"]):
+        flagged = dict(line)
+        flagged["uncertain"] = True
+        return flagged
+    span = max(1e-6, line["end"] - line["start"])
+    scale = (line["end"] - start) / span
+    words = [
+        _word_dict(word["text"], start + (word["start"] - line["start"]) * scale, start + (word["end"] - line["start"]) * scale)
+        for word in line["words"]
+    ]
+    return _carry_line(line, words)
+
+
+def _main_cluster(anchors: list[tuple[int, int, float]], flat: list[dict]) -> list[tuple[int, int, float]]:
+    """A line sung in one place. Pairs far from the rest are dropped, not stretched across."""
+    if len(anchors) < 2:
+        return anchors
+    clusters: list[list[tuple[int, int, float]]] = [[anchors[0]]]
+    for anchor in anchors[1:]:
+        last = clusters[-1][-1]
+        if flat[anchor[1]]["start"] - flat[last[1]]["end"] > _CLUSTER_GAP:
+            clusters.append([anchor])
+        else:
+            clusters[-1].append(anchor)
+    return max(clusters, key=lambda cluster: (sum(item[2] for item in cluster), len(cluster)))
+
+
+def _words_from_anchors(tokens: list[str], anchors: list[tuple[int, int, float]], flat: list[dict]) -> list[dict]:
+    """Paired syllables keep the heard time. Unpaired ones fill in between their neighbours."""
+    times: list[tuple[float, float] | None] = [None] * len(tokens)
+    for position, heard_index, _score in anchors:
+        start, end = flat[heard_index]["start"], flat[heard_index]["end"]
+        if position == 0 and end - start > _LONGEST_WORD:
+            # Whisper stretches an opening word back over the silence before it.
+            start = end - _LONGEST_WORD
+        times[position] = (start, end)
+
+    first_position, first_heard, _ = anchors[0]
+    last_position, last_heard, _ = anchors[-1]
+    if first_position > 0:
+        count = first_position
+        floor = flat[first_heard - 1]["end"] if first_heard > 0 else 0.0
+        end = flat[first_heard]["start"]
+        start = max(floor, end - 0.3 * count)
+        span = max(end - start, 0.08 * count)
+        for offset, item in enumerate(_spread_tokens(tokens[:count], end - span, end)):
+            times[offset] = (item["start"], item["end"])
+    if last_position < len(tokens) - 1:
+        count = len(tokens) - 1 - last_position
+        start = flat[last_heard]["end"]
+        ceiling = flat[last_heard + 1]["start"] if last_heard + 1 < len(flat) else start + 0.3 * count
+        end = min(ceiling, start + 0.3 * count)
+        span = max(end - start, 0.08 * count)
+        for offset, item in enumerate(_spread_tokens(tokens[last_position + 1 :], start, start + span)):
+            times[last_position + 1 + offset] = (item["start"], item["end"])
+
+    index = first_position
+    while index < last_position:
+        if times[index + 1] is not None:
+            index += 1
+            continue
+        gap_end = index + 1
+        while times[gap_end] is None:
+            gap_end += 1
+        start = times[index][1]
+        end = times[gap_end][0]
+        count = gap_end - index - 1
+        span = max(end - start, 0.08 * count)
+        for offset, item in enumerate(_spread_tokens(tokens[index + 1 : gap_end], start, start + span)):
+            times[index + 1 + offset] = (item["start"], item["end"])
+        index = gap_end
+
+    return [_word_dict(token, *time) for token, time in zip(tokens, times) if time is not None]
 
 
 def _fit_unheard_spans(durations: list[float], previous_end: float, next_start: float | None) -> list[tuple[float, float]]:
@@ -494,11 +596,14 @@ def _place_unheard(lines: list[str], placed: list[dict | None]) -> list[dict]:
 
 
 def _supplement_unmatched(segments: list[dict], used: set[int]) -> list[dict]:
-    """Heard phrases that the typed lyrics never claimed: backing vocals, tags, endings."""
+    """Heard phrases that the typed lyrics never claimed: backing vocals, tags, endings.
+
+    Kept even when Whisper wrote them without tone marks; the user fixes the text in the editor.
+    """
     extras: list[dict] = []
     for segment in segments:
         words = segment["words"]
-        unused = [word for word in words if word["id"] not in used]
+        unused = [word for word in words if word["id"] not in used and not _held_long(word)]
         if not unused:
             continue
         duration = unused[-1]["end"] - unused[0]["start"]
@@ -511,11 +616,40 @@ def _supplement_unmatched(segments: list[dict], used: set[int]) -> list[dict]:
     return extras
 
 
+def _echoes(extra: dict, line: dict) -> bool:
+    """Most of the heard syllables pair with the typed line's: the same phrase, misheard."""
+    heard = [_fold_token(word["text"]) for word in extra["words"]]
+    typed = [_fold_token(word["text"]) for word in line["words"]]
+    paired = sum(1 for index, score in _align_tokens(heard, typed) if index is not None and score >= 0.5)
+    # A short ad-lib like "anh ơi" shares a syllable with almost any line, so it must repeat in full.
+    needed = len(heard) if len(heard) <= 2 else math.ceil(len(heard) * 0.5)
+    return len(heard) > 0 and paired >= needed
+
+
+def _drop_covered_supplements(extras: list[dict], lyric_lines: list[dict]) -> list[dict]:
+    """Drop a heard line that sits on a typed line and repeats it. Different words there are a backing part."""
+    kept: list[dict] = []
+    for extra in extras:
+        duration = extra["end"] - extra["start"]
+        if duration <= 0:
+            continue
+        covered = False
+        for line in lyric_lines:
+            overlap = min(extra["end"], line["end"]) - max(extra["start"], line["start"])
+            if overlap > 0 and overlap / duration >= 0.5 and _echoes(extra, line):
+                covered = True
+                break
+        if not covered:
+            kept.append(extra)
+    return kept
+
+
 def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> list[dict]:
     """Time the typed lyrics from what Whisper heard, and keep heard lines the lyrics omitted.
 
-    Typed lyrics win on wording wherever a phrase matches. A long silence before the first
-    real match is left empty instead of pulling the verse back to the start of the file.
+    The whole song is aligned at once, syllable by syllable, so a misheard line still takes
+    the time it was sung. A long silence before the first real match is left empty instead
+    of pulling the verse back to the start of the file.
     """
     flat: list[dict] = []
     heard_segments: list[dict] = []
@@ -523,7 +657,7 @@ def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> 
         words = []
         for word in segment.get("words") or []:
             text = " ".join(str(word.get("text", "")).split())
-            if not text:
+            if not text or not _plausible_heard(text):
                 continue
             heard = _word_dict(text, float(word["start"]), float(word["end"]))
             heard["id"] = len(flat)
@@ -534,25 +668,39 @@ def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> 
     if not flat:
         raise AlignError("Whisper không nghe thấy lời nào trong file vocal.")
 
+    typed_tokens: list[str] = []
+    owners: list[tuple[int, int]] = []
+    for line_index, line in enumerate(lines):
+        for position, token in enumerate(line.split()):
+            typed_tokens.append(_fold_token(token))
+            owners.append((line_index, position))
+    pairs = _align_tokens(typed_tokens, [_fold_token(word["text"]) for word in flat])
+
+    anchors_by_line: list[list[tuple[int, int, float]]] = [[] for _ in lines]
+    for (line_index, position), (heard_index, score) in zip(owners, pairs):
+        if heard_index is None:
+            continue
+        if _held_long(flat[heard_index]) and score < _SURE:
+            # One word held for many seconds is a hallucination unless it is clearly the typed word.
+            continue
+        anchors_by_line[line_index].append((position, heard_index, score))
+
+    if not any(score >= _SURE for _heard, score in pairs if _heard is not None):
+        raise AlignError(
+            "Whisper có nghe thấy tiếng hát, nhưng không khớp câu nào với lời đã nhập. Hãy kiểm tra lời và file vocal."
+        )
+
     placed: list[dict | None] = [None] * len(lines)
     used: set[int] = set()
-    cursor = 0
-    for index, line in enumerate(lines):
+    for line_index, line in enumerate(lines):
         tokens = line.split()
-        if not tokens:
+        anchors = _main_cluster(anchors_by_line[line_index], flat)
+        if not tokens or not anchors or not _trusted(anchors, len(tokens)):
             continue
-        found = _find_heard_window(tokens, flat, cursor, 0.55)
-        if found is None:
-            continue
-        start, end, score = found
-        window = flat[start:end]
-        if len(tokens) == len(window):
-            words = [_word_dict(token, word["start"], word["end"]) for token, word in zip(tokens, window)]
-        else:
-            words = _spread_tokens(tokens, window[0]["start"], window[-1]["end"])
-        placed[index] = _line_from_words(line, words, uncertain=score < 0.75)
-        used.update(word["id"] for word in window)
-        cursor = end
+        words = _words_from_anchors(tokens, anchors, flat)
+        confidence = sum(score for _position, _heard, score in anchors) / len(tokens)
+        placed[line_index] = _line_from_words(line, words, uncertain=confidence < 0.75)
+        used.update(heard_index for _position, heard_index, _score in anchors)
 
     if not any(item is not None for item in placed):
         raise AlignError(
@@ -560,7 +708,9 @@ def reconcile_lyrics_with_transcript(lines: list[str], segments: list[dict]) -> 
         )
 
     lyric_lines = _place_unheard(lines, placed)
-    extras = _supplement_unmatched(heard_segments, used)
+    for index in range(1, len(lyric_lines)):
+        lyric_lines[index] = _after_previous(lyric_lines[index], lyric_lines[index - 1]["end"])
+    extras = _drop_covered_supplements(_supplement_unmatched(heard_segments, used), lyric_lines)
     combined = lyric_lines + extras
     combined.sort(key=lambda item: (item["start"], 1 if item.get("supplemented") else 0))
     return combined

@@ -68,6 +68,8 @@ def normalize_edited_lines(lines: list[dict]) -> list[dict]:
         cleaned.append(cleaned_line)
     if not cleaned:
         raise JobError("Không còn chữ nào để xuất.")
+    # Cue timing reads the previous line by position, so lines must be in time order.
+    cleaned.sort(key=lambda item: item["start"])
     return cleaned
 
 

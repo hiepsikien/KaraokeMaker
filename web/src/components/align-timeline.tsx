@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { formatSeconds, type TimedLine, type TimedWord } from "@/lib/cue";
 
@@ -10,6 +10,7 @@ type Edge = "move" | "start" | "end";
 const RULER = 18;
 const WAVE = 92;
 const LANE = 58;
+const MIN_ROW = 24;
 const MAX_PPS = 720;
 
 function shiftWords(words: TimedWord[], delta: number) {
@@ -104,6 +105,9 @@ export function AlignTimeline({
   onSelectWord,
   onAddLine,
   onSplitLine,
+  onDragEnd,
+  onRemoveLine,
+  actions,
   selectedWord,
   canSplit,
 }: {
@@ -124,6 +128,9 @@ export function AlignTimeline({
   onSelectWord: (index: number) => void;
   onAddLine: () => void;
   onSplitLine: () => void;
+  onDragEnd?: () => void;
+  onRemoveLine?: (index: number) => void;
+  actions?: ReactNode;
 }) {
   const { peaks, failed } = usePeaks(jobId);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -300,9 +307,11 @@ export function AlignTimeline({
   }
 
   function limits(index: number) {
+    const line = lines[index];
+    // A line already overlapping a neighbour may not grow further into it, but is never squeezed.
     return {
-      previous: index > 0 ? lines[index - 1].end + 0.02 : 0,
-      next: index + 1 < lines.length ? lines[index + 1].start - 0.02 : songLength,
+      previous: index > 0 ? Math.min(lines[index - 1].end + 0.02, line.start) : 0,
+      next: index + 1 < lines.length ? Math.max(lines[index + 1].start - 0.02, line.end) : songLength,
     };
   }
 
@@ -312,7 +321,7 @@ export function AlignTimeline({
     const { previous, next } = limits(index);
     const span = Math.max(0.2, line.end - line.start);
     if (edge === "move") {
-      const start = Math.min(Math.max(line.start + delta, previous), Math.max(previous, next - span));
+      const start = Math.min(Math.max(line.start + delta, 0), Math.max(0, songLength - span));
       onChangeLine(index, withWords(line, shiftWords(line.words, start - line.start)));
       return;
     }
@@ -364,7 +373,8 @@ export function AlignTimeline({
       target.onpointermove = null;
       target.onpointerup = null;
       target.onpointercancel = null;
-      if (!dragged) onClick();
+      if (dragged) onDragEnd?.();
+      else onClick();
     };
     event.currentTarget.onpointermove = move;
     event.currentTarget.onpointerup = finish;
@@ -378,20 +388,34 @@ export function AlignTimeline({
     if (mark >= 0) ticks.push(mark);
   }
   const playhead = time * pps - scrollLeft;
+  const rows: number[] = [];
+  const rowEnds: number[] = [];
+  lines.forEach((line) => {
+    let row = rowEnds.findIndex((end) => end <= line.start);
+    if (row < 0) row = rowEnds.length;
+    rowEnds[row] = line.end;
+    rows.push(row);
+  });
+  const rowCount = activeIndex == null ? Math.max(1, rowEnds.length) : 1;
+  const lane = Math.max(LANE, 6 + rowCount * MIN_ROW);
+  const rowHeight = Math.min(38, (lane - 6) / rowCount);
   const selected = activeIndex == null ? null : lines[activeIndex];
 
   return (
     <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-3 sm:p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
+      <div className="mb-3 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">
             {activeIndex == null ? "Biên các câu" : `Câu ${activeIndex + 1} · biên từng chữ`}
           </p>
           <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
             {activeIndex == null
-              ? "Kéo cả câu để dời. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ. Chia câu cắt đôi tại vạch phát."
-              : "Kéo chữ tới chỗ hát bắt đầu. Kéo mép chữ để đổi độ dài. Chia câu cắt đôi tại chữ đang chọn. Bấm Các câu để quay lại."}
+              ? "Kéo cả câu để dời, kể cả khi phải đi qua câu khác. Kéo hai mép để đổi chỗ câu bắt đầu và kết thúc. Bấm câu để sửa từng chữ."
+              : "Kéo vùng vàng trên sóng âm để dời cả câu, kể cả khi lệch xa câu bên cạnh. Kéo từng chữ để chỉnh chỗ hát. Bấm Các câu để quay lại."}
           </p>
+        </div>
+        {actions && <div className="flex flex-wrap items-center justify-end gap-4">{actions}</div>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" className="rounded-full bg-[var(--gold)] px-3 py-1 text-xs font-semibold text-[#1a1206]" onClick={onTogglePlay}>
@@ -409,6 +433,16 @@ export function AlignTimeline({
           >
             Chia câu
           </button>
+          {activeIndex != null && onRemoveLine && (
+            <button
+              type="button"
+              disabled={locked}
+              className="rounded-full border border-[var(--line)] px-3 py-1 text-xs hover:border-red-300 hover:text-red-200 disabled:opacity-40"
+              onClick={() => onRemoveLine(activeIndex)}
+            >
+              Xoá câu
+            </button>
+          )}
           {activeIndex != null && (
             <button type="button" className="rounded-full border border-[var(--line)] px-3 py-1 text-xs text-[var(--gold)]" onClick={() => onSelectLine(null)}>
               Các câu
@@ -436,9 +470,9 @@ export function AlignTimeline({
           className="overflow-x-auto overflow-y-hidden"
           onScroll={() => setScrollLeft(scrollRef.current?.scrollLeft ?? 0)}
         >
-          <div style={{ width: trackWidth, height: RULER + WAVE + LANE + 14 }} />
+          <div style={{ width: trackWidth, height: RULER + WAVE + lane + 14 }} />
         </div>
-        <div className="absolute inset-x-0 top-0" style={{ height: RULER + WAVE + LANE }}>
+        <div className="absolute inset-x-0 top-0" style={{ height: RULER + WAVE + lane }}>
           <div className="relative overflow-hidden border-b border-white/10" style={{ height: RULER }} onPointerDown={beginPan}>
             {ticks.map((mark) => (
               <span key={mark} className="absolute top-0 text-[10px] text-[var(--muted)]" style={{ left: mark * pps - scrollLeft + 4 }}>
@@ -448,16 +482,23 @@ export function AlignTimeline({
           </div>
           <div className="relative cursor-grab overflow-hidden bg-black/50" style={{ height: WAVE }} onPointerDown={beginPan}>
             <canvas ref={canvasRef} className="h-full w-full" />
-            {selected && (
-              <div
-                className="pointer-events-none absolute top-0 bottom-0 bg-[var(--gold)]/10"
-                style={{ left: selected.start * pps - scrollLeft, width: Math.max(0, (selected.end - selected.start) * pps) }}
+            {selected && activeIndex != null && (
+              <button
+                type="button"
+                disabled={locked}
+                aria-label="Kéo cả câu"
+                title="Kéo để dời cả câu"
+                className="absolute top-0 bottom-0 cursor-grab bg-[var(--gold)]/20 disabled:cursor-default"
+                style={{ left: selected.start * pps - scrollLeft, width: Math.max(8, (selected.end - selected.start) * pps) }}
+                onPointerDown={(event) =>
+                  beginDrag(event, (delta) => applyLine(activeIndex, "move", delta), () => onPlayFrom(selected.start))
+                }
               />
             )}
             {!peaks && !failed && <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--muted)]">Đang vẽ sóng âm…</p>}
             {failed && <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--muted)]">Không vẽ được sóng âm. Vẫn kéo được chữ.</p>}
           </div>
-          <div className="relative overflow-hidden bg-black/35" style={{ height: LANE }} onPointerDown={beginPan}>
+          <div className="relative overflow-hidden bg-black/35" style={{ height: lane }} onPointerDown={beginPan}>
             {activeIndex != null &&
               lines.map((line, index) => (
                 <button
@@ -501,7 +542,8 @@ export function AlignTimeline({
                   title={`Câu ${index + 1} · ${formatSeconds(line.start)} – ${formatSeconds(line.end)}`}
                   left={line.start * pps - scrollLeft}
                   width={(line.end - line.start) * pps}
-                  top={10}
+                  top={3 + rows[index] * rowHeight}
+                  height={rowHeight - 2}
                   active={index === selectedLine}
                   disabled={locked}
                   onEdge={(event, edge) =>
@@ -537,6 +579,7 @@ function Block({
   left,
   width,
   top,
+  height = 36,
   active,
   disabled,
   onEdge,
@@ -546,21 +589,23 @@ function Block({
   left: number;
   width: number;
   top: number;
+  height?: number;
   active?: boolean;
   disabled: boolean;
   onEdge: (event: ReactPointerEvent<HTMLButtonElement>, edge: Edge) => void;
 }) {
   return (
     <div
-      className={`absolute h-9 overflow-hidden rounded-md border ${active ? "border-[var(--gold)] bg-[var(--gold)]/30" : "border-[var(--gold)]/40 bg-[var(--gold)]/15"}`}
-      style={{ left, width: Math.max(width, 8), top }}
+      className={`absolute overflow-hidden rounded-md border ${active ? "border-[var(--gold)] bg-[var(--gold)]/30" : "border-[var(--gold)]/40 bg-[var(--gold)]/15"}`}
+      style={{ left, width: Math.max(width, 8), top, height }}
       title={title}
     >
       <button type="button" disabled={disabled} aria-label="Đổi lúc bắt đầu" className="absolute inset-y-0 left-0 z-10 w-2 cursor-ew-resize" onPointerDown={(event) => onEdge(event, "start")} />
       <button
         type="button"
         disabled={disabled}
-        className="h-full w-full cursor-grab truncate px-2 text-left text-[11px] leading-9 disabled:cursor-default"
+        className="h-full w-full cursor-grab truncate px-2 text-left text-[11px] disabled:cursor-default"
+        style={{ lineHeight: `${height - 2}px` }}
         onPointerDown={(event) => onEdge(event, "move")}
       >
         {text}

@@ -50,6 +50,7 @@ export function ProjectSetup({
   onAlign,
   onResumeEdit,
   onBackHome,
+  onNewProject,
 }: {
   fields: ProjectFields;
   setFields: (updater: (current: ProjectFields) => ProjectFields) => void;
@@ -62,6 +63,7 @@ export function ProjectSetup({
   onAlign: () => void;
   onResumeEdit: () => void;
   onBackHome: () => void;
+  onNewProject?: () => void;
 }) {
   const lines = useMemo(() => sungCount(fields.lyrics), [fields.lyrics]);
 
@@ -73,10 +75,24 @@ export function ProjectSetup({
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Khai báo</p>
             <h2 className="mt-1 text-xl font-semibold">Thông tin và file của dự án</h2>
           </div>
-          <button type="button" onClick={onBackHome} className="text-sm text-[var(--muted)] hover:text-white">
-            Về màn hình đầu
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            {onNewProject && (
+              <button type="button" onClick={onNewProject} className="text-sm text-[var(--gold)] hover:text-white">
+                Dự án mới
+              </button>
+            )}
+            <button type="button" onClick={onBackHome} className="text-sm text-[var(--muted)] hover:text-white">
+              Về màn hình đầu
+            </button>
+          </div>
         </div>
+        {hasLines && (
+          <p className="rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
+            Đổi tên bài, dòng phụ, ảnh bìa, ảnh nền hoặc thời lượng ảnh tại đây, rồi bấm{" "}
+            <span className="text-[var(--paper)]">Lưu khai báo và vào biên tập</span>. Lời từng chữ trên video sửa ở Biên tập.
+            Bài khác: bấm Dự án mới.
+          </p>
+        )}
 
         <section className="grid gap-4 sm:grid-cols-2">
           <label className="block sm:col-span-2">
