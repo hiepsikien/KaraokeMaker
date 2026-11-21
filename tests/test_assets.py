@@ -403,6 +403,8 @@ class AssetStoreTests(unittest.TestCase):
                     "image_path": str(self.image),
                     "asset_id": meta["id"],
                     "effect_plan": {"items": [{"effect": "rain", "params": {"intensity": 0.9}}]},
+                    # Newer than the asset, so the asset must be rejected.
+                    "created": "2999-01-01T00:00:00Z",
                 }
             ],
             "original_audio": str(audio),
@@ -420,6 +422,68 @@ class AssetStoreTests(unittest.TestCase):
         )
         self.assertNotEqual(build.segments[0]["kind"], "asset")
         self.assertIsNone(build.segments[0]["asset_id"])
+
+    def test_background_uses_newer_asset_even_when_project_plan_is_old(self):
+        import subprocess
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x180:d=2:r=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(self.preview),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        meta = save_asset_from_preview(
+            preview_id="a" * 64,
+            name="Nền asset mới",
+            image_path=self.image,
+            image_hash=_file_hash(self.image),
+            effect_plan={"items": [{"effect": "rain", "params": {"intensity": 0.9}}]},
+            duration=2.0,
+            output_profile="landscape_1080p",
+        )
+        audio = make_audio(self.root / "a.wav")
+        prepared = {
+            "title": "Bài",
+            "artist": "Tác giả",
+            "cover_line": "",
+            "cover_image": str(self.image),
+            "background_images": [str(self.image)],
+            "background_effects": [
+                {
+                    "image_path": str(self.image),
+                    "asset_id": meta["id"],
+                    "effect_plan": {"items": [{"effect": "rain", "params": {"intensity": 0.5}}]},
+                    # Older than the asset, so the asset plan wins.
+                    "created": "2000-01-01T00:00:00Z",
+                }
+            ],
+            "original_audio": str(audio),
+            "instrumental_audio": str(audio),
+            "output_dir": str(self.root),
+            "cover_duration": 0.2,
+            "image_duration": 2.0,
+            "output_profile": "landscape_1080p",
+        }
+        logs: list[str] = []
+        build = build_background(
+            prepared,
+            output_dir=self.root,
+            profile=self.profile,
+            log=logs.append,
+        )
+        self.assertEqual(build.segments[0]["kind"], "asset")
+        self.assertEqual(build.segments[0]["asset_id"], meta["id"])
 
     def test_asset_rejects_preview_id_that_does_not_match_inputs(self):
         with patch("karaoke.assets.preview_id_for", return_value="b" * 64):

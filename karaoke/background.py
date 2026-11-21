@@ -210,6 +210,32 @@ def _effect_plan(effect: dict | None) -> dict | None:
     return plan if isinstance(plan, dict) else None
 
 
+def _parse_created(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _asset_is_newer_than_effect(effect: dict | None, meta: dict) -> bool:
+    """True when the selected asset was created after the stored effect plan."""
+    if not isinstance(effect, dict) or not isinstance(meta, dict):
+        return False
+    asset_created = _parse_created(meta.get("created"))
+    if asset_created is None:
+        return False
+    effect_created = _parse_created(effect.get("created"))
+    if effect_created is None:
+        return True
+    return asset_created > effect_created
+
+
 def _cover_identity(
     cover_photo: Path | None,
     title: str,
@@ -899,6 +925,23 @@ def _plan_background(
                 profile=profile,
                 plan=plan,
             )
+            if (
+                not valid
+                and reason == "effect plan đã đổi"
+                and _asset_is_newer_than_effect(effect, meta)
+            ):
+                # The project still carries the old plan but the user selected
+                # an asset created after it. The asset itself is the newer
+                # source of truth for the clip.
+                valid, reason = validate_asset(
+                    meta,
+                    image_hash=image_hash_prefixed,
+                    image_frames=image_frames,
+                    profile=profile,
+                    plan=None,
+                )
+                if valid:
+                    asset_reason = ""
             if valid and meta is not None:
                 identity = asset_fingerprint(meta)
                 kind = "asset"

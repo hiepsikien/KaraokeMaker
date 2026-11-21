@@ -1033,10 +1033,20 @@ export function AiEffects({
 
   function chooseAsset(assetId: string) {
     if (!selectedImage) return;
+    const asset = imageAssets.find((item) => item.id === assetId);
     onEffectsChange((current) =>
-      current.map((item) =>
-        item.image_path === selectedImage ? { ...item, asset_id: assetId || null } : item,
-      ),
+      current.map((item) => {
+        if (item.image_path !== selectedImage) return item;
+        if (!assetId) return { ...item, asset_id: null };
+        if (!asset?.effect_plan) return { ...item, asset_id: assetId };
+        return {
+          ...item,
+          asset_id: assetId,
+          image_hash: asset.image_hash || item.image_hash,
+          effect_plan: asset.effect_plan,
+          selected_object_ids: asset.effect_plan.selected_object_ids || item.selected_object_ids,
+        };
+      }),
     );
   }
 
@@ -1073,7 +1083,7 @@ export function AiEffects({
         provider: "studio",
         model: "asset",
       },
-      selected_object_ids: [],
+      selected_object_ids: plan.selected_object_ids || [],
       effect_plan: plan,
       model: "studio",
       created: new Date().toISOString(),

@@ -192,6 +192,9 @@ def _profile_payload(profile) -> str:
 
 
 def asset_fingerprint(meta: dict) -> str:
+    plan_hash = meta.get("plan_hash")
+    if not plan_hash and isinstance(meta.get("effect_plan"), dict):
+        plan_hash = visual_plan_hash(meta["effect_plan"])
     payload = json.dumps(
         {
             "asset_version": meta.get("asset_version"),
@@ -199,7 +202,7 @@ def asset_fingerprint(meta: dict) -> str:
             "renderer_version": meta.get("renderer_version"),
             "asset_frames": meta.get("asset_frames"),
             "image_hash": meta.get("image_hash"),
-            "plan_hash": meta.get("plan_hash"),
+            "plan_hash": plan_hash,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -561,10 +564,16 @@ def validate_asset(
 ) -> tuple[bool, str]:
     if not isinstance(meta, dict):
         return False, "không thấy asset"
-    if int(meta.get("asset_version") or 0) != ASSET_VERSION:
+    if int(meta.get("asset_version") or 0) not in {1, ASSET_VERSION}:
         return False, "asset_version không khớp"
-    if plan is not None and str(meta.get("plan_hash") or "") != visual_plan_hash(plan):
-        return False, "effect plan đã đổi"
+    if plan is not None:
+        expected_plan_hash = str(meta.get("plan_hash") or "")
+        if not expected_plan_hash and isinstance(meta.get("effect_plan"), dict):
+            # Assets saved before plan_hash was introduced can still be
+            # validated from their embedded plan.
+            expected_plan_hash = visual_plan_hash(meta["effect_plan"])
+        if expected_plan_hash != visual_plan_hash(plan):
+            return False, "effect plan đã đổi"
     if int(meta.get("renderer_version") or 0) != MOTION_CACHE_VERSION:
         return False, "renderer_version không khớp"
     if str(meta.get("image_hash") or "") != image_hash:
