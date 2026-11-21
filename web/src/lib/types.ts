@@ -146,6 +146,29 @@ export type DirectorAnalysis = {
   intent_fallback?: boolean;
 };
 
+export type StudioAsset = {
+  id: string;
+  name: string;
+  source_image: string;
+  image_hash: string;
+  effect_plan?: EffectPlan;
+  asset_version?: number;
+  profile_id?: string;
+  profile_fingerprint?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  fit_mode?: string;
+  strip_rect?: number[];
+  renderer_version?: number;
+  loop_duration?: number;
+  asset_frames?: number;
+  clip_file?: string;
+  clip_size?: number;
+  clip_sha256?: string;
+  created?: string;
+};
+
 export type BackgroundRender = {
   schema_version?: number;
   builder_version?: number;
@@ -206,6 +229,18 @@ export type Job = {
   project_path?: string;
   project?: Project | null;
   restore?: RestoreSettings | null;
+  background?: {
+    state: "missing" | "stale" | "ready" | "building" | "error";
+    percent?: number;
+    reason?: string;
+    hash?: string;
+    path?: string;
+    total_frames?: number;
+    cover_frames?: number;
+    song_frames?: number;
+    image_frames?: number;
+    profile_id?: string;
+  } | null;
 };
 
 export type ProjectFields = {

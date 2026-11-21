@@ -277,8 +277,12 @@ export function ProjectSetup({
             }
             effects={fields.background_effects}
             outputProfile={fields.output_profile}
+            imageDuration={fields.image_duration}
             onEffectsChange={(updater) =>
               setFields((current) => ({ ...current, background_effects: updater(current.background_effects) }))
+            }
+            onAssetDuration={(seconds) =>
+              setFields((current) => ({ ...current, image_duration: String(seconds) }))
             }
           />
         </section>

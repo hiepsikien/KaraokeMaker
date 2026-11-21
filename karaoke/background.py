@@ -19,12 +19,19 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from karaoke.ambient import MAX_DURATION as MAX_AMBIENT_DURATION
 from karaoke.ambient import synthesize as synthesize_ambience
+from karaoke.assets import (
+    asset_fingerprint,
+    clip_path as asset_clip_path,
+    load_asset,
+    validate_asset,
+)
 from karaoke.living import (
     MOTION_CACHE_VERSION,
     plan_has_motion,
@@ -260,6 +267,10 @@ class BackgroundBuild:
 
     def to_project(self) -> dict:
         source_dir = str(self.path.parent.parent.parent)
+        segments = [
+            {key: value for key, value in segment.items() if key != "asset_reason"}
+            for segment in self.segments
+        ]
         return {
             "schema_version": BACKGROUND_SCHEMA_VERSION,
             "builder_version": BACKGROUND_BUILDER_VERSION,
@@ -276,8 +287,26 @@ class BackgroundBuild:
             "image_frames": self.image_frames,
             "degraded": self.degraded,
             "created": self.created,
-            "segments": self.segments,
+            "segments": segments,
         }
+
+
+@dataclass
+class BackgroundPlan:
+    profile: RenderProfile
+    cover_photo: Path | None
+    background_images: list[Path]
+    effects: dict[str, dict]
+    cover_frames: int
+    image_frames: int
+    song_frames: int
+    total_frames: int
+    unique: dict[str, dict]
+    order: list[str]
+    cover_identity: str
+    profile_fingerprint: str
+    identity_hash: str
+    target: Path
 
 
 @dataclass(frozen=True)
@@ -470,21 +499,13 @@ def _assemble_background(
     _run(command, log)
 
 
-def build_background(
+def _plan_background(
     prepared: dict,
     *,
     output_dir: Path,
-    profile: RenderProfile | None = None,
-    background: BackgroundRef | None = None,
-    force: bool = False,
-    progress=None,
-    log,
-) -> BackgroundBuild:
-    """Build (or reuse) the full-length silent background video."""
-    profile = profile or get_profile(prepared.get("output_profile"))
-    output_dir = Path(output_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    profile: RenderProfile,
+) -> BackgroundPlan:
+    """Resolve inputs, clip identities and the expected background path."""
     cover_text = str(prepared.get("cover_image") or "").strip()
     cover_photo = Path(cover_text).expanduser() if cover_text else None
     background_images = [
@@ -521,20 +542,38 @@ def build_background(
         if key in unique:
             continue
         image_hash = _file_digest(image)
-        plan = _effect_plan(effects.get(key))
-        if plan is not None and plan_has_motion(plan):
+        image_hash_prefixed = _hash_with_prefix(image_hash)
+        effect = effects.get(key)
+        plan = _effect_plan(effect)
+        asset_id = str(effect.get("asset_id") or "").strip() if isinstance(effect, dict) else ""
+        kind = "static"
+        identity = _static_identity(image_hash, profile)
+        asset_reason = ""
+        if asset_id:
+            meta = load_asset(asset_id)
+            valid, reason = validate_asset(
+                meta,
+                image_hash=image_hash_prefixed,
+                image_frames=image_frames,
+                profile=profile,
+            )
+            if valid and meta is not None:
+                identity = asset_fingerprint(meta)
+                kind = "asset"
+            else:
+                asset_reason = reason
+                asset_id = ""
+        if kind != "asset" and plan is not None and plan_has_motion(plan):
             identity = _motion_identity(plan, image_hash, image_frames, profile)
             kind = "motion"
-        else:
-            identity = _static_identity(image_hash, profile)
-            kind = "static"
         unique[key] = {
             "index": len(unique),
             "image_path": str(image),
-            "image_hash": _hash_with_prefix(image_hash),
+            "image_hash": image_hash_prefixed,
             "kind": kind,
             "clip_identity": identity,
-            "asset_id": None,
+            "asset_id": asset_id or None,
+            "asset_reason": asset_reason,
             "image_frames": image_frames,
             "degraded": False,
         }
@@ -562,8 +601,53 @@ def build_background(
         "image_frames": image_frames,
     }
     identity_hex = _sha256_text(_canonical(identity_payload))
-    identity_hash = _hash_with_prefix(identity_hex)
-    target = _background_path(output_dir, identity_hex)
+    return BackgroundPlan(
+        profile=profile,
+        cover_photo=cover_photo,
+        background_images=background_images,
+        effects=effects,
+        cover_frames=cover_frames,
+        image_frames=image_frames,
+        song_frames=song_frames,
+        total_frames=total_frames,
+        unique=unique,
+        order=order,
+        cover_identity=cover_id,
+        profile_fingerprint=profile_id,
+        identity_hash=_hash_with_prefix(identity_hex),
+        target=_background_path(output_dir, identity_hex),
+    )
+
+
+def build_background(
+    prepared: dict,
+    *,
+    output_dir: Path,
+    profile: RenderProfile | None = None,
+    background: BackgroundRef | None = None,
+    force: bool = False,
+    progress=None,
+    log,
+) -> BackgroundBuild:
+    """Build (or reuse) the full-length silent background video."""
+    profile = profile or get_profile(prepared.get("output_profile"))
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    plan = _plan_background(prepared, output_dir=output_dir, profile=profile)
+    cover_photo = plan.cover_photo
+    background_images = plan.background_images
+    effects = plan.effects
+    cover_frames = plan.cover_frames
+    image_frames = plan.image_frames
+    song_frames = plan.song_frames
+    total_frames = plan.total_frames
+    unique = plan.unique
+    order = plan.order
+    identity_hash = plan.identity_hash
+    identity_hex = _hex_from_hash(identity_hash)
+    target = plan.target
+    profile_id = plan.profile_fingerprint
     target.parent.mkdir(parents=True, exist_ok=True)
 
     background_path: Path | None = None
@@ -632,9 +716,32 @@ def build_background(
                     profile=profile,
                 )
             for segment in unique.values():
+                asset_id = str(segment.get("asset_id") or "").strip()
+                if asset_id:
+                    meta = load_asset(asset_id)
+                    if meta is not None:
+                        try:
+                            media = asset_clip_path(meta)
+                        except Exception as error:
+                            log(f"Không dùng được asset {asset_id}: {error}")
+                            media = None
+                        if media is not None and media.is_file():
+                            segment["kind"] = "asset"
+                            rendered.append((media, True))
+                            continue
+                    log(f"Không dùng được asset {asset_id}: {segment.get('asset_reason') or 'không hợp lệ'}")
+                    segment["asset_id"] = None
+                if segment.get("asset_reason"):
+                    log(f"Asset cho {Path(segment['image_path']).name} không hợp lệ: {segment['asset_reason']}")
+                    segment["asset_reason"] = ""
+                if segment.get("kind") == "asset":
+                    segment["kind"] = "static"
+                segment_plan = _effect_plan(effects.get(_image_key(Path(segment["image_path"]))))
+                if segment_plan is not None and plan_has_motion(segment_plan):
+                    segment["kind"] = "motion"
                 media, is_video, is_degraded = _render_segment(
                     Path(segment["image_path"]),
-                    _effect_plan(effects.get(_image_key(Path(segment["image_path"])))),
+                    segment_plan,
                     image_frames=image_frames,
                     profile=profile,
                     work=work,
@@ -708,6 +815,99 @@ def build_background(
         segments=list(unique.values()),
         degraded=degraded,
     )
+
+
+def background_status(prepared: dict, output_dir: Path | None = None) -> dict:
+    """Return ready/stale/missing for the current inputs without rendering."""
+    output_text = str(output_dir or prepared.get("output_dir") or "").strip()
+    if not output_text:
+        return {"state": "missing", "reason": "chưa chọn thư mục xuất"}
+    output_dir = Path(output_text).expanduser()
+    profile = get_profile(prepared.get("output_profile"))
+    try:
+        plan = _plan_background(prepared, output_dir=output_dir, profile=profile)
+    except Exception as error:
+        return {"state": "missing", "reason": str(error)}
+    meta = prepared.get("background_render")
+    meta = meta if isinstance(meta, dict) else None
+    base = {
+        "hash": plan.identity_hash,
+        "path": str(plan.target),
+        "total_frames": plan.total_frames,
+        "cover_frames": plan.cover_frames,
+        "song_frames": plan.song_frames,
+        "image_frames": plan.image_frames,
+        "profile_id": profile.id,
+        "fps": profile.fps,
+    }
+    if meta is None:
+        return {**base, "state": "missing", "reason": "chưa dựng nền"}
+    if str(meta.get("hash") or "") != plan.identity_hash:
+        return {**base, "state": "stale", "reason": "ảnh, hiệu ứng, profile hoặc thời lượng đã đổi"}
+    for key in ("total_frames", "cover_frames", "song_frames", "image_frames"):
+        if int(meta.get(key) or 0) != int(getattr(plan, key)):
+            return {**base, "state": "stale", "reason": "số frame đã đổi"}
+    if str(meta.get("profile_fingerprint") or "") != plan.profile_fingerprint:
+        return {**base, "state": "stale", "reason": "profile đã đổi"}
+    valid, reason = _validate_background(
+        plan.target,
+        width=profile.width,
+        height=profile.height,
+        fps=profile.fps,
+        total_frames=plan.total_frames,
+    )
+    if not valid:
+        state = "stale" if plan.target.exists() else "missing"
+        return {**base, "state": state, "reason": reason}
+    if bool(meta.get("degraded")):
+        return {**base, "state": "stale", "reason": "nền trước dùng ảnh tĩnh fallback"}
+    return {**base, "state": "ready", "reason": ""}
+
+
+def cleanup_backgrounds(
+    output_dir: Path,
+    *,
+    keep_hashes: list[str] | None = None,
+    project_paths: list[Path] | None = None,
+    min_age_days: float = 7.0,
+) -> list[str]:
+    """Delete unreferenced old backgrounds; keep current/unknown ones."""
+    output_dir = Path(output_dir).expanduser()
+    root = output_dir / BACKGROUND_DIR
+    if not root.is_dir():
+        return []
+    referenced = {_hex_from_hash(value) for value in (keep_hashes or []) if str(value).strip()}
+    project_files = list(output_dir.glob("*.karaoke.json"))
+    for path in project_paths or []:
+        try:
+            if Path(path).is_file() and Path(path) not in project_files:
+                project_files.append(Path(path))
+        except OSError:
+            continue
+    for project_path in project_files:
+        try:
+            data = json.loads(Path(project_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        meta = data.get("background_render") if isinstance(data, dict) else None
+        if isinstance(meta, dict) and str(meta.get("hash") or "").strip():
+            referenced.add(_hex_from_hash(str(meta["hash"])))
+    cutoff = time.time() - max(0.0, float(min_age_days)) * 86400
+    deleted: list[str] = []
+    for path in root.glob("background-*.mp4"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        hex_value = path.stem.removeprefix("background-")
+        if hex_value in referenced:
+            continue
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+            path.unlink()
+            deleted.append(path.name)
+        except OSError:
+            continue
+    return deleted
 
 
 def render_picture(

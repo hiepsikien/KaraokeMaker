@@ -1,6 +1,6 @@
 # Ghép nền có hiệu ứng trước, ghép lời sau
 
-Trạng thái: **Phase 1 đã triển khai; Phase 2–3 chưa**
+Trạng thái: **Phase 1–4 đã triển khai**
 Ngày: 2026-11-21
 Phạm vi: pipeline xuất video Karaoke (Living Still → nền → lời → tiếng)
 
@@ -29,9 +29,9 @@ Phạm vi: pipeline xuất video Karaoke (Living Still → nền → lời → t
 `docs/living-still-mvp.md` khi có xung đột. Contract chính thức nằm ở §2–§4;
 phần pseudocode/tên hàm chỉ là implementation note.
 
-**Phạm vi Phase 1:** tách pipeline + background identity + frame-exact + lưu
-background ra output. **Chưa làm asset store** (Phase 3a/3b); `asset_id` trong
-schema chỉ là chỗ chừa, Phase 1 luôn render inline từ `effect_plan`.
+**Phạm vi đã code:** tách pipeline + background identity + frame-exact + lưu
+background ra output (Phase 1); API/UI dựng nền, trạng thái và cleanup (Phase 2);
+asset store + picker Studio (Phase 3); regression/test/docs (Phase 4).
 
 ---
 
@@ -753,31 +753,32 @@ total_duration = total_frames / fps
 ### 5.1. API
 
 Job hiện tại là in-memory (12 job, TTL 6 giờ), nên trạng thái nền **không được**
-chỉ dựa vào job record. Thiết kế đề xuất:
+chỉ dựa vào job record. API đã triển khai theo job, nhưng trạng thái bền vững vẫn
+đọc từ project + `ffprobe`:
 
 | Endpoint | Việc |
 |---|---|
-| `POST /api/projects/background` | Dựng nền cho project; yêu cầu `output_dir`; trả `job_id` để poll progress |
-| `POST /api/projects/background/status` | Đọc `background_render` + `inputs_fingerprint` + `ffprobe`; trả ready/stale/missing và lý do |
+| `POST /api/jobs/{id}/background` | Dựng nền; body `{rebuild: bool}`; chạy thread, cập nhật `background.percent` |
+| `GET /api/jobs/{id}/background` | Trả ready/stale/missing/building/error + lý do, hash, frame counts |
+| `GET /api/jobs/{id}` | Bao gồm field `background` để UI poll chung |
 | `POST /api/jobs/{id}/render` | Nếu nền thiếu/stale hoặc `rebuild_background=true` thì dựng trước, rồi overlay lời + mux |
-| `POST /api/projects/background/cleanup` | Dọn bản nền cũ, giữ file được tham chiếu |
+| `POST /api/jobs/{id}/background/cleanup` | Dọn bản nền cũ, giữ file được tham chiếu + file mới |
 | `POST /api/studio/assets` | Lưu clip full-res từ Studio thành asset |
 | `GET /api/studio/assets` | Liệt kê asset để chọn |
+| `GET /api/studio/assets/{id}/clip` | Serve clip asset để preview |
 | `DELETE /api/studio/assets/{id}` | Xoá asset |
 
 - Trạng thái bền vững đọc từ project + probe file; job record chỉ để progress tạm
   thời. Sau restart, UI vẫn biết nền có sẵn hay không.
-- `POST /api/projects/background` nhận `project_path` (hoặc `job_id` nếu dự án chưa
-  lưu) và `output_dir`; không phụ thuộc job record để biết nền đã có hay chưa.
-- Status endpoint dùng `inputs_fingerprint` (path + size + mtime + visual hash +
-  frame counts) để so sánh rẻ; chỉ tính identity đầy đủ khi build/render. Không
-  hash lại toàn bộ ảnh mỗi lần poll.
+- Trạng thái nền được recompute từ `background_render` + inputs hiện tại; không
+  tin tuyệt đối vào job record.
 - Mọi endpoint ghi ra `output_dir` phải qua `ensure_allowed()` và `grant()` giống
   `render_job` (`pipeline.py:483–490`). `project_path` client gửi cũng phải qua
   `ensure_allowed()`/`grant_project_paths`.
-- `RenderRequest` cần thêm `rebuild_background: bool = false` (hoặc endpoint riêng)
-  để nút “Dựng lại nền” hoạt động; hiện model chỉ có `lines/output_dir/format`.
-- Cleanup phải kiểm tra `ensure_allowed()` trước khi quét/xoá.
+- `RenderRequest` đã có `rebuild_background: bool = false` để nút “Dựng lại nền”
+  hoạt động.
+- Cleanup kiểm tra `ensure_allowed()` trước khi quét/xoá; có age guard và giữ file
+  không xác định được tham chiếu.
 
 ### 5.2. Progress
 
@@ -790,7 +791,7 @@ chỉ dựa vào job record. Thiết kế đề xuất:
 
 ### 5.3. UI
 
-- **Khai báo / Hiệu ứng nền**:
+- **Biên tập / Nền có hiệu ứng**:
   - 3 trạng thái: **chưa có nền**, **có nền đúng hash**, **có nền nhưng stale**.
   - Stale phải kèm lý do: đổi ảnh, đổi profile, đổi độ dài audio, đổi cover…
   - Nút **Dựng nền**, **Dựng lại nền**.
@@ -819,13 +820,14 @@ chỉ dựa vào job record. Thiết kế đề xuất:
 | Phase | Nội dung | Thời lượng |
 |---|---|---|
 | **1. Tách render + lưu nền ra output** | Tạo `karaoke/background.py`; tách `build_background()`, `render_picture()`, `mux_outputs()`; `RenderResult`/`BackgroundRef`; `living.visual_plan_hash` + bump cache version; static/cover identity; frame-exact trim; ffprobe validate; `source_output_dir` copy; progress; test | **2,5–3,5 ngày** |
-| **2. API/UI trạng thái nền** | Endpoint project-scoped, status ready/stale/missing + lý do, progress 2 giai đoạn, nút Dựng nền/Dựng lại/Mở thư mục/Dọn bản cũ, `rebuild_background`, tự dựng khi xuất nếu thiếu | 1–1,5 ngày |
-| **3a. Asset store + API** | Thư mục asset ổn định, copy khỏi cache, atomic + lock, metadata/fingerprint, verify khi dùng, API list/delete (Phase 1 chưa làm) | 1–1,5 ngày |
+| **2. API/UI trạng thái nền** | Endpoint theo job, status ready/stale/missing + lý do, progress 2 giai đoạn, nút Dựng nền/Dựng lại/Mở thư mục/Dọn bản cũ, `rebuild_background`, tự dựng khi xuất nếu thiếu | 1–1,5 ngày |
+| **3a. Asset store + API** | Thư mục asset ổn định, copy khỏi cache, atomic + lock, metadata/fingerprint, verify khi dùng, API list/delete | 1–1,5 ngày |
 | **3b. UI picker + validate** | Picker trong `AiEffects`, cảnh báo profile/loop/renderer, fallback inline | 1–1,5 ngày |
 | **4. Regression + docs** | Test cũ xanh, test `tests.test_background`, cập nhật README/docs | 0,5–1 ngày |
 
-**Phase 1 chưa làm asset store.** `asset_id`/`segments.asset_id` chỉ là chỗ chừa;
-Phase 1 luôn render inline từ `effect_plan`.
+**Phase 1–3 đã triển khai.** Phase 1 làm nền tảng render; Phase 2 thêm API/UI
+dựng nền, trạng thái, `rebuild_background`, cleanup; Phase 3 thêm asset store và
+picker Studio. Phase 4 đã chạy regression, test mới và cập nhật README/docs.
 
 **Bản tối thiểu có giá trị ngay:** Phase 1 + 2 (khoảng **3,5–5 ngày**).
 
@@ -835,8 +837,9 @@ Khi đó đã có đúng luồng:
 dựng nền có hiệu ứng → ghép lời → ghép tiếng
 ```
 
-và sửa lời không phải render lại hiệu ứng. Để dùng đúng **clip đã render từ
-Studio**, cần thêm Phase 3a + 3b. Tổng bản đầy đủ khoảng **6–9 ngày**.
+và sửa lời không phải render lại hiệu ứng. Phase 3a + 3b đã nối **clip đã render
+từ Studio** qua `asset_id`; asset không khớp profile/thời lượng sẽ fallback inline.
+Tổng bản đầy đủ khoảng **6–9 ngày**.
 
 ---
 
@@ -911,7 +914,7 @@ Studio**, cần thêm Phase 3a + 3b. Tổng bản đầy đủ khoảng **6–9 
 ### 7.4. Lệnh test chuẩn
 
 ```bash
-.venv-karaoke/bin/python -m unittest tests.test_director tests.test_project_effects tests.test_living tests.test_background
+.venv-karaoke/bin/python -m unittest tests.test_director tests.test_project_effects tests.test_living tests.test_background tests.test_assets
 .venv-karaoke/bin/python -m unittest tests.test_karaoke
 cd web && npx tsc --noEmit
 ```
@@ -946,7 +949,7 @@ Thêm `tests.test_background` vào README / `docs/living-still-mvp.md`.
 
 | Câu hỏi | Quyết định | Hệ quả |
 |---|---|---|
-| Nguồn clip hiệu ứng | **Asset Studio + fallback `effect_plan`** | Cần Phase 3a/3b. Export vẫn chạy nếu asset thiếu/hỏng. |
+| Nguồn clip hiệu ứng | **Asset Studio + fallback `effect_plan`** | Đã triển khai asset store + picker; export vẫn chạy nếu asset thiếu/hỏng. |
 | Nơi lưu background | **`<output_dir>/.karaoke-media/backgrounds/`** | Không dùng cache làm nơi lưu chính. Cần cảnh báo dung lượng, nút dọn bản cũ. |
 | Nhiều profile | **Một profile mỗi lần xuất**, key theo `profile_fingerprint` | UI chỉ chọn một; schema/API sẵn sàng cho nhiều profile sau này. |
 | Video nền bên ngoài | **Chưa làm ở bản này**, để Phase sau | Schema có thể chừa `background_video`; chưa thêm UI/validate. |
@@ -974,7 +977,7 @@ Thêm `tests.test_background` vào README / `docs/living-still-mvp.md`.
 
 ### 9.2. Hệ quả của việc ưu tiên asset Studio
 
-- Phase 3a/3b là bắt buộc để đạt đúng mục tiêu “dùng clip đã render”.
+- Asset store + picker đã triển khai; asset phải đúng profile/thời lượng/renderer.
 - Asset phải lưu kèm `asset_version`, `profile_fingerprint`, `loop_duration`
   (duration đã render), `asset_frames`, `fit_mode`, `fps`, `strip_rect`,
   `renderer_version`, `image_hash`, `clip_size`, `clip_sha256`.

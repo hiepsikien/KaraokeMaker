@@ -11,7 +11,10 @@ pipeline.py  # kiểm tra file, mở bản đã sửa, căn lời, xuất video
 align.py     # căn lời vào vocal và kéo chữ về đoạn đang hát
 lyrics.py    # bỏ dòng ghi chú, so khớp tên bài
 media.py     # ảnh, thời lượng, chuyển vocal sang WAV
-render.py    # dựng hình, đếm ngược, chữ và hai file MP4
+living.py    # hiệu ứng nền động
+assets.py    # asset clip Studio ổn định
+background.py # dựng nền trước, overlay lời, ghép tiếng
+render.py    # dựng chữ, đếm ngược, overlay và mux
 ```
 
 Chạy từ thư mục gốc của repo:

@@ -31,6 +31,21 @@ def cache_root(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+def data_root(*parts: str) -> Path:
+    """Stable app data (assets) that must not be pruned like a cache."""
+    override = os.environ.get("KARAOKE_DATA_DIR", "").strip()
+    if override:
+        base = Path(override).expanduser()
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / APP_NAME
+    elif os.name == "nt":
+        appdata = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
+        base = Path(appdata) / APP_NAME
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "karaokemaker"
+    return base.joinpath(*parts)
+
+
 def _stat_mtime(entry: Path) -> float | None:
     try:
         return entry.stat().st_mtime

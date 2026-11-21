@@ -71,6 +71,7 @@ export function StudioWorkspace() {
   const [renderingMode, setRenderingMode] = useState<"preview" | "standard" | "">("");
   const [renderHint, setRenderHint] = useState("");
   const [previews, setPreviews] = useState<Record<string, PreviewResult>>({});
+  const [savingPath, setSavingPath] = useState("");
   const renderAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -242,6 +243,42 @@ export function StudioWorkspace() {
     }
   }
 
+  async function saveAsset(effect: BackgroundEffect) {
+    const preview = previews[effect.image_path];
+    if (!preview || savingPath) return;
+    const suggested = fileName(effect.image_path).replace(/\.[^.]+$/, "");
+    const name = window.prompt("Tên asset", suggested);
+    if (name === null) return;
+    setSavingPath(effect.image_path);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/studio/assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preview_id: preview.id,
+          name,
+          image_path: effect.image_path,
+          image_hash: effect.image_hash,
+          effect_plan: effect.effect_plan,
+          duration: preview.duration,
+          output_profile: profile,
+        }),
+      });
+      if (!response.ok) {
+        setError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { asset: { id: string; name: string } };
+      setNotice(`Đã lưu asset “${data.asset.name}”. Asset sẽ hiện trong phần Hiệu ứng nền của dự án Karaoke.`);
+    } catch {
+      setError("Không lưu được asset. Kiểm tra server Python đang chạy.");
+    } finally {
+      setSavingPath("");
+    }
+  }
+
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]">
       <section className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
@@ -261,7 +298,7 @@ export function StudioWorkspace() {
         </div>
 
         <p className="text-sm leading-6 text-[var(--muted)]">
-          Ảnh được chọn qua hộp thoại của máy. Preview chỉ dựng hiệu ứng, chưa gắn asset vào dự án Karaoke.
+          Ảnh được chọn qua hộp thoại của máy. Preview chỉ dựng hiệu ứng; bấm Lưu thành asset để dùng clip trong dự án Karaoke.
         </p>
 
         {images.length === 0 ? (
@@ -296,6 +333,7 @@ export function StudioWorkspace() {
             images={images}
             effects={effects}
             outputProfile={profile}
+            imageDuration={String(STANDARD_DURATION)}
             onEffectsChange={(updater) => {
               setEffects((current) => updater(current));
               // The old preview belongs to the previous plan; never show it
@@ -366,6 +404,18 @@ export function StudioWorkspace() {
                         <p className="text-xs text-[var(--muted)]">
                           {preview.width}×{preview.height} · {preview.duration}s
                         </p>
+                        <button
+                          type="button"
+                          onClick={() => saveAsset(effect)}
+                          disabled={Boolean(savingPath) || preview.duration < STANDARD_DURATION}
+                          className="w-full rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] transition hover:bg-black/25 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {savingPath === effect.image_path
+                            ? "Đang lưu asset…"
+                            : preview.duration < STANDARD_DURATION
+                              ? `Render bản chuẩn ${STANDARD_DURATION}s để lưu asset`
+                              : "Lưu thành asset"}
+                        </button>
                       </div>
                     )}
                   </li>
@@ -392,8 +442,8 @@ export function StudioWorkspace() {
         </section>
 
         <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 text-xs leading-5 text-[var(--muted)]">
-          Preview là video ngắn {PREVIEW_DURATION} giây, lặp lại. Chưa lưu asset hay plan vào dự án Karaoke; bước nối
-          asset vào dự án là P2.
+          Preview là video ngắn {PREVIEW_DURATION} giây, lặp lại. Render bản chuẩn rồi bấm “Lưu thành asset” để dùng
+          clip đó trong phần Hiệu ứng nền của dự án Karaoke.
         </section>
       </aside>
     </div>

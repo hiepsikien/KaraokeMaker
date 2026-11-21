@@ -9,7 +9,7 @@ export default function StudioPage() {
           <h1 className="mt-2 text-4xl font-semibold tracking-tight">AI Studio</h1>
         </div>
         <p className="hidden max-w-sm text-right text-sm leading-6 text-[var(--muted)] sm:block">
-          Tạo nền sống từ ảnh tĩnh; preview 16:9 hoặc 9:16; chưa lưu asset vào dự án.
+          Tạo nền sống từ ảnh tĩnh; preview 16:9/9:16; lưu clip thành asset để dùng trong dự án Karaoke.
         </p>
       </header>
       <StudioWorkspace />
