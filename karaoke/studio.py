@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 
 from karaoke.cache import cache_root, prune
-from karaoke.living import plan_has_motion, render_motion_loop
+from karaoke.living import MOTION_CACHE_VERSION, plan_has_motion, render_motion_loop
 from karaoke.profiles import get_profile
 
 CACHE_ROOT = cache_root("studio")
@@ -30,7 +30,7 @@ MAX_DURATION = 30.0
 # The Studio is a preview surface; full-resolution export stays in Karaoke.
 # 640 px keeps a 4 s multi-effect preview well under the proxy timeout.
 PREVIEW_MAX_SIDE = 640
-PREVIEW_VERSION = "preview_v26"
+PREVIEW_VERSION = f"preview_v27_m{MOTION_CACHE_VERSION}"
 # Serialize preview renders in this process. Two simultaneous 1080p renders
 # otherwise fight over CPU and can race on cache materialization.
 _PREVIEW_LOCK = threading.Lock()
@@ -87,6 +87,61 @@ def cache_path(preview_id: str) -> Path:
     return CACHE_ROOT / f"{preview_id}.mp4"
 
 
+def _preview_inputs(
+    image_path: Path,
+    plan: dict,
+    *,
+    duration: float,
+    output_profile: str,
+    full_resolution: bool,
+) -> tuple[Path, float, object, int, int, str]:
+    if not isinstance(plan, dict):
+        raise StudioError("Kế hoạch hiệu ứng phải là một object JSON.")
+    items = plan.get("items")
+    if not isinstance(items, list):
+        raise StudioError("Kế hoạch hiệu ứng thiếu danh sách items.")
+    if not plan_has_motion(plan):
+        raise StudioError(
+            "Kế hoạch chưa có hiệu ứng nào render được "
+            "(mưa/khói/gió/sáng/tuyết/nước/lửa/tàn lửa/chim/tia nắng/sương mù)."
+        )
+    seconds = _validate_duration(duration)
+    profile = get_profile(output_profile)
+    source = Path(image_path).expanduser()
+    if not source.is_file():
+        raise StudioError(f"Không thấy ảnh: {source}")
+    image_hash = _file_hash(source)
+    plan_hash = _plan_hash(plan)
+    duration_key = f"{seconds:g}"
+    if full_resolution:
+        preview_width, preview_height = profile.width, profile.height
+    else:
+        preview_width, preview_height = _preview_size(profile)
+    preview_id = hashlib.sha256(
+        f"{image_hash}|{plan_hash}|{duration_key}|{profile.id}|"
+        f"{PREVIEW_VERSION}|{preview_width}x{preview_height}".encode("utf-8")
+    ).hexdigest()
+    return source, seconds, profile, preview_width, preview_height, preview_id
+
+
+def preview_id_for(
+    image_path: Path,
+    plan: dict,
+    *,
+    duration: float,
+    output_profile: str,
+    full_resolution: bool = True,
+) -> str:
+    """Recompute the preview id for a request (used to validate asset saves)."""
+    return _preview_inputs(
+        image_path,
+        plan,
+        duration=duration,
+        output_profile=output_profile,
+        full_resolution=full_resolution,
+    )[5]
+
+
 def render_preview(
     image_path: Path,
     plan: dict,
@@ -106,35 +161,13 @@ def render_preview(
     :class:`StudioError` for invalid input; filesystem/FFmpeg failures propagate
     as their native exceptions.
     """
-    if not isinstance(plan, dict):
-        raise StudioError("Kế hoạch hiệu ứng phải là một object JSON.")
-    items = plan.get("items")
-    if not isinstance(items, list):
-        raise StudioError("Kế hoạch hiệu ứng thiếu danh sách items.")
-    if not plan_has_motion(plan):
-        raise StudioError(
-            "Kế hoạch chưa có hiệu ứng nào render được "
-            "(mưa/khói/gió/sáng/tuyết/nước/lửa/tàn lửa/chim/tia nắng/sương mù)."
-        )
-
-    seconds = _validate_duration(duration)
-    profile = get_profile(output_profile)
-
-    source = Path(image_path).expanduser()
-    if not source.is_file():
-        raise StudioError(f"Không thấy ảnh: {source}")
-
-    image_hash = _file_hash(source)
-    plan_hash = _plan_hash(plan)
-    duration_key = f"{seconds:g}"
-    if full_resolution:
-        preview_width, preview_height = profile.width, profile.height
-    else:
-        preview_width, preview_height = _preview_size(profile)
-    preview_id = hashlib.sha256(
-        f"{image_hash}|{plan_hash}|{duration_key}|{profile.id}|"
-        f"{PREVIEW_VERSION}|{preview_width}x{preview_height}".encode("utf-8")
-    ).hexdigest()
+    source, seconds, profile, preview_width, preview_height, preview_id = _preview_inputs(
+        image_path,
+        plan,
+        duration=duration,
+        output_profile=output_profile,
+        full_resolution=full_resolution,
+    )
 
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     destination = CACHE_ROOT / f"{preview_id}.mp4"

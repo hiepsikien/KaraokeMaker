@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from karaoke.assets import (
+    AssetError,
     delete_asset,
     list_assets,
     load_asset,
@@ -57,7 +59,23 @@ class AssetStoreTests(unittest.TestCase):
         self.root = Path(self.folder.name)
         self.image = make_image(self.root / "bg.png")
         self.preview = self.root / "preview.mp4"
-        self.preview.write_bytes(b"fake-mp4-data")
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x180:d=2:r=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(self.preview),
+            ],
+            check=True,
+            capture_output=True,
+        )
         self.profile = small_profile()
         self.env = patch.dict(os.environ, {"KARAOKE_DATA_DIR": str(self.root / "data")})
         self.env.start()
@@ -65,8 +83,11 @@ class AssetStoreTests(unittest.TestCase):
         self.preview_patch.start()
         self.profile_patch = patch("karaoke.assets.get_profile", return_value=self.profile)
         self.profile_patch.start()
+        self.preview_id_patch = patch("karaoke.assets.preview_id_for", return_value="a" * 64)
+        self.preview_id_patch.start()
 
     def tearDown(self):
+        self.preview_id_patch.stop()
         self.profile_patch.stop()
         self.preview_patch.stop()
         self.env.stop()
@@ -163,6 +184,50 @@ class AssetStoreTests(unittest.TestCase):
         self.assertEqual(build.segments[0]["kind"], "asset")
         self.assertEqual(build.segments[0]["asset_id"], meta["id"])
 
+    def test_asset_rejects_preview_id_that_does_not_match_inputs(self):
+        with patch("karaoke.assets.preview_id_for", return_value="b" * 64):
+            with self.assertRaises(AssetError):
+                save_asset_from_preview(
+                    preview_id="a" * 64,
+                    name="x",
+                    image_path=self.image,
+                    image_hash=_file_hash(self.image),
+                    effect_plan={"items": [{"effect": "rain", "params": {"intensity": 0.5}}]},
+                    duration=2.0,
+                    output_profile="landscape_1080p",
+                )
+
+    def test_asset_rejects_wrong_duration(self):
+        import subprocess
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x180:d=2:r=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(self.preview),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        with self.assertRaises(AssetError):
+            save_asset_from_preview(
+                preview_id="a" * 64,
+                name="x",
+                image_path=self.image,
+                image_hash=_file_hash(self.image),
+                effect_plan={"items": [{"effect": "rain", "params": {"intensity": 0.5}}]},
+                duration=5.0,
+                output_profile="landscape_1080p",
+            )
+
     def test_asset_rejects_missing_preview(self):
         self.preview.unlink()
         with self.assertRaises(Exception):
@@ -220,10 +285,25 @@ class BackgroundStatusTests(unittest.TestCase):
         stale = background_status(self.prepared, self.root)
         self.assertEqual(stale["state"], "stale", stale)
 
+    def test_status_ready_when_file_is_valid_but_metadata_is_missing(self):
+        prepared = dict(self.prepared)
+        prepared.pop("background_render")
+        status = background_status(prepared, self.root)
+        self.assertEqual(status["state"], "ready", status)
+
     def test_status_missing_when_file_is_removed(self):
         self.build.path.unlink()
         status = background_status(self.prepared, self.root)
         self.assertEqual(status["state"], "missing", status)
+
+    def test_cleanup_aborts_when_a_project_json_is_broken(self):
+        bad = self.root / "broken.karaoke.json"
+        bad.write_text("{not-json", encoding="utf-8")
+        old = self.root / ".karaoke-media/backgrounds" / f"background-{'d' * 64}.mp4"
+        old.write_bytes(b"old")
+        os.utime(old, (0, 0))
+        self.assertEqual(cleanup_backgrounds(self.root, min_age_days=1), [])
+        self.assertTrue(old.is_file())
 
     def test_cleanup_keeps_referenced_and_recent_files(self):
         old_unreferenced = self.root / ".karaoke-media/backgrounds" / f"background-{'b' * 64}.mp4"

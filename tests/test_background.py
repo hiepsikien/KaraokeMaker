@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -11,13 +12,12 @@ from unittest.mock import patch
 from PIL import Image
 
 from karaoke.background import (
-    BACKGROUND_CRF,
-    BACKGROUND_PRESET,
     BackgroundBuild,
     BackgroundRef,
     RenderResult,
     _frames,
     _motion_identity,
+    background_status,
     build_background,
     profile_fingerprint,
     render_videos,
@@ -54,8 +54,8 @@ def make_wav(path: Path, seconds: float = 1.0, rate: int = 8000) -> Path:
     return path
 
 
-def make_image(path: Path, size=(320, 180)) -> Path:
-    Image.new("RGB", size, (30, 60, 90)).save(path)
+def make_image(path: Path, size=(320, 180), color=(30, 60, 90)) -> Path:
+    Image.new("RGB", size, color).save(path)
     return path
 
 
@@ -147,8 +147,11 @@ class BackgroundBuildTests(unittest.TestCase):
             "image_duration": 0.5,
             "output_profile": "landscape_1080p",
         }
+        self.profile_patch = patch("karaoke.background.get_profile", return_value=self.profile)
+        self.profile_patch.start()
 
     def tearDown(self):
+        self.profile_patch.stop()
         self.folder.cleanup()
 
     def test_static_background_is_frame_exact_silent_and_reused(self):
@@ -251,29 +254,122 @@ class BackgroundBuildTests(unittest.TestCase):
             video = next(stream for stream in meta["streams"] if stream["codec_type"] == "video")
             self.assertEqual(video["nb_frames"], "12")
 
+    def test_two_threads_build_same_background_without_corruption(self):
+        def run():
+            return build_background(
+                self.prepared,
+                output_dir=self.root,
+                profile=self.profile,
+                log=lambda _message: None,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = list(pool.map(lambda _index: run(), range(2)))
+        self.assertEqual(first.path, second.path)
+        meta = probe(first.path)
+        video = next(stream for stream in meta["streams"] if stream["codec_type"] == "video")
+        self.assertEqual(video["nb_frames"], "12")
+
+    def test_missing_cover_falls_back_to_first_background(self):
+        prepared = dict(self.prepared)
+        prepared["cover_image"] = ""
+        build = build_background(
+            prepared,
+            output_dir=self.root,
+            profile=self.profile,
+            log=lambda _message: None,
+        )
+        self.assertTrue(build.path.is_file())
+        self.assertEqual(build.total_frames, 12)
+        prepared["background_render"] = build.to_project()
+        status = background_status(prepared, self.root)
+        self.assertEqual(status["state"], "ready", status)
+
     def test_output_dir_change_copies_valid_background(self):
+        from karaoke.access import clear_grants, grant
+
         old_dir = self.root / "old"
         new_dir = self.root / "new"
+        grant(self.root)
         prepared = dict(self.prepared)
         prepared["output_dir"] = str(old_dir)
-        old = build_background(
-            prepared,
-            output_dir=old_dir,
-            profile=self.profile,
-            log=lambda _message: None,
-        )
-        ref = BackgroundRef.from_project(old.to_project(), new_dir)
-        copied = build_background(
-            prepared,
-            output_dir=new_dir,
-            profile=self.profile,
-            background=ref,
-            log=lambda _message: None,
-        )
+        try:
+            old = build_background(
+                prepared,
+                output_dir=old_dir,
+                profile=self.profile,
+                log=lambda _message: None,
+            )
+            ref = BackgroundRef.from_project(old.to_project(), new_dir)
+            logs: list[str] = []
+            copied = build_background(
+                prepared,
+                output_dir=new_dir,
+                profile=self.profile,
+                background=ref,
+                log=logs.append,
+            )
+        finally:
+            clear_grants()
+        self.assertTrue(any("copy" in line.lower() for line in logs), logs)
         self.assertEqual(copied.hash, old.hash)
         self.assertTrue(copied.path.is_file())
         self.assertTrue(old.path.is_file())
         self.assertNotEqual(copied.path, old.path)
+
+    def test_duplicate_images_keep_full_cycle_order(self):
+        second = make_image(self.root / "bg2.png", color=(200, 10, 10))
+        prepared = dict(self.prepared)
+        prepared["background_images"] = [str(self.image), str(second), str(self.image)]
+        prepared["image_duration"] = 0.3
+        first = build_background(
+            prepared,
+            output_dir=self.root,
+            profile=self.profile,
+            log=lambda _message: None,
+        )
+        self.assertEqual(len(first.segments), 2)
+        simpler = dict(prepared)
+        simpler["background_images"] = [str(self.image), str(second)]
+        second_build = build_background(
+            simpler,
+            output_dir=self.root,
+            profile=self.profile,
+            log=lambda _message: None,
+        )
+        self.assertNotEqual(first.hash, second_build.hash)
+        self.assertEqual(first.total_frames, second_build.total_frames)
+        self.assertTrue(first.path.is_file())
+
+    def test_finish_render_record_propagates_background_metadata(self):
+        from karaoke.server import _finish_render_record, _public_job
+
+        build = build_background(
+            self.prepared,
+            output_dir=self.root,
+            profile=self.profile,
+            log=lambda _message: None,
+        )
+        prepared = dict(self.prepared)
+        prepared["output_dir"] = str(self.root)
+        prepared["background_render"] = build.to_project()
+        record = {
+            "id": "job",
+            "status": "rendering",
+            "created": 0,
+            "log": [],
+            "error": "",
+            "outputs": None,
+            "lines": [],
+            "duration": 0,
+            "prepared": {},
+            "project": None,
+        }
+        _finish_render_record(record, prepared, [], {"vocal": "a", "instrumental": "b"})
+        self.assertEqual(record["status"], "done")
+        self.assertEqual(record["prepared"]["background_render"]["hash"], build.hash)
+        public = _public_job(record)
+        self.assertEqual(public["background"]["state"], "ready")
 
     def test_render_job_persists_background_metadata(self):
         from karaoke.access import clear_grants, grant
@@ -330,6 +426,39 @@ class BackgroundBuildTests(unittest.TestCase):
             self.assertEqual(outputs["background"], str(build.path))
         finally:
             clear_grants()
+
+    def test_render_videos_writes_requested_container_extensions(self):
+        lines = [
+            {
+                "text": "một",
+                "start": 0.1,
+                "end": 0.5,
+                "words": [{"text": "một", "start": 0.1, "end": 0.5}],
+            }
+        ]
+        with patch("karaoke.background.get_profile", return_value=self.profile):
+            result = render_videos(
+                lines=lines,
+                title="Bài",
+                artist="Tác giả",
+                cover_line="",
+                cover_photo=self.image,
+                background_images=[self.image],
+                original_audio=self.audio,
+                instrumental_audio=self.audio,
+                output_dir=self.root,
+                vocal_name="vocal.mov",
+                instrumental_name="inst.mkv",
+                cover_duration=0.2,
+                image_duration=0.5,
+                background_effects=[],
+                output_profile="landscape_1080p",
+                log=lambda _message: None,
+            )
+        self.assertEqual(result.vocal.suffix, ".mov")
+        self.assertEqual(result.instrumental.suffix, ".mkv")
+        self.assertTrue(result.vocal.is_file())
+        self.assertTrue(result.instrumental.is_file())
 
     def test_background_ref_derives_current_and_source_paths(self):
         old_dir = self.root / "old"

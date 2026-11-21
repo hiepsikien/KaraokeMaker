@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from pathlib import Path
 from karaoke.cache import data_root
 from karaoke.living import MOTION_CACHE_VERSION
 from karaoke.profiles import get_profile, normalize_profile_id
-from karaoke.studio import cache_path, is_preview_id
+from karaoke.studio import cache_path, is_preview_id, preview_id_for
 
 ASSET_VERSION = 1
 ASSET_ID_PATTERN = re.compile(r"^bg_[0-9a-f]{32}$")
@@ -63,6 +64,56 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _probe_clip(path: Path) -> dict:
+    process = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,width,height,r_frame_rate,avg_frame_rate,nb_frames,pix_fmt,duration:format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode != 0:
+        raise AssetError(process.stderr.strip() or "ffprobe không đọc được clip.")
+    try:
+        data = json.loads(process.stdout or "{}")
+    except json.JSONDecodeError as error:
+        raise AssetError("ffprobe trả dữ liệu không hợp lệ.") from error
+    streams = data.get("streams") or []
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not videos or audios:
+        raise AssetError("Clip asset phải có video và không có audio.")
+    video = videos[0]
+    fps_text = str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")
+    try:
+        left, right = fps_text.split("/", 1)
+        fps = float(left) / max(1.0, float(right))
+    except ValueError:
+        fps = 0.0
+    frames_text = str(video.get("nb_frames") or "").strip()
+    frames = int(frames_text) if frames_text.isdigit() else 0
+    duration = video.get("duration") or (data.get("format") or {}).get("duration")
+    try:
+        seconds = float(duration)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    return {
+        "width": int(video.get("width") or 0),
+        "height": int(video.get("height") or 0),
+        "fps": fps,
+        "frames": frames,
+        "duration": seconds,
+        "pix_fmt": str(video.get("pix_fmt") or ""),
+    }
+
+
 def _profile_payload(profile) -> str:
     return json.dumps(
         {
@@ -71,10 +122,6 @@ def _profile_payload(profile) -> str:
             "fps": profile.fps,
             "fit_mode": profile.fit_mode,
             "strip_rect": list(ASSET_STRIP_RECT),
-            "cover_title_size": profile.cover_title_size,
-            "cover_artist_size": profile.cover_artist_size,
-            "cover_line_size": profile.cover_line_size,
-            "cover_max_width": profile.cover_max_width,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -123,17 +170,41 @@ def save_asset_from_preview(
     """Copy a rendered Studio preview into the stable asset store."""
     if not is_preview_id(preview_id):
         raise AssetError("Preview không hợp lệ.")
+    profile = get_profile(normalize_profile_id(output_profile))
+    try:
+        expected_id = preview_id_for(
+            image_path,
+            effect_plan,
+            duration=duration,
+            output_profile=profile.id,
+            full_resolution=True,
+        )
+    except Exception as error:
+        raise AssetError(f"Không kiểm tra được preview: {error}") from error
+    if expected_id != preview_id:
+        raise AssetError("Preview không khớp ảnh, effect plan, thời lượng hoặc profile.")
     source = cache_path(preview_id)
     if not source.is_file() or source.stat().st_size <= 0:
         raise AssetError("Không thấy clip preview. Hãy render bản chuẩn trước.")
+    probe = _probe_clip(source)
+    expected_frames = max(1, int(round(float(duration) * profile.fps)))
+    if probe["width"] != profile.width or probe["height"] != profile.height:
+        raise AssetError("Clip preview không đúng kích thước profile.")
+    if abs(probe["fps"] - profile.fps) > 0.05:
+        raise AssetError("Clip preview không đúng fps profile.")
+    if probe["pix_fmt"] != "yuv420p":
+        raise AssetError("Clip preview không phải yuv420p.")
+    frames = probe["frames"] or expected_frames
+    if abs(frames - expected_frames) > 1:
+        raise AssetError("Clip preview không đúng thời lượng đã khai.")
+    if probe["frames"] and abs(probe["duration"] - frames / profile.fps) > 1.5 / profile.fps:
+        raise AssetError("Clip preview có duration không khớp số frame.")
 
-    profile = get_profile(normalize_profile_id(output_profile))
-    frames = max(1, int(round(float(duration) * profile.fps)))
     asset_id = "bg_" + uuid.uuid4().hex
     folder = asset_dir(asset_id)
     folder.mkdir(parents=True, exist_ok=False)
     destination = folder / CLIP_FILE
-    temporary = folder / f".{CLIP_FILE}.{os.getpid()}.tmp"
+    temporary = folder / f".{CLIP_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         with _LOCK:
             shutil.copy2(source, temporary)
@@ -145,6 +216,7 @@ def save_asset_from_preview(
             "name": str(name or "").strip() or f"Nền {asset_id[-6:]}",
             "source_image": str(Path(image_path).expanduser()),
             "image_hash": image_hash,
+            "preview_id": preview_id,
             "effect_plan": effect_plan if isinstance(effect_plan, dict) else {},
             "asset_version": ASSET_VERSION,
             "profile_id": profile.id,
@@ -173,7 +245,7 @@ def save_asset_from_preview(
 
 
 def _write_meta(folder: Path, meta: dict) -> None:
-    temporary = folder / f".{META_FILE}.{os.getpid()}.tmp"
+    temporary = folder / f".{META_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     temporary.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, folder / META_FILE)
 
@@ -235,7 +307,7 @@ def validate_asset(
         frames = int(meta.get("asset_frames") or 0)
     except (TypeError, ValueError):
         frames = 0
-    if abs(frames - image_frames) > 1:
+    if frames < image_frames or frames - image_frames > 1:
         return False, "thời lượng clip không khớp"
     try:
         path = clip_path(meta)

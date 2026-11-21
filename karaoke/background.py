@@ -20,12 +20,24 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - macOS/Linux
+    msvcrt = None
+
 from karaoke.ambient import MAX_DURATION as MAX_AMBIENT_DURATION
 from karaoke.ambient import synthesize as synthesize_ambience
+from karaoke.access import AccessError, ensure_allowed
 from karaoke.assets import (
     asset_fingerprint,
     clip_path as asset_clip_path,
@@ -57,6 +69,34 @@ BACKGROUND_DIR = Path(".karaoke-media") / "backgrounds"
 
 _HASH_CACHE: dict[tuple[str, int, int], str] = {}
 _HASH_LOCK = threading.Lock()
+_BUILD_LOCK = threading.Lock()
+
+
+@contextmanager
+def _file_lock(path: Path):
+    """Best-effort cross-process lock for one output directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            handle.seek(0)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - Windows
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            handle.close()
 
 
 def _sha256_text(text: str) -> str:
@@ -114,7 +154,6 @@ def profile_fingerprint(profile: RenderProfile) -> str:
         "height": profile.height,
         "fps": profile.fps,
         "fit_mode": profile.fit_mode,
-        "strip_rect": list(profile.strip_rect),
         "cover_title_size": profile.cover_title_size,
         "cover_artist_size": profile.cover_artist_size,
         "cover_line_size": profile.cover_line_size,
@@ -190,7 +229,6 @@ def _motion_identity(
         "height": profile.height,
         "fps": profile.fps,
         "fit_mode": profile.fit_mode,
-        "strip_rect": list(profile.strip_rect),
     }
     return _sha256_text(_canonical(payload))
 
@@ -388,7 +426,7 @@ def _validate_background(
         return False, "pix_fmt không phải yuv420p"
     raw_frames = str(video.get("nb_frames") or "").strip()
     if raw_frames.isdigit() and int(raw_frames) > 0:
-        if abs(int(raw_frames) - total_frames) > 1:
+        if int(raw_frames) != total_frames:
             return False, "nb_frames không khớp"
     else:
         duration = video.get("duration") or (meta.get("format") or {}).get("duration")
@@ -460,7 +498,7 @@ def _assemble_background(
     command = ["ffmpeg", "-y"]
     for media, is_video, _frames_count in slots:
         if is_video:
-            command += ["-stream_loop", "-1", "-i", str(media)]
+            command += ["-i", str(media)]
         else:
             command += ["-loop", "1", "-framerate", str(fps), "-i", str(media)]
     filters: list[str] = []
@@ -492,8 +530,6 @@ def _assemble_background(
         "-color_range",
         "tv",
         "-an",
-        "-movflags",
-        "+faststart",
         str(destination),
     ]
     _run(command, log)
@@ -507,12 +543,17 @@ def _plan_background(
 ) -> BackgroundPlan:
     """Resolve inputs, clip identities and the expected background path."""
     cover_text = str(prepared.get("cover_image") or "").strip()
-    cover_photo = Path(cover_text).expanduser() if cover_text else None
+    cover_path = Path(cover_text).expanduser() if cover_text else None
+    cover_photo = cover_path if cover_path is not None and cover_path.is_file() else None
     background_images = [
         Path(str(item)).expanduser()
         for item in (prepared.get("background_images") or [])
-        if str(item).strip()
+        if str(item).strip() and Path(str(item)).expanduser().is_file()
     ]
+    if cover_photo is None and background_images:
+        # Same fallback as pipeline._images_for_render: the first background
+        # doubles as the cover when no cover file is set/missing.
+        cover_photo = background_images[0]
     if not background_images:
         if cover_photo is None:
             raise MediaError("Chưa có ảnh nền để dựng background.")
@@ -619,7 +660,7 @@ def _plan_background(
     )
 
 
-def build_background(
+def _build_background_impl(
     prepared: dict,
     *,
     output_dir: Path,
@@ -665,8 +706,13 @@ def build_background(
             background_path = target
             log("Dùng lại background đã có.")
         elif background is not None and background.source_output_dir is not None:
-            candidate = _background_path(background.source_output_dir, identity_hex)
-            if candidate.resolve() == target.resolve():
+            candidate = None
+            try:
+                ensure_allowed(background.source_output_dir)
+                candidate = _background_path(background.source_output_dir, identity_hex)
+            except AccessError:
+                log("Bỏ qua background cũ: thư mục nguồn nằm ngoài vùng được phép.")
+            if candidate is not None and candidate.resolve() == target.resolve():
                 candidate = None
             valid, reason = (
                 _validate_background(
@@ -680,7 +726,7 @@ def build_background(
                 else (False, "cùng thư mục xuất")
             )
             if candidate is not None and valid:
-                temporary = target.parent / f".{identity_hex}.{os.getpid()}.copy.tmp.mp4"
+                temporary = target.parent / f".{identity_hex}.{os.getpid()}.{uuid.uuid4().hex}.copy.tmp.mp4"
                 try:
                     shutil.copy2(candidate, temporary)
                     os.replace(temporary, target)
@@ -692,7 +738,7 @@ def build_background(
                 log(f"Không copy được background cũ: {reason}. Sẽ dựng lại.")
 
     if background_path is None:
-        rendered: list[tuple[Path, bool]] = []
+        rendered: dict[str, tuple[Path, bool]] = {}
         work = Path(tempfile.mkdtemp(prefix=".karaoke-bg-", dir=str(output_dir)))
 
         def segment_progress(index: int, done: int, total: int) -> None:
@@ -700,7 +746,7 @@ def build_background(
                 return
             try:
                 fraction = index + (done / total if total else 1.0)
-                progress(fraction, len(unique))
+                progress(fraction * 0.7, len(unique))
             except Exception:
                 pass
 
@@ -727,7 +773,7 @@ def build_background(
                             media = None
                         if media is not None and media.is_file():
                             segment["kind"] = "asset"
-                            rendered.append((media, True))
+                            rendered[_image_key(Path(segment["image_path"]))] = (media, True)
                             continue
                     log(f"Không dùng được asset {asset_id}: {segment.get('asset_reason') or 'không hợp lệ'}")
                     segment["asset_id"] = None
@@ -752,7 +798,7 @@ def build_background(
                 segment["kind"] = "static-fallback" if is_degraded else segment["kind"]
                 segment["degraded"] = is_degraded
                 degraded = degraded or is_degraded
-                rendered.append((media, is_video))
+                rendered[_image_key(Path(segment["image_path"]))] = (media, is_video)
 
             slots: list[tuple[Path, bool, int]] = []
             if cover_frames > 0 and cover_photo is not None:
@@ -760,14 +806,20 @@ def build_background(
             remaining = song_frames
             index = 0
             while remaining > 0:
-                media, is_video = rendered[index % len(rendered)]
+                key = order[index % len(order)]
+                media, is_video = rendered[key]
                 frames = min(image_frames, remaining)
                 slots.append((media, is_video, frames))
                 remaining -= frames
                 index += 1
 
-            temporary = target.parent / f".{identity_hex}.{os.getpid()}.tmp.mp4"
+            temporary = target.parent / f".{identity_hex}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
             log(f"Đang dựng background {total_frames} frame cho {len(unique)} ảnh.")
+            if progress is not None:
+                try:
+                    progress(len(unique) * 0.7, len(unique))
+                except Exception:
+                    pass
             try:
                 _assemble_background(
                     slots,
@@ -788,6 +840,11 @@ def build_background(
                 if not valid:
                     raise MediaError(f"Background dựng xong nhưng không hợp lệ: {reason}")
                 os.replace(temporary, target)
+                if progress is not None:
+                    try:
+                        progress(len(unique), len(unique))
+                    except Exception:
+                        pass
             finally:
                 temporary.unlink(missing_ok=True)
             background_path = target
@@ -817,6 +874,19 @@ def build_background(
     )
 
 
+def build_background(*args, **kwargs) -> BackgroundBuild:
+    """Serialize builds in this process; unique temp names protect cross-process."""
+    output_dir = kwargs.get("output_dir")
+    lock_path = None
+    if output_dir is not None:
+        lock_path = Path(output_dir).expanduser() / BACKGROUND_DIR / ".build.lock"
+    with _BUILD_LOCK:
+        if lock_path is None:
+            return _build_background_impl(*args, **kwargs)
+        with _file_lock(lock_path):
+            return _build_background_impl(*args, **kwargs)
+
+
 def background_status(prepared: dict, output_dir: Path | None = None) -> dict:
     """Return ready/stale/missing for the current inputs without rendering."""
     output_text = str(output_dir or prepared.get("output_dir") or "").strip()
@@ -841,6 +911,15 @@ def background_status(prepared: dict, output_dir: Path | None = None) -> dict:
         "fps": profile.fps,
     }
     if meta is None:
+        valid, reason = _validate_background(
+            plan.target,
+            width=profile.width,
+            height=profile.height,
+            fps=profile.fps,
+            total_frames=plan.total_frames,
+        )
+        if valid:
+            return {**base, "state": "ready", "reason": "thiếu metadata; lần dựng/xuất sau sẽ ghi lại"}
         return {**base, "state": "missing", "reason": "chưa dựng nền"}
     if str(meta.get("hash") or "") != plan.identity_hash:
         return {**base, "state": "stale", "reason": "ảnh, hiệu ứng, profile hoặc thời lượng đã đổi"}
@@ -888,7 +967,9 @@ def cleanup_backgrounds(
         try:
             data = json.loads(Path(project_path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            continue
+            # If a project cannot be read, keep every old background rather
+            # than risking deletion of a file it still references.
+            return []
         meta = data.get("background_render") if isinstance(data, dict) else None
         if isinstance(meta, dict) and str(meta.get("hash") or "").strip():
             referenced.add(_hex_from_hash(str(meta["hash"])))
@@ -1013,6 +1094,7 @@ def render_videos(
         "image_duration": image_duration,
         "output_profile": profile.id,
     }
+    log("1/2 Đang dựng nền có hiệu ứng.")
     build = build_background(
         prepared,
         output_dir=output_dir,
@@ -1022,6 +1104,7 @@ def render_videos(
         log=log,
     )
 
+    log("2/2 Đang ghép lời và tiếng.")
     work = Path(tempfile.mkdtemp(prefix=".karaoke-render-", dir=str(output_dir)))
     try:
         picture = render_picture(

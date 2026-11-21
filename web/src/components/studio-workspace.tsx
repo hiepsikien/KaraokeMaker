@@ -148,7 +148,13 @@ export function StudioWorkspace() {
         return;
       }
       const data = (await response.json()) as PreviewResult;
-      setPreviews((current) => ({ ...current, [effect.image_path]: data }));
+      setPreviews((current) => {
+        const existing = current[effect.image_path];
+        if (existing && existing.duration >= STANDARD_DURATION && data.duration < STANDARD_DURATION) {
+          return current;
+        }
+        return { ...current, [effect.image_path]: data };
+      });
     } catch {
       if (!controller.signal.aborted) {
         setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");

@@ -774,6 +774,20 @@ def _public_job(record: dict) -> dict:
     }
 
 
+def _finish_render_record(record: dict, prepared: dict, lines: list[dict], outputs: dict) -> None:
+    try:
+        background = background_status(prepared, prepared.get("output_dir"))
+    except Exception:
+        background = None
+    with _lock:
+        record["status"] = "done"
+        record["outputs"] = outputs
+        record["lines"] = lines
+        record["prepared"] = prepared
+        if background is not None:
+            record["background"] = background
+
+
 def _store_job(record: dict) -> dict:
     with _lock:
         _prune_jobs()
@@ -1028,7 +1042,7 @@ def get_job(job_id: str):
         record = _jobs.get(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Không thấy việc này.")
-        return _public_job(record)
+    return _public_job(record)
 
 
 @app.get("/api/jobs/{job_id}/background")
@@ -1283,11 +1297,7 @@ def start_render(job_id: str, body: RenderRequest):
     def worker() -> None:
         try:
             outputs = render_job(prepared, lines, log, export_options=export_options)
-            with _lock:
-                record["status"] = "done"
-                record["outputs"] = outputs
-                record["lines"] = lines
-                record["prepared"]["output_dir"] = prepared.get("output_dir") or record["prepared"].get("output_dir")
+            _finish_render_record(record, prepared, lines, outputs)
         except JobError as error:
             with _lock:
                 record["status"] = "error"

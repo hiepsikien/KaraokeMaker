@@ -490,7 +490,12 @@ export function AiEffects({
     onEffectsChange((current) => current.filter((item) => item.image_path !== selectedImage));
   }
 
-  const imageAssets = assets.filter((asset) => asset.source_image === selectedImage);
+  const imageAssets = assets.filter(
+    (asset) =>
+      asset.source_image === selectedImage ||
+      Boolean(existingEffect?.image_hash && asset.image_hash === existingEffect.image_hash) ||
+      Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
+  );
   const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
   const assetSeconds = selectedAsset?.asset_frames && selectedAsset?.fps
     ? selectedAsset.asset_frames / selectedAsset.fps
@@ -509,6 +514,50 @@ export function AiEffects({
         item.image_path === selectedImage ? { ...item, asset_id: assetId || null } : item,
       ),
     );
+  }
+
+  function useAssetForImage(assetId: string) {
+    if (!selectedImage) return;
+    const asset = imageAssets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const plan =
+      asset.effect_plan ||
+      ({
+        version: 1,
+        image_hash: asset.image_hash,
+        profile_id: outputProfile,
+        fit_transform: {
+          mode: "contain",
+          source_width: asset.width || 1920,
+          source_height: asset.height || 1080,
+          frame_width: 1920,
+          frame_height: 1080,
+          scale: 1,
+          offset_x: 0,
+          offset_y: 0,
+        },
+        items: [],
+      } as BackgroundEffect["effect_plan"]);
+    const effect: BackgroundEffect = {
+      image_path: selectedImage,
+      image_hash: asset.image_hash,
+      effect_prompt: "Clip Studio",
+      effect_consent_receipt: {
+        timestamp: new Date().toISOString(),
+        image_hash: asset.image_hash,
+        provider: "studio",
+        model: "asset",
+      },
+      selected_object_ids: [],
+      effect_plan: plan,
+      model: "studio",
+      created: new Date().toISOString(),
+      asset_id: asset.id,
+    };
+    onEffectsChange((current) => [
+      ...current.filter((item) => item.image_path !== selectedImage),
+      effect,
+    ]);
   }
 
   if (images.length === 0) {
@@ -758,6 +807,29 @@ export function AiEffects({
               ) : null}
             </div>
           )}
+        </div>
+      )}
+
+      {!existingEffect && selectedImage && imageAssets.length > 0 && (
+        <div className="space-y-1 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-2">
+          <p className="text-xs text-[var(--gold)]">Dùng clip Studio cho ảnh này</p>
+          <select
+            className={fieldClass}
+            defaultValue=""
+            onChange={(event) => {
+              if (event.target.value) useAssetForImage(event.target.value);
+            }}
+          >
+            <option value="">Chọn clip đã render…</option>
+            {imageAssets.map((asset) => (
+              <option key={asset.id} value={asset.id}>
+                {asset.name}
+              </option>
+            ))}
+          </select>
+          <p className="text-[11px] leading-4 text-[var(--muted)]">
+            Chọn clip sẽ tạo một hiệu ứng chỉ dùng asset, không cần phân tích Gemini.
+          </p>
         </div>
       )}
 

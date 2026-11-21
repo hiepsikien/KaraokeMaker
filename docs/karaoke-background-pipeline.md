@@ -256,10 +256,11 @@ background_identity = sha256(
   `living.py` dùng **cùng hàm** này cho cache key **và seed**, để clip inline khớp
   với Studio preview.
 - `profile_fingerprint`: hash các thông số **ảnh hưởng hình nền**: `width`,
-  `height`, `fps`, `fit_mode`, `strip_rect`, **và các thông số cover**:
+  `height`, `fps`, `fit_mode`, **và các thông số cover**:
   `cover_title_size`, `cover_artist_size`, `cover_line_size`, `cover_max_width`,
-  `COVER_RENDER_VERSION`. Không đưa font size/safe area của lời vào đây; các thông
-  số đó nằm trong `text_profile_fingerprint` dùng cho tầng 3.
+  `COVER_RENDER_VERSION`. Không đưa `strip_rect`/font size/safe area của lời vào
+  đây vì effect render với strip rỗng; thông số chữ nằm trong
+  `text_profile_fingerprint` dùng cho tầng 3.
 - `cover_identity`: hash cover image + title/artist/cover_line + `cover_frames` +
   `profile_fingerprint` (phần cover). Nếu `cover_frames = 0` thì dùng `"no-cover"`
   và bỏ title/artist/cover khỏi hash.
