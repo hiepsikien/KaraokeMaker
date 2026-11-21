@@ -772,6 +772,27 @@ class WindFlagTests(unittest.TestCase):
         )
         self.assertTrue(all(spec["cloth"] for spec in specs))
 
+    def test_manual_wind_movable_object_is_targeted(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.55}}],
+            objects=[
+                object_entry(
+                    "manual-1",
+                    "khăn",
+                    (0.55, 0.10, 0.75, 0.40),
+                    affordances=["wind_movable"],
+                    pivot=(0.65, 0.11),
+                )
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
+        self.assertTrue(specs[0]["cloth"])
+
     def test_zero_wind_speed_freezes_the_target(self):
         plan = effect_plan(
             [{"effect": "wind", "target_ids": ["flag-1"], "params": {"intensity": 0.35, "speed": 0.0}}],
