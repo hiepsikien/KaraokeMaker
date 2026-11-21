@@ -208,7 +208,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 17
+MOTION_CACHE_VERSION = 22
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1474,7 +1474,6 @@ def _wind_specs(
                 "bottom": bottom,
                 "box": (x1, y1, x2, y2),
                 "mask": mask,
-                "prevent": prevent[top:bottom, left:right],
                 "cloth": cloth,
                 "rigid": rigid,
                 "pivot_local": (pivot_x, pivot_y),
@@ -1509,11 +1508,9 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
             warped = np.asarray(rotated, dtype=np.float32)
         mask = spec["mask"][:, :, None]
         blended = original * (1.0 - mask) + warped * mask
-        prevent = spec.get("prevent")
-        if prevent is not None:
-            # Rigid flags still sway, but protected faces/text stay pinned.
-            keep = prevent[:, :, None]
-            blended = blended * keep + original * (1.0 - keep)
+        # Rigid flags/banners rotate as a whole (lettering stays rigid, not
+        # warped). Applying `prevent` per pixel here pinned the protected
+        # calligraphy and made the flag look completely static.
         image.paste(Image.fromarray(np.clip(blended, 0.0, 255.0).astype(np.uint8), "RGB"), (spec["left"], spec["top"]))
     return image
 
@@ -1576,8 +1573,9 @@ def _birds_spec(
         if x2 - x1 < 2.0 or y2 - y1 < 2.0:
             continue
         # Flight room around the flock so the drift does not clip at the box.
-        pad_x = max(3.0, (x2 - x1) * 0.45)
-        pad_y = max(3.0, (y2 - y1) * 0.65)
+        # Keep the patch tight: shifting a huge sky patch reads as cloud wobble.
+        pad_x = max(4.0, (x2 - x1) * 0.18)
+        pad_y = max(4.0, (y2 - y1) * 0.30)
         left = max(0, int(math.floor(x1 - pad_x)))
         right = min(width, int(math.ceil(x2 + pad_x)))
         top = max(0, int(math.floor(y1 - pad_y)))
@@ -1588,7 +1586,12 @@ def _birds_spec(
         ImageDraw.Draw(mask_image).ellipse(
             [x1 - left, y1 - top, x2 - left, y2 - top], fill=255
         )
-        feather = max(2.0, min(right - left, bottom - top) * 0.35)
+        # A tight feather keeps most of the flock patch at full strength; a
+        # huge blur made the drift practically invisible.
+        feather = max(
+            2.0,
+            min(min(right - left, bottom - top) * 0.22, height * 0.02),
+        )
         mask = (
             np.asarray(
                 mask_image.filter(ImageFilter.GaussianBlur(feather)),
@@ -1606,18 +1609,18 @@ def _birds_spec(
                 "right": right,
                 "bottom": bottom,
                 "mask": mask,
-                # 1-3 px at 640x360, capped by the flock size.
+                # ~5 px drift / 2.5 px bob at 640x360; scales with output size.
                 "amp_x": max(
-                    0.8, min(height * 0.004, (right - left) * 0.05)
+                    1.4, min(height * 0.016, (right - left) * 0.08)
                 )
                 * gain,
                 "amp_y": max(
-                    0.5, min(height * 0.0025, (bottom - top) * 0.04)
+                    0.8, min(height * 0.008, (bottom - top) * 0.06)
                 )
                 * gain,
                 # Integer cycles keep the drift seamless at the loop point.
-                "cycles": max(1, int(round(seconds / 16.0))),
-                "bob_cycles": max(2, int(round(seconds / 8.0))),
+                "cycles": max(1, int(round(seconds / 5.0))),
+                "bob_cycles": max(2, int(round(seconds / 3.0))),
                 "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "bob_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
             }
@@ -2301,10 +2304,14 @@ def _sunrays_spec(
     dx = grid_x.astype(np.float32) - cx
     dy = grid_y.astype(np.float32) - cy
     distance = np.sqrt(dx * dx + dy * dy) / max(1.0, radius)
-    falloff = np.clip(1.0 - distance, 0.0, 1.0) ** 1.6
-    glow = np.exp(-((distance / 0.34) ** 2))
+    # Rays live in the sky ring around the core, not on the blown-out sun.
+    falloff = (
+        np.clip(1.0 - distance, 0.0, 1.0) ** 0.7
+        * np.clip(distance / 0.10, 0.0, 1.0)
+    )
+    glow = np.exp(-((distance / 0.36) ** 2))
     rays = max(8, int(round(10 + 6 * intensity)))
-    theta = rays * np.arctan2(dy, dx)
+    angle = np.arctan2(dy, dx)
     mask = np.ones((bottom - top, right - left), dtype=np.float32)
     if prevent is not None:
         mask *= prevent[top:bottom, left:right]
@@ -2314,13 +2321,18 @@ def _sunrays_spec(
         "top": top,
         "right": right,
         "bottom": bottom,
-        "theta": theta.astype(np.float32),
+        "rays": rays,
+        "angle": angle.astype(np.float32),
+        # Uneven spokes break the "perfect cartoon starburst" look.
+        "ray_weights": rng.uniform(0.45, 1.0, rays).astype(np.float32),
         "falloff": falloff.astype(np.float32),
         "glow": glow.astype(np.float32),
         "mask": mask,
-        "base_alpha": 0.025 + 0.045 * intensity,
-        "glow_alpha": 0.018 + 0.032 * intensity,
-        "cycles": max(1, int(round(seconds / 16.0))),
+        "base_alpha": 0.18 + 0.12 * intensity,
+        "glow_alpha": 0.14 + 0.08 * intensity,
+        "shadow": 0.02 + 0.025 * intensity,
+        # A shorter cycle still reads in a 4 s preview while staying slow.
+        "cycles": max(1, int(round(seconds / 5.0))),
         "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
         "color": np.asarray((255.0, 208.0, 150.0), dtype=np.float32),
     }
@@ -2330,24 +2342,35 @@ def _apply_sunrays(frame: np.ndarray, spec: dict | None, u: float) -> np.ndarray
     if spec is None:
         return frame
     cycle = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
-    breathe = 0.55 + 0.45 * math.sin(cycle)
-    rotate = 0.035 * math.sin(cycle + 1.7)
-    spokes = (0.5 + 0.5 * np.cos(spec["theta"] + rotate)) ** 3
+    breathe = 0.72 + 0.28 * math.sin(cycle)
+    rotate = 0.03 * math.sin(cycle + 1.7)
+    phase = spec["angle"] * spec["rays"] + rotate
+    spokes = (0.5 + 0.5 * np.cos(phase)) ** 2.0
+    ray_index = (
+        np.floor(phase / (2.0 * math.pi) + 0.5).astype(np.int32)
+        % spec["rays"]
+    )
+    spokes *= spec["ray_weights"][ray_index]
     alpha = (
         spec["base_alpha"] * spokes * spec["falloff"]
         + spec["glow_alpha"] * spec["glow"]
     ) * breathe
     alpha *= spec["mask"]
-    alpha = np.clip(alpha, 0.0, 0.30)
+    alpha = np.clip(alpha, 0.0, 0.42)
+    # Slightly darken the gaps between rays: on a bright sunset sky an
+    # additive-only ray pattern is invisible.
+    shadow = (
+        (1.0 - spokes) * spec["falloff"] * spec["shadow"] * breathe * spec["mask"]
+    )
+    shadow = np.clip(shadow, 0.0, 0.10)
     left, top = spec["left"], spec["top"]
     right, bottom = spec["right"], spec["bottom"]
     crop = frame[top:bottom, left:right]
-    # Keep highlights from clipping: already-bright pixels receive less light.
-    luminance = crop.mean(axis=2) / 255.0
-    weight = 1.0 - 0.55 * luminance
-    frame[top:bottom, left:right] = crop + spec["color"] * (
-        alpha * weight
-    )[:, :, None]
+    # Screen blend adds warm light without clipping the bright sun itself:
+    # bright pixels change little, mid-tone sky/clouds show the rays clearly.
+    tint = (spec["color"] / 255.0)[None, None, :]
+    lit = crop + (255.0 - crop) * (alpha[:, :, None] * tint)
+    frame[top:bottom, left:right] = lit * (1.0 - shadow[:, :, None])
     return frame
 
 
@@ -2462,7 +2485,7 @@ def _fog_spec(
         "fine": fine,
         "drift": max(1.5, 12.0 * size_scale),
         "fine_drift": max(1.0, 6.0 * size_scale),
-        "cycles": max(1, int(round(seconds / 6.0))),
+        "cycles": max(1, int(round(seconds / 5.0))),
         "fine_cycles": max(1, int(round(seconds / 4.0))),
         "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
         "phase2": float(rng.uniform(0.0, 2.0 * math.pi)),

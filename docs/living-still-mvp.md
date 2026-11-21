@@ -350,7 +350,7 @@ speed * T = k * span
 ## 10.1 Sửa theo feedback Studio (ảnh hải chiến)
 
 - **Effect không còn mask strip lời**: background motion render trước lyric overlay với
-  `strip_rect=None`, nên sóng/nước/khói hiện đầy đủ; text/bar vẽ sau vẫn đảm bảo đọc được.
+  `strip_rect=(0,0,0,0)` (zero-height = không mask), nên sóng/nước/khói hiện đầy đủ; text/bar vẽ sau vẫn đảm bảo đọc được.
 - **Inventory v3**: thêm ships/boats, sails, masts, flags, ropes, fire/flames, smoke,
   embers; affordances `wind_movable`, `fire/burn`, `container/steam_source`; region
   `liquid` phủ toàn bộ mặt nước, thêm `fire`/`smoke`. Cache inventory bump v3.
@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=17`, `PREVIEW_VERSION=preview_v14`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=22`, `PREVIEW_VERSION=preview_v19`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -428,8 +428,20 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Lyric + safe area**: text dùng `safe_left`/`safe_right`; một font size chung
   cho cả bài, tự thu nhỏ nếu dòng quá dài hoặc vượt số hàng của strip. Thêm wrap
   nhiều hàng thay vì tối đa 2.
-- **Effect trước lời**: background motion render với `strip_rect=None`; effect
-  được phép chạy phía sau dải lời, text/bar vẽ sau vẫn đảm bảo đọc được.
+- **Effect trước lời**: background motion render với `strip_rect=(0,0,0,0)`.
+  Zero-height strip là sentinel "không mask"; `None` sẽ rơi vào legacy mask đáy
+  280 px và làm mất chuyển động nước gần chữ. Effect được phép chạy phía sau dải
+  lời, text/bar vẽ sau vẫn đảm bảo đọc được.
+- **Nước gần đáy**: sửa regression do `strip_rect=None`; mask nước giờ phủ tới
+  foreground và vẫn giữ occluder cho thuyền/người/cọc.
+- **Chim rõ hơn**: patch bám sát flock hơn, feather nhỏ, drift ~5 px và bob ~2,5 px
+  ở 640×360 (scale theo output); chu kỳ nguyên nên loop khít.
+- **Tia nắng rõ hơn trong 4 s**: ray pattern có trọng số ngẫu nhiên từng tia,
+  screen blend + shadow nhẹ giữa các tia, breathing luôn ở mức thấy được; anchor
+  theo object sun hoặc vùng sáng ấm nhất.
+- **Cờ/buồm rung lại**: bỏ lớp ghim `prevent` lên rigid patch. Flag/banner xoay
+  nguyên khối nên chữ không bị warp; cloth vẫn dùng `prevent` trong mask. Đây là
+  regression từ lần sửa review trước.
 - **Protect object**: ember sprite bị clip theo toàn bộ `prevent` (không chỉ tâm);
   wind rigid vẫn áp `prevent` lên patch để mặt/chữ được bảo vệ.
 - **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung

@@ -109,6 +109,18 @@ class MaskTests(unittest.TestCase):
         # Allowed outdoor area.
         self.assertGreater(float(mask[108, 480]), 0.0)
 
+    def test_zero_height_strip_disables_the_legacy_bottom_mask(self):
+        plan = base_plan()
+        transform = living._fit_transform(plan, (640, 360))
+        no_strip = living._build_protect_mask(
+            plan, transform, 640, 360, (0, 0, 0, 0)
+        )
+        legacy = living._build_protect_mask(plan, transform, 640, 360)
+        # Same pixel: visible when the strip is explicitly disabled, masked by
+        # the legacy bottom-280px fallback.
+        self.assertGreater(float(no_strip[342, 512]), 0.5)
+        self.assertEqual(float(legacy[342, 512]), 0.0)
+
 
 class RainLoopTests(unittest.TestCase):
     def setUp(self):
@@ -498,6 +510,12 @@ class WindFlagTests(unittest.TestCase):
         first = np.asarray(living._wind_frame(image.copy(), specs, 0.0), dtype=np.float32)
         second = np.asarray(living._wind_frame(image.copy(), specs, 0.25), dtype=np.float32)
         self.assertGreater(float(np.abs(second - first).max()), 0.0)
+        # The protected calligraphy area itself must still sway as a rigid
+        # whole; pinning it made the flag look completely static.
+        self.assertGreater(
+            float(np.abs(second[5:31, 60:91] - first[5:31, 60:91]).max()),
+            0.0,
+        )
 
 
 class EmbersTests(unittest.TestCase):

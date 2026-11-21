@@ -30,7 +30,7 @@ MAX_DURATION = 30.0
 # The Studio is a preview surface; full-resolution export stays in Karaoke.
 # 640 px keeps a 4 s multi-effect preview well under the proxy timeout.
 PREVIEW_MAX_SIDE = 640
-PREVIEW_VERSION = "preview_v14"
+PREVIEW_VERSION = "preview_v19"
 # Serialize preview renders in this process. Two simultaneous 1080p renders
 # otherwise fight over CPU and can race on cache materialization.
 _PREVIEW_LOCK = threading.Lock()
@@ -140,8 +140,9 @@ def render_preview(
             height=preview_height,
             fps=profile.fps,
             fit_mode=profile.fit_mode,
-            # Studio preview has no lyric strip: show the full background loop.
-            strip_rect=None,
+            # Studio preview has no lyric strip. A zero-height strip explicitly
+            # disables masking; None would fall back to the legacy bottom mask.
+            strip_rect=(0, 0, 0, 0),
         )
     if result is None:
         raise StudioError(
