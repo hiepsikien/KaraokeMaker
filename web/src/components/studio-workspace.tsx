@@ -152,7 +152,7 @@ export function StudioWorkspace() {
     }
     if (opened.asset_frames && opened.fps) {
       const seconds = opened.asset_frames / opened.fps;
-      setStandardDuration(seconds >= 12 ? 16 : 8);
+      setStandardDuration(Math.max(1, Math.round(seconds)));
     }
     setEffects((current) => [
       ...current.filter((item) => item.image_path !== opened.source_image),
@@ -436,6 +436,9 @@ export function StudioWorkspace() {
           >
             <option value={8}>8 giây</option>
             <option value={16}>16 giây</option>
+            {standardDuration !== 8 && standardDuration !== 16 && (
+              <option value={standardDuration}>{standardDuration} giây (theo asset)</option>
+            )}
           </select>
         </label>
 
@@ -559,7 +562,8 @@ export function StudioWorkspace() {
 
         <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 text-xs leading-5 text-[var(--muted)]">
           Preview là video ngắn {PREVIEW_DURATION} giây, lặp lại. Render bản chuẩn rồi bấm “Lưu thành asset” để dùng
-          clip đó trong phần Hiệu ứng nền của dự án Karaoke.
+          clip đó trong phần Hiệu ứng nền của dự án Karaoke. Tốc độ gió trên preview ngắn có thể khác bản chuẩn
+          8/16 giây; render bản chuẩn khi cần kiểm tra đúng tốc độ.
         </section>
       </aside>
       </div>

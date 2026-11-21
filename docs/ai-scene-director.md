@@ -469,6 +469,11 @@ và gắn pivot ở nút buộc/gốc tóc/vai/gấu áo. Nếu prompt nhắc m�
 inventory chung bỏ sót, director chạy thêm **một lượt inventory focus** cho đúng target
 đó (có cache riêng), rồi merge object vào inventory gốc.
 
+Object thủ công có nhãn cloth/hair (khăn, tóc, vải…) đi đường warp; nhãn khác
+(hoa, cây, vật thể…) đi đường rigid translate/rotate để cả khối đung đưa. Mask
+được mở rộng theo amplitude để silhouette không bị ghim ở viền. Preview 4s và bản
+chuẩn 8/16s có số cycle khác nhau; render bản chuẩn khi cần kiểm tra đúng tốc độ.
+
 Mỗi hiệu ứng là một **recipe** có schema tham số. Thêm hiệu ứng mới = thêm recipe +
 perception cue + test, không cần sửa toàn pipeline.
 

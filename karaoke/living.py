@@ -1671,8 +1671,11 @@ def _warp_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
     phase = 2.0 * math.pi * (spec["cycles"] * u) + spec["phase"]
     wave = np.sin(2.0 * math.pi * (local_x * 0.85 + local_y * 1.15) + phase)
     flutter = np.cos(2.0 * math.pi * (local_x * 1.6 - local_y * 0.6) + phase + 0.9)
-    sample_x = grid_x + spec["amplitude"] * pin * wave
-    sample_y = grid_y + spec["amplitude"] * 0.35 * pin * flutter
+    sway = float(spec.get("sway") or 0.0) * np.sin(phase)
+    sway_y = float(spec.get("sway") or 0.0) * 0.25 * np.cos(phase)
+    weight = 0.25 + 0.75 * pin
+    sample_x = grid_x + sway * weight + spec["amplitude"] * pin * wave
+    sample_y = grid_y + sway_y * weight + spec["amplitude"] * 0.35 * pin * flutter
 
     sample_x = np.clip(sample_x, 0.0, width - 1.0)
     sample_y = np.clip(sample_y, 0.0, height - 1.0)
@@ -1736,34 +1739,60 @@ def _wind_specs(
         box_width, box_height = x2 - x1, y2 - y1
         if box_width < 4.0 or box_height < 4.0:
             continue
-        pad = int(round(max(box_width, box_height) * 0.10)) + 2
+        manual = str(entry.get("source") or "").casefold() == "manual"
+        # Manual objects are cloth only when their name says cloth/hair.
+        # A hand-drawn "cây"/"hoa"/"vật thể" should sway rigidly, not ripple
+        # in place. Detected wide cloth still uses the aspect heuristic.
+        cloth = _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS) or (
+            not manual and box_width > box_height * 1.15
+        )
+        feather = max(2.0, min(box_width, box_height) * 0.06)
+        amplitude = max(
+            1.5,
+            min(24.0 * size_scale, min(box_width, box_height) * 0.12),
+        ) * (0.65 + 0.55 * intensity)
+        if speed <= 0.0:
+            # Zero speed means "wind off": keep the target selected so the plan
+            # still resolves, but do not deform the pixels.
+            amplitude = 0.0
+        sway = amplitude * 0.6
+        # The mask must be wider than the object, otherwise the feathered edge
+        # keeps the original silhouette pinned and the object only ripples
+        # inside its own box.
+        expand = int(math.ceil(amplitude + feather)) if sway > 0.0 else 0
+        pad = max(int(round(max(box_width, box_height) * 0.10)) + 2, expand + 2)
         left = max(0, int(math.floor(x1)) - pad)
         top = max(0, int(math.floor(y1)) - pad)
         right = min(width, int(math.ceil(x2)) + pad)
         bottom = min(height, int(math.ceil(y2)) + pad)
         if right - left < 4 or bottom - top < 4:
             continue
-        manual = str(entry.get("source") or "").casefold() == "manual"
-        cloth = (
-            _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS)
-            or box_width > box_height * 1.15
-            or (manual and _wind_candidate(entry))
-        )
 
         mask_image = Image.new("L", (right - left, bottom - top), 0)
         draw = ImageDraw.Draw(mask_image)
-        local = [x1 - left, y1 - top, x2 - left, y2 - top]
+        local = [
+            max(0, int(math.floor(x1 - left - expand))),
+            max(0, int(math.floor(y1 - top - expand))),
+            min(right - left, int(math.ceil(x2 - left + expand))),
+            min(bottom - top, int(math.ceil(y2 - top + expand))),
+        ]
         if cloth:
             draw.rectangle(local, fill=255)
         else:
             draw.ellipse(local, fill=255)
-        feather = max(2.0, min(box_width, box_height) * 0.06)
         base_mask = np.asarray(
             mask_image.filter(ImageFilter.GaussianBlur(feather)), dtype=np.float32
         ) / 255.0
         mask = base_mask * prevent[top:bottom, left:right]
-        base_total = float(base_mask.sum())
-        coverage = float(mask.sum()) / base_total if base_total > 0.0 else 0.0
+        # Rigid fallback depends on protection inside the actual object box, not
+        # on the expanded feather mask (which intentionally includes background
+        # so the silhouette can move).
+        core_top = max(0, int(math.floor(y1)))
+        core_left = max(0, int(math.floor(x1)))
+        core_bottom = min(height, int(math.ceil(y2)))
+        core_right = min(width, int(math.ceil(x2)))
+        core = prevent[core_top:core_bottom, core_left:core_right]
+        coverage = float(core.mean()) if core.size else 1.0
         rigid = cloth and coverage <= 0.35
         if rigid:
             # A protected flag/banner (text or calligraphy) must still be able
@@ -1783,16 +1812,6 @@ def _wind_specs(
             max(pivot_x, crop_width - 1 - pivot_x),
             max(pivot_y, crop_height - 1 - pivot_y),
         )
-        # Cloth amplitude follows the object size; pinning it to the attachment
-        # point makes flags/sails billow away from the mast instead of sliding.
-        amplitude = max(
-            1.5,
-            min(24.0 * size_scale, min(box_width, box_height) * 0.12),
-        ) * (0.65 + 0.55 * intensity)
-        if speed <= 0.0:
-            # Zero speed means "wind off": keep the target selected so the plan
-            # still resolves, but do not deform the pixels.
-            amplitude = 0.0
 
         specs.append(
             {
@@ -1805,12 +1824,14 @@ def _wind_specs(
                 "mask": mask,
                 "cloth": cloth,
                 "rigid": rigid,
+                "manual": manual,
                 "pivot_local": (pivot_x, pivot_y),
                 "max_distance": max(1.0, max_distance),
                 "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "cycles": cycles,
                 "angle": 0.0 if speed <= 0.0 else 1.5 + 3.0 * intensity,
                 "amplitude": amplitude,
+                "sway": sway,
             }
         )
     if not specs:
@@ -1826,7 +1847,8 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
         if spec["cloth"] and not spec["rigid"]:
             warped = _warp_crop(original, spec, u)
         else:
-            angle = spec["angle"] * math.sin(2.0 * math.pi * spec["cycles"] * u + spec["phase"])
+            phase = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
+            angle = spec["angle"] * math.sin(phase)
             fill = tuple(int(round(channel)) for channel in np.asarray(crop.resize((1, 1)))[0, 0])
             rotated = crop.rotate(
                 angle,
@@ -1834,7 +1856,12 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
                 center=spec["pivot_local"],
                 fillcolor=fill,
             )
-            warped = np.asarray(rotated, dtype=np.float32)
+            sway = float(spec.get("sway") or 0.0)
+            warped = _shift_crop(
+                np.asarray(rotated, dtype=np.float32),
+                sway * math.sin(phase),
+                sway * 0.25 * math.cos(phase),
+            )
         mask = spec["mask"][:, :, None]
         blended = original * (1.0 - mask) + warped * mask
         # Rigid flags/banners rotate as a whole (lettering stays rigid, not

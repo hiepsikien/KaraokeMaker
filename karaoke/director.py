@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -1023,10 +1024,21 @@ def _target_ids(labels: list[str], objects: list[dict]) -> list[str]:
                 .replace("_", " ")
                 .replace("-", " ")
             )
-            if any(part in haystack or haystack in part for part in needles):
-                object_id = str(item.get("id") or "")
-                if object_id and object_id not in ids:
-                    ids.append(object_id)
+            hay_tokens = {
+                token
+                for token in re.split(r"[^0-9a-zà-ỹ]+", haystack)
+                if len(token) >= 2
+            }
+            for part in needles:
+                if " " in part:
+                    matched = part in haystack
+                else:
+                    matched = part in hay_tokens
+                if matched:
+                    object_id = str(item.get("id") or "")
+                    if object_id and object_id not in ids:
+                        ids.append(object_id)
+                    break
     return ids
 
 
@@ -1221,13 +1233,52 @@ def _merge_inventory(base: dict, extra: dict) -> dict:
     return merged
 
 
+WIND_FOCUS_HINTS = (
+    "khăn",
+    "tóc",
+    "vạt áo",
+    "tà áo",
+    "áo choàng",
+    "ống tay",
+    "dải lụa",
+    "cloth",
+    "fabric",
+    "scarf",
+    "headband",
+    "bandana",
+    "hair",
+    "ponytail",
+    "braid",
+    "coat",
+    "robe",
+    "cape",
+    "cloak",
+    "sleeve",
+    "hem",
+    "sash",
+    "ribbon",
+    "garment",
+)
+
+
+def _wind_focus_candidate(label: str) -> bool:
+    text = _clean_text(label).casefold()
+    if not text or text in {"gió", "gio", "wind", "air", "không khí"}:
+        return False
+    return any(hint in text for hint in WIND_FOCUS_HINTS)
+
+
 def _unresolved_wind_targets(intent: dict, objects: list[dict]) -> list[str]:
     labels: list[str] = []
     for effect in intent.get("effects") or []:
         if not isinstance(effect, dict) or _effect_type(effect.get("type")) != "wind":
             continue
         for label in _clean_list(effect.get("target_labels")):
-            if label and not _target_ids([label], objects):
+            if (
+                label
+                and _wind_focus_candidate(label)
+                and not _target_ids([label], objects)
+            ):
                 labels.append(label)
     return list(dict.fromkeys(labels))
 

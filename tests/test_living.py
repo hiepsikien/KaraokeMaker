@@ -822,6 +822,47 @@ class WindFlagTests(unittest.TestCase):
         self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
         self.assertTrue(specs[0]["cloth"])
 
+    def test_manual_object_has_visible_translation_for_cloth_and_rigid(self):
+        base = Image.new("RGB", (400, 400), (30, 60, 90))
+        draw = ImageDraw.Draw(base)
+        draw.rectangle([120, 120, 280, 280], fill=(230, 40, 40))
+
+        for label in ("khăn", "cây"):
+            plan = effect_plan(
+                [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.15, "speed": 0.1}}],
+                objects=[
+                    object_entry(
+                        "manual-1",
+                        label,
+                        (0.30, 0.30, 0.70, 0.70),
+                        affordances=["wind_movable"],
+                        pivot=(0.50, 0.31),
+                        source="manual",
+                    )
+                ],
+            )
+            transform = living._fit_transform(plan, (400, 400), (400, 400), "contain")
+            prevent = np.ones((400, 400), dtype=np.float32)
+            specs = living._wind_specs(
+                plan, transform, 400, 400, 4.0, 1234, prevent, lambda _m: None
+            )
+            self.assertEqual(len(specs), 1, label)
+
+            def centroid(u: float) -> np.ndarray:
+                frame = np.asarray(living._wind_frame(base.copy(), specs, u), dtype=np.float32)
+                red = (
+                    (frame[:, :, 0] > 170)
+                    & (frame[:, :, 1] < 110)
+                    & (frame[:, :, 2] < 110)
+                )
+                points = np.argwhere(red)
+                self.assertGreater(len(points), 100, label)
+                return points.mean(axis=0)
+
+            first = centroid(0.0)
+            second = centroid(0.25)
+            self.assertGreater(float(np.linalg.norm(first - second)), 1.0, label)
+
     def test_low_wind_speed_still_animates(self):
         plan = effect_plan(
             [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.15, "speed": 0.1}}],

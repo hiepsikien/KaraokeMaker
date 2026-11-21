@@ -127,6 +127,27 @@ function usageText(usage: DirectorUsage) {
   return parts.length > 0 ? `Token · ${parts.join(" · ")}` : "";
 }
 
+function analysisFromAsset(asset: StudioAsset): DirectorAnalysis | null {
+  const plan = asset.effect_plan;
+  if (!plan) return null;
+  const objects = plan.objects || [];
+  return {
+    image: asset.source_image,
+    image_hash: asset.image_hash,
+    width: asset.width || 1920,
+    height: asset.height || 1080,
+    model: "studio",
+    scene: `Asset ${asset.name}`,
+    objects,
+    regions: plan.regions || [],
+    protect: plan.protect || [],
+    intent: null,
+    effect_plan: plan,
+    usage: null,
+    cached: true,
+  };
+}
+
 function boxRect(box: DirectorBox, width: number, height: number) {
   return {
     x: box.x1 * width,
@@ -532,8 +553,22 @@ export function AiEffects({
     renderTargetRef.current = "";
     if (target) setImageRender(target, null);
     if (resumeAsset?.asset.source_image === selectedImage) {
-      // The resume effect below populates the asset's plan for this image.
-      return;
+      // Restore the opened asset when switching back to its image.
+      const restored = analysisFromAsset(resumeAsset.asset);
+      if (restored) {
+        const plan = restored.effect_plan;
+        setAnalysis(restored);
+        setSelectedObjectIds(
+          plan.selected_object_ids?.length
+            ? plan.selected_object_ids
+            : restored.objects.map((object) => object.id),
+        );
+        setError("");
+        setDrawMode(false);
+        setDraftBox(null);
+        setManualName("");
+        return;
+      }
     }
     setAnalysis(null);
     setSelectedObjectIds([]);
@@ -546,30 +581,15 @@ export function AiEffects({
   useEffect(() => {
     if (!resumeAsset) return;
     const { asset } = resumeAsset;
-    const plan = asset.effect_plan;
-    if (!plan) return;
-    const objects = plan.objects || [];
-    const analysis: DirectorAnalysis = {
-      image: asset.source_image,
-      image_hash: asset.image_hash,
-      width: asset.width || 1920,
-      height: asset.height || 1080,
-      model: "studio",
-      scene: `Asset ${asset.name}`,
-      objects,
-      regions: plan.regions || [],
-      protect: plan.protect || [],
-      intent: null,
-      effect_plan: plan,
-      usage: null,
-      cached: true,
-    };
+    const analysis = analysisFromAsset(asset);
+    if (!analysis) return;
+    const plan = analysis.effect_plan;
     setSelectedImage(asset.source_image);
     setAnalysis(analysis);
     setSelectedObjectIds(
       plan.selected_object_ids?.length
         ? plan.selected_object_ids
-        : objects.map((object) => object.id),
+        : analysis.objects.map((object) => object.id),
     );
     setPrompt("");
     setError("");
@@ -652,19 +672,46 @@ export function AiEffects({
   }
 
   function changeObjectBox(id: string, box: DirectorBox) {
+    const update = <T extends DirectorObject,>(object: T): T => {
+      if (object.id !== id) return object;
+      const next = { ...object, box };
+      if (object.source === "manual") {
+        next.anchors = {
+          ...object.anchors,
+          pivot: { x: (box.x1 + box.x2) / 2, y: box.y1 },
+        };
+      } else if (object.anchors?.pivot) {
+        next.anchors = {
+          ...object.anchors,
+          pivot: {
+            x: Math.min(box.x2, Math.max(box.x1, object.anchors.pivot.x)),
+            y: Math.min(box.y2, Math.max(box.y1, object.anchors.pivot.y)),
+          },
+        };
+      }
+      return next;
+    };
     setAnalysis((current) => {
       if (!current) return current;
-      const objects = current.objects.map((object) =>
-        object.id === id ? { ...object, box } : object,
+      const source = current.objects.find((object) => object.id === id);
+      const objects = current.objects.map(update);
+      const protect = (current.protect || []).map((item) =>
+        source && item.label === source.label ? { ...item, box } : item,
       );
       const planObjects = current.effect_plan.objects;
-      const effectObjects = planObjects
-        ? planObjects.map((object) => (object.id === id ? { ...object, box } : object))
-        : objects;
+      const effectObjects = planObjects ? planObjects.map(update) : objects;
+      const planProtect = (current.effect_plan.protect || []).map((item) =>
+        source && item.label === source.label ? { ...item, box } : item,
+      );
       return {
         ...current,
         objects,
-        effect_plan: { ...current.effect_plan, objects: effectObjects },
+        protect,
+        effect_plan: {
+          ...current.effect_plan,
+          objects: effectObjects,
+          protect: planProtect,
+        },
       };
     });
   }
@@ -1015,10 +1062,11 @@ export function AiEffects({
         ];
       }
     }
+    const currentEffect = effects.find((item) => item.image_path === selectedImage);
     const effect: BackgroundEffect = {
       image_path: selectedImage,
       image_hash: analysis.image_hash,
-      effect_prompt: prompt.trim(),
+      effect_prompt: prompt.trim() || currentEffect?.effect_prompt || "",
       effect_consent_receipt: {
         timestamp: new Date().toISOString(),
         image_hash: analysis.image_hash,

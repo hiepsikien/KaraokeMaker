@@ -481,6 +481,29 @@ class TargetResolutionTests(unittest.TestCase):
 
 
 class FocusedInventoryTests(unittest.TestCase):
+    def test_generic_wind_labels_do_not_trigger_focus_inventory(self):
+        self.assertEqual(
+            director._unresolved_wind_targets(
+                {"effects": [{"type": "wind", "target_labels": ["gió", "wind"]}]},
+                [],
+            ),
+            [],
+        )
+        self.assertEqual(
+            director._unresolved_wind_targets(
+                {"effects": [{"type": "wind", "target_labels": ["khăn", "tóc"]}]},
+                [],
+            ),
+            ["khăn", "tóc"],
+        )
+        self.assertEqual(
+            director._unresolved_wind_targets(
+                {"effects": [{"type": "wind", "target_labels": ["cột buồm"]}]},
+                [],
+            ),
+            [],
+        )
+
     def test_unresolved_wind_target_triggers_one_focused_inventory_pass(self):
         intent = {
             "effects": [
