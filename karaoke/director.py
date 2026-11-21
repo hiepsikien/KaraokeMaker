@@ -35,10 +35,22 @@ FRAME_HEIGHT = 1080
 PROFILE_ID = "landscape_1080p"
 LOOP_DURATION = 8
 MAX_VISION_SIDE = 1024
-PREPROCESSING = "exif_rgb_jpeg1024_q85_inventory_v6"
+PREPROCESSING = "exif_rgb_jpeg1024_q85_inventory_v7"
 
-EFFECT_TYPES = ("rain", "snow", "water", "steam", "wind", "fire", "embers", "fog", "light")
-INTENT_VERSION = "intent_v5"
+EFFECT_TYPES = (
+    "rain",
+    "snow",
+    "water",
+    "steam",
+    "wind",
+    "fire",
+    "embers",
+    "birds",
+    "sunrays",
+    "fog",
+    "light",
+)
+INTENT_VERSION = "intent_v6"
 
 _BLOCK_REASONS = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
 _AUDIO_PHRASES = ("tiếng mưa", "tiếng sóng", "âm thanh")
@@ -78,14 +90,18 @@ Return JSON that matches the provided schema, with no extra commentary.
 Identify up to 16 salient visible objects that could receive or block ambient effects:
 people/faces, people standing or wading in water (including small/distant figures),
 boats/ships, sails, masts, flags, ropes, wooden stakes/posts, fire/flames, smoke,
-embers, food, bowls/pots, lanterns, curtains, plants, liquid surfaces, sky, ground.
-Include small or distant ships/sails/people if they are visible, with lower confidence.
+embers, birds or flocks of birds (including distant silhouettes), the sun or the
+brightest light source (with the direction its rays fall), food, bowls/pots, lanterns,
+curtains, plants, liquid surfaces, sky, ground.
+Include small or distant ships/sails/people/birds if they are visible, with lower confidence.
 Every visible person must be a separate object; also add their face/body to protect.
 Return every distinct smoke plume and every distinct flame cluster as its own object;
 do not merge separate smoke columns into one box, and include thin distant plumes.
+Return each flock of birds as its own object and give it a box that contains the whole flock.
 Affordances should include: wind_movable for sails/flags/curtains, fire/burn/emissive
 for flames and burning objects, smoke for smoke plumes, hanging/swayable for hanging
-objects, container/steam_source for pots and bowls.
+objects, container/steam_source for pots and bowls, fly/flock for birds, and
+sun/light_source/glow for the sun or brightest light source.
 Give sails and flags a pivot_2d at the mast/attachment edge so their sway direction is
 unambiguous; never put the pivot in the middle of a flag.
 For each object return:
@@ -278,10 +294,15 @@ def _usage_from(payload: dict) -> dict[str, int]:
 def _intent_text(prompt: str) -> str:
     return (
         "Extract ambient background effect intent from the user's request. "
-        "Return JSON only. Supported effect types are rain, snow, water, steam, wind, fire, fog, light. "
+        "Return JSON only. Supported effect types are rain, snow, water, steam, wind, "
+        "fire, embers, birds, sunrays, fog, light. "
         "Vietnamese hints: mưa -> rain, tuyết -> snow, nước/sóng -> water, "
-        "khói/hơi -> steam, gió -> wind, lửa/cháy -> fire, sương mù -> fog, "
-        "ánh sáng/bụi -> light. "
+        "khói/hơi -> steam, gió -> wind, lửa/cháy -> fire, tàn lửa/tia lửa -> embers, "
+        "chim/đàn chim -> birds, nắng/tia nắng/ánh sáng mặt trời -> sunrays, "
+        "sương mù -> fog, ánh sáng/bụi -> light. "
+        "Only add birds or sunrays when the user explicitly asks for the birds/flock "
+        "to move or for sunlight/rays to animate; do not add them merely because the "
+        "scene contains birds or a sun. "
         "Keep 'sương' (without 'mù') as steam; 'sương mù', 'fog', or 'mist' is fog. "
         "Use intensity between 0 and 1: while 'nhẹ' maps to about 0.35, "
         "'mạnh' maps to about 0.8, and everything else defaults to 0.55. "
@@ -703,6 +724,23 @@ def _effect_type(value: Any) -> str | None:
         "flame": "fire",
         "lửa": "fire",
         "cháy": "fire",
+        "birds": "birds",
+        "bird": "birds",
+        "flock": "birds",
+        "chim": "birds",
+        "đàn chim": "birds",
+        "sunrays": "sunrays",
+        "sun rays": "sunrays",
+        "sunray": "sunrays",
+        "god rays": "sunrays",
+        "sunlight": "sunrays",
+        "sun light": "sunrays",
+        "sun": "sunrays",
+        "nắng": "sunrays",
+        "tia nắng": "sunrays",
+        "ánh nắng": "sunrays",
+        "ánh sáng mặt trời": "sunrays",
+        "mặt trời": "sunrays",
         "fog": "fog",
         "mist": "fog",
         "sương mù": "fog",
@@ -778,9 +816,32 @@ def keyword_intent(prompt: str) -> dict:
         found.append("embers")
     if "lửa" in text or "cháy" in text or "fire" in text or "flame" in text:
         found.append("fire")
+    if (
+        "chim" in text
+        or "birds" in text
+        or "bird" in text
+        or "flock" in text
+    ):
+        found.append("birds")
+    if (
+        "nắng" in text
+        or "mặt trời" in text
+        or "sunray" in text
+        or "sun rays" in text
+        or "god rays" in text
+        or "sunlight" in text
+    ):
+        found.append("sunrays")
     if "sương mù" in text or "fog" in text or "mist" in text:
         found.append("fog")
-    if "ánh sáng" in text or "light" in text or "glow" in text or "bụi" in text or "dust" in text:
+    # "ánh sáng mặt trời" is sunlight/rays, not the generic brightness pulse.
+    if (
+        "ánh sáng" in text
+        or "light" in text
+        or "glow" in text
+        or "bụi" in text
+        or "dust" in text
+    ) and "sunrays" not in found:
         found.append("light")
     if "nhẹ" in text:
         intensity = 0.35

@@ -249,7 +249,7 @@ export function ProjectSetup({
           <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Hiệu ứng nền (AI)</h2>
           <p className="text-sm leading-6 text-[var(--muted)]">
             Tuỳ chọn. Phân tích ảnh nền bằng Gemini để lập kế hoạch hiệu ứng; hiện render mưa, tuyết, nước, khói,
-            gió/sway, lửa, tàn lửa, sương mù và nhịp sáng. Cần bật đồng ý gửi ảnh lên Gemini trước khi phân tích. Bỏ trống nếu chỉ dùng ảnh tĩnh.
+            gió/sway, lửa, tàn lửa, chim, tia nắng, sương mù và nhịp sáng. Cần bật đồng ý gửi ảnh lên Gemini trước khi phân tích. Bỏ trống nếu chỉ dùng ảnh tĩnh.
           </p>
           <AiEffects
             images={

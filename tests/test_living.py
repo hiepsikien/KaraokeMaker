@@ -513,5 +513,82 @@ class EmbersTests(unittest.TestCase):
         self.assertGreater(float(np.abs(second - first).max()), 0.0)
 
 
+class BirdsTests(unittest.TestCase):
+    def test_birds_are_gated_by_the_prompt_effect_item(self):
+        plan = effect_plan(
+            [],
+            objects=[object_entry("flock-1", "bird flock", (0.1, 0.1, 0.4, 0.25))],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        specs = living._birds_spec(
+            plan, transform, 100, 100, 4.0, None, 1234, lambda _m: None
+        )
+        self.assertEqual(specs, [])
+
+    def test_birds_drift_moves_only_the_flock_patch(self):
+        plan = effect_plan(
+            [
+                {
+                    "effect": "birds",
+                    "target_ids": [],
+                    "params": {"intensity": 0.35, "loop_duration": 4, "audio": False},
+                }
+            ],
+            objects=[object_entry("flock-1", "bird flock", (0.35, 0.2, 0.65, 0.4))],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        specs = living._birds_spec(
+            plan, transform, 100, 100, 4.0, None, 1234, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+
+        frame = np.full((100, 100, 3), 180.0, dtype=np.float32)
+        frame[28:34, 42:58] = 20.0  # bird silhouettes on a bright sky
+        first = living._apply_birds(frame.copy(), specs, 0.0)
+        second = living._apply_birds(frame.copy(), specs, 0.25)
+        self.assertGreater(float(np.abs(second - first).max()), 0.0)
+        # Pixels far from the flock stay untouched.
+        self.assertTrue(np.allclose(second[90, 5], frame[90, 5]))
+
+
+class SunRaysTests(unittest.TestCase):
+    def test_sunrays_are_gated_by_the_prompt_effect_item(self):
+        base = np.full((100, 100, 3), 40.0, dtype=np.float32)
+        plan = effect_plan(
+            [],
+            objects=[object_entry("sun-1", "sun", (0.6, 0.05, 0.8, 0.25))],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        spec = living._sunrays_spec(
+            plan, transform, base, 100, 100, 4.0, None, 1234, lambda _m: None
+        )
+        self.assertIsNone(spec)
+
+    def test_sunrays_anchor_on_sun_and_brighten_nearby_sky(self):
+        base = np.full((100, 100, 3), 40.0, dtype=np.float32)
+        plan = effect_plan(
+            [
+                {
+                    "effect": "sunrays",
+                    "target_ids": [],
+                    "params": {"intensity": 0.4, "loop_duration": 4, "audio": False},
+                }
+            ],
+            objects=[object_entry("sun-1", "sun", (0.6, 0.05, 0.8, 0.25))],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        spec = living._sunrays_spec(
+            plan, transform, base, 100, 100, 4.0, prevent, 1234, lambda _m: None
+        )
+        self.assertIsNotNone(spec)
+        first = living._apply_sunrays(base.copy(), spec, 0.0)
+        second = living._apply_sunrays(base.copy(), spec, 0.25)
+        self.assertGreater(float(np.abs(second - first).max()), 0.0)
+        self.assertGreater(float(first[15:25, 65:75].max()), 40.0)
+        # Far corners are outside the ray footprint and stay unchanged.
+        self.assertTrue(np.allclose(second[95, 5], 40.0))
+
+
 if __name__ == "__main__":
     unittest.main()

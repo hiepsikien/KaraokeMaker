@@ -77,7 +77,9 @@ Quy ước:
 - `box`/`point`/`polygon` normalized 0..1 theo **ảnh gốc sau EXIF, trước letterbox**.
 - `fit_transform` map ảnh gốc → frame 16:9.
 - `regions`/`protect` nằm trong `effect_plan` để renderer dùng.
-- `items.effect` P0: `rain`. P1: `steam`, `wind`, `water`, `light`.
+- `items.effect` P0: `rain`. P1: `steam`, `wind`, `water`, `light`. P2: `snow`,
+  `fire`, `embers`, `birds`, `sunrays`, `fog`. `birds`/`sunrays` chỉ xuất hiện khi
+  prompt yêu cầu, dù inventory có phát hiện chim/mặt trời.
 - `target_ids` là các object được chọn trong UI.
 - `loop_duration` tính bằng giây.
 

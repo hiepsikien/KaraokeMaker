@@ -154,16 +154,36 @@ FIRE_LABELS = (
 FOG_REGION_HINTS = ("fog", "mist", "sương mù")
 FOG_REGION_TOKENS = ("ground", "low", "lower", "bottom", "floor", "nền", "đất")
 
+# Birds/flocks and the sun are only targets; the effects themselves are gated
+# by explicit prompt intent, never enabled just because the scene contains them.
+BIRD_AFFORDANCES = ("bird", "flock", "fly", "flying")
+BIRD_LABELS = ("bird", "birds", "flock", "chim", "đàn chim")
+SUN_AFFORDANCES = ("sun", "sunlight", "light_source", "light source")
+SUN_LABELS = (
+    "sun",
+    "sunlight",
+    "sun light",
+    "sunray",
+    "sun rays",
+    "god rays",
+    "light source",
+    "nắng",
+    "mặt trời",
+)
+
 # Every renderer recipe supported by this module. Order is the compositing
-# order (base -> rain -> snow -> water -> steam -> wind -> fire -> fog -> light).
+# order (base -> rain -> snow -> water -> steam -> wind -> birds -> fire ->
+# embers -> sunrays -> fog -> light).
 SUPPORTED_EFFECTS = (
     "rain",
     "snow",
     "water",
     "steam",
     "wind",
+    "birds",
     "fire",
     "embers",
+    "sunrays",
     "fog",
     "light",
 )
@@ -173,8 +193,10 @@ EFFECT_LABELS = {
     "water": "nước",
     "steam": "khói",
     "wind": "gió",
+    "birds": "chim",
     "fire": "lửa",
     "embers": "tàn lửa",
+    "sunrays": "tia nắng",
     "fog": "sương mù",
     "light": "sáng",
 }
@@ -184,7 +206,7 @@ EFFECT_LABELS = {
 # v5: first AI Studio / inventory-v3 pass.
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks + painted-smoke billow warp.
-MOTION_CACHE_VERSION = 15
+MOTION_CACHE_VERSION = 16
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1556,6 +1578,130 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
     return image
 
 
+# --- birds -----------------------------------------------------------------
+
+
+def _shift_crop(crop: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Sub-pixel translate a crop with bilinear sampling (loop-safe)."""
+    height, width = crop.shape[:2]
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    sample_x = np.clip(grid_x.astype(np.float32) - dx, 0.0, width - 1.0)
+    sample_y = np.clip(grid_y.astype(np.float32) - dy, 0.0, height - 1.0)
+    x0 = np.floor(sample_x).astype(np.int32)
+    y0 = np.floor(sample_y).astype(np.int32)
+    x1 = np.minimum(x0 + 1, width - 1)
+    y1 = np.minimum(y0 + 1, height - 1)
+    wx = (sample_x - x0)[:, :, None]
+    wy = (sample_y - y0)[:, :, None]
+    top = crop[y0, x0] * (1.0 - wx) + crop[y0, x1] * wx
+    bottom = crop[y1, x0] * (1.0 - wx) + crop[y1, x1] * wx
+    return top * (1.0 - wy) + bottom * wy
+
+
+def _birds_spec(
+    plan: dict,
+    transform: dict,
+    width: int,
+    height: int,
+    seconds: float,
+    prevent: np.ndarray | None,
+    seed: int,
+    log,
+) -> list[dict]:
+    """Gentle flock drift for detected bird/flock objects.
+
+    The whole feathered patch is translated a pixel or two; smooth sky is
+    visually unchanged while the silhouettes glide. Never enabled unless the
+    prompt explicitly asks for birds, even when inventory finds them.
+    """
+    items = _effect_items(plan, "birds")
+    if not items:
+        return []
+    targets = _target_ids(items)
+    entries: list[dict] = []
+    for entry in _plan_objects(plan):
+        if targets and entry["id"] not in targets:
+            continue
+        if _matches_hints(entry, BIRD_AFFORDANCES, BIRD_LABELS):
+            entries.append(entry)
+    if not entries:
+        log("Bỏ qua đàn chim: không có object chim/flock khớp target.")
+        return []
+
+    intensity = _items_intensity(items, 0.3)
+    rng = np.random.default_rng(seed ^ 0xB19D)
+    specs: list[dict] = []
+    for entry in entries:
+        x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
+        if x2 - x1 < 2.0 or y2 - y1 < 2.0:
+            continue
+        # Flight room around the flock so the drift does not clip at the box.
+        pad_x = max(3.0, (x2 - x1) * 0.45)
+        pad_y = max(3.0, (y2 - y1) * 0.65)
+        left = max(0, int(math.floor(x1 - pad_x)))
+        right = min(width, int(math.ceil(x2 + pad_x)))
+        top = max(0, int(math.floor(y1 - pad_y)))
+        bottom = min(height, int(math.ceil(y2 + pad_y)))
+        if right - left < 6 or bottom - top < 6:
+            continue
+        mask_image = Image.new("L", (right - left, bottom - top), 0)
+        ImageDraw.Draw(mask_image).ellipse(
+            [x1 - left, y1 - top, x2 - left, y2 - top], fill=255
+        )
+        feather = max(2.0, min(right - left, bottom - top) * 0.35)
+        mask = (
+            np.asarray(
+                mask_image.filter(ImageFilter.GaussianBlur(feather)),
+                dtype=np.float32,
+            )
+            / 255.0
+        )
+        if prevent is not None:
+            mask *= prevent[top:bottom, left:right]
+        gain = 0.65 + 0.55 * intensity
+        specs.append(
+            {
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+                "mask": mask,
+                # 1-3 px at 640x360, capped by the flock size.
+                "amp_x": max(
+                    0.8, min(height * 0.004, (right - left) * 0.05)
+                )
+                * gain,
+                "amp_y": max(
+                    0.5, min(height * 0.0025, (bottom - top) * 0.04)
+                )
+                * gain,
+                # Integer cycles keep the drift seamless at the loop point.
+                "cycles": max(1, int(round(seconds / 16.0))),
+                "bob_cycles": max(2, int(round(seconds / 8.0))),
+                "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+                "bob_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+            }
+        )
+    return specs
+
+
+def _apply_birds(frame: np.ndarray, specs: list[dict], u: float) -> np.ndarray:
+    for spec in specs:
+        left, top = spec["left"], spec["top"]
+        right, bottom = spec["right"], spec["bottom"]
+        crop = frame[top:bottom, left:right]
+        dx = spec["amp_x"] * math.sin(
+            2.0 * math.pi * spec["cycles"] * u + spec["phase"]
+        )
+        dy = spec["amp_y"] * math.sin(
+            2.0 * math.pi * spec["bob_cycles"] * u + spec["bob_phase"]
+        )
+        warped = _shift_crop(crop, dx, dy)
+        mask = spec["mask"][:, :, None]
+        frame[top:bottom, left:right] = crop * (1.0 - mask) + warped * mask
+    return frame
+
+
 # --- light -----------------------------------------------------------------
 
 
@@ -2129,6 +2275,141 @@ def _apply_embers(
     return np.clip(frame + layer, 0.0, 255.0).astype(np.float32)
 
 
+# --- sun rays --------------------------------------------------------------
+
+
+def _sun_center(
+    plan: dict,
+    base_array: np.ndarray,
+    transform: dict,
+    width: int,
+    height: int,
+    targets: set[str],
+) -> tuple[float, float]:
+    """Anchor the rays on the sun object, else the brightest warm region."""
+    entries: list[dict] = []
+    for entry in _plan_objects(plan):
+        if targets and entry["id"] not in targets:
+            continue
+        if _matches_hints(entry, SUN_AFFORDANCES, SUN_LABELS):
+            entries.append(entry)
+    if entries:
+        total = 0.0
+        cx = 0.0
+        cy = 0.0
+        for entry in entries:
+            x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
+            area = max(1.0, (x2 - x1) * (y2 - y1))
+            total += area
+            cx += area * (x1 + x2) * 0.5
+            cy += area * (y1 + y2) * 0.5
+        if total > 0.0:
+            return cx / total, cy / total
+
+    # Fallback: brightest warm spot in the upper part of the frame.
+    limit = max(1, int(height * 0.65))
+    region = base_array[:limit]
+    luminance = (
+        region[:, :, 0] * 0.2126
+        + region[:, :, 1] * 0.7152
+        + region[:, :, 2] * 0.0722
+    ) / 255.0
+    warmth = np.clip((region[:, :, 0] - region[:, :, 2]) / 80.0, 0.0, 1.5)
+    score = luminance * (0.35 + 0.65 * warmth)
+    threshold = float(np.percentile(score, 99.7))
+    ys, xs = np.where(score >= threshold)
+    if xs.size == 0:
+        return width * 0.75, height * 0.25
+    return float(xs.mean()), float(ys.mean())
+
+
+def _sunrays_spec(
+    plan: dict,
+    transform: dict,
+    base_array: np.ndarray,
+    width: int,
+    height: int,
+    seconds: float,
+    prevent: np.ndarray | None,
+    seed: int,
+    log,
+) -> dict | None:
+    """Soft god rays around the sun, breathing slowly.
+
+    Only built when the prompt asks for sun rays/sunlight; the inventory sun is
+    just an anchor, never a trigger on its own.
+    """
+    items = _effect_items(plan, "sunrays")
+    if not items:
+        return None
+    targets = _target_ids(items)
+    intensity = _items_intensity(items, 0.35)
+    cx, cy = _sun_center(plan, base_array, transform, width, height, targets)
+    cx = min(float(width), max(0.0, cx))
+    cy = min(float(height), max(0.0, cy))
+    radius = max(height * 0.24, min(width, height) * 0.30)
+    left = max(0, int(math.floor(cx - radius)))
+    right = min(width, int(math.ceil(cx + radius)))
+    top = max(0, int(math.floor(cy - radius)))
+    bottom = min(height, int(math.ceil(cy + radius)))
+    if right - left < 8 or bottom - top < 8:
+        log("Bỏ qua tia nắng: vùng mặt trời quá nhỏ.")
+        return None
+
+    grid_y, grid_x = np.mgrid[top:bottom, left:right]
+    dx = grid_x.astype(np.float32) - cx
+    dy = grid_y.astype(np.float32) - cy
+    distance = np.sqrt(dx * dx + dy * dy) / max(1.0, radius)
+    falloff = np.clip(1.0 - distance, 0.0, 1.0) ** 1.6
+    glow = np.exp(-((distance / 0.34) ** 2))
+    rays = max(8, int(round(10 + 6 * intensity)))
+    theta = rays * np.arctan2(dy, dx)
+    mask = np.ones((bottom - top, right - left), dtype=np.float32)
+    if prevent is not None:
+        mask *= prevent[top:bottom, left:right]
+    rng = np.random.default_rng(seed ^ 0x5A17)
+    return {
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "theta": theta.astype(np.float32),
+        "falloff": falloff.astype(np.float32),
+        "glow": glow.astype(np.float32),
+        "mask": mask,
+        "base_alpha": 0.025 + 0.045 * intensity,
+        "glow_alpha": 0.018 + 0.032 * intensity,
+        "cycles": max(1, int(round(seconds / 16.0))),
+        "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+        "color": np.asarray((255.0, 208.0, 150.0), dtype=np.float32),
+    }
+
+
+def _apply_sunrays(frame: np.ndarray, spec: dict | None, u: float) -> np.ndarray:
+    if spec is None:
+        return frame
+    cycle = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
+    breathe = 0.55 + 0.45 * math.sin(cycle)
+    rotate = 0.035 * math.sin(cycle + 1.7)
+    spokes = (0.5 + 0.5 * np.cos(spec["theta"] + rotate)) ** 3
+    alpha = (
+        spec["base_alpha"] * spokes * spec["falloff"]
+        + spec["glow_alpha"] * spec["glow"]
+    ) * breathe
+    alpha *= spec["mask"]
+    alpha = np.clip(alpha, 0.0, 0.30)
+    left, top = spec["left"], spec["top"]
+    right, bottom = spec["right"], spec["bottom"]
+    crop = frame[top:bottom, left:right]
+    # Keep highlights from clipping: already-bright pixels receive less light.
+    luminance = crop.mean(axis=2) / 255.0
+    weight = 1.0 - 0.55 * luminance
+    frame[top:bottom, left:right] = crop + spec["color"] * (
+        alpha * weight
+    )[:, :, None]
+    return frame
+
+
 # --- fog (P2b) -------------------------------------------------------------
 
 
@@ -2451,7 +2732,19 @@ def _render_loop(
         snow_layers = _make_snow_layers(out_width, out_height, seconds, seed)
 
     prevent = None
-    if effects.intersection({"steam", "wind", "light", "water", "fire", "embers", "fog"}):
+    if effects.intersection(
+        {
+            "steam",
+            "wind",
+            "birds",
+            "fire",
+            "embers",
+            "sunrays",
+            "fog",
+            "light",
+            "water",
+        }
+    ):
         prevent = _build_protect_mask(plan, transform, out_width, out_height, strip_rect)
     prevent3 = prevent[:, :, None] if prevent is not None else None
 
@@ -2490,6 +2783,20 @@ def _render_loop(
         if "water" in effects
         else None
     )
+    birds_specs = (
+        _birds_spec(
+            plan,
+            transform,
+            out_width,
+            out_height,
+            seconds,
+            prevent,
+            seed,
+            log,
+        )
+        if "birds" in effects
+        else []
+    )
     fire_spec = (
         _fire_spec(plan, transform, out_width, out_height, seconds, prevent, seed, log)
         if "fire" in effects
@@ -2507,6 +2814,21 @@ def _render_loop(
             log,
         )
         if "embers" in effects
+        else None
+    )
+    sunrays_spec = (
+        _sunrays_spec(
+            plan,
+            transform,
+            base_array,
+            out_width,
+            out_height,
+            seconds,
+            prevent,
+            seed,
+            log,
+        )
+        if "sunrays" in effects
         else None
     )
     fog_spec = (
@@ -2531,6 +2853,10 @@ def _render_loop(
     if fire_spec is not None and fire_spec["amplitude"] > 0.0:
         resolved = True
     if embers_spec is not None and embers_spec["particles"]:
+        resolved = True
+    if birds_specs:
+        resolved = True
+    if sunrays_spec is not None:
         resolved = True
     if fog_spec is not None and fog_spec["alpha"] > 0.0:
         resolved = True
@@ -2599,8 +2925,12 @@ def _render_loop(
                 warped = _wind_frame(Image.fromarray(frame_u8, "RGB"), wind_specs, u)
                 frame = np.asarray(warped, dtype=np.float32)
 
+            if birds_specs:
+                frame = _apply_birds(frame, birds_specs, u)
+
             frame = _apply_fire(frame, fire_spec, u)
             frame = _apply_embers(frame, embers_spec, u, sprite_cache)
+            frame = _apply_sunrays(frame, sunrays_spec, u)
             frame = _apply_fog(frame, fog_spec, u)
             frame = _apply_light(frame, light_spec, u)
             np.clip(frame, 0.0, 255.0, out=frame)
@@ -2636,7 +2966,8 @@ def render_motion_loop(
 ) -> Path | None:
     """Render all supported motion items in one loop/encode pass.
 
-    Supports rain, snow, water (W1 shimmer), steam, wind, fire, fog, and light.
+    Supports rain, snow, water (W1 shimmer), steam, wind, birds, fire, embers,
+    sun rays, fog, and light.
     Returns ``None`` when the plan has no supported motion item, and also when
     no item resolves to a visible recipe (for example a water-only plan with no
     liquid region, a fire-only plan with no fire object/region, or steam/wind

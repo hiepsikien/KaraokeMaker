@@ -631,7 +631,7 @@ export function AiEffects({
       )}
 
       <p className="text-xs leading-5 text-[var(--muted)]">
-        Hiện render mưa, tuyết, nước, khói, gió/sway, lửa, tàn lửa, sương mù và nhịp sáng.
+        Hiện render mưa, tuyết, nước, khói, gió/sway, lửa, tàn lửa, chim, tia nắng, sương mù và nhịp sáng.
       </p>
     </div>
   );

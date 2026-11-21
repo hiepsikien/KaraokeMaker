@@ -378,7 +378,16 @@ speed * T = k * span
   còn cạnh thẳng nào từ mask khói.
 - **Tàn lửa (`embers`)**: particle nhỏ màu cam vàng bốc lên từ fire object/region,
   loop-quantized, có protect/strip. Prompt `tàn lửa`, `tia lửa`, `embers`, `sparks`
-  được map sang `embers`; đã có test riêng. 92 tests pass.
+  được map sang `embers`; đã có test riêng.
+- **Đàn chim (`birds`)**: inventory v7 nhận `bird flock` (box cả đàn); renderer dịch
+  nhẹ cả patch có mask ellipse feather (drift ngang 1–3 px + bob dọc 1–2 px ở 640×360),
+  chu kỳ nguyên để loop khít. **Chỉ bật khi prompt yêu cầu** (`chim`, `đàn chim`,
+  `birds`, `flock`); ảnh có chim không tự động thêm effect.
+- **Tia nắng (`sunrays`)**: inventory v7 nhận `sun`/`light source`; fallback là vùng
+  sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
+  thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
+  `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
+- 96 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
