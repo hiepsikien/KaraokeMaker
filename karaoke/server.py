@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
@@ -80,6 +81,12 @@ _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
 _JOB_LIMIT = 12
 _JOB_TTL_SECONDS = 6 * 60 * 60
+# Full-resolution Studio renders run in the background so the Next proxy never
+# has to hold a request open for a 16 s 1080p multi-effect encode.
+_studio_jobs: dict[str, dict] = {}
+_STUDIO_JOB_LIMIT = 20
+_STUDIO_JOB_TTL_SECONDS = 30 * 60
+_STUDIO_JOB_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class BrowseRequest(BaseModel):
@@ -168,6 +175,7 @@ class StudioRenderRequest(BaseModel):
     effect_plan: dict = Field(default_factory=dict)
     duration: float = 8
     output_profile: str = "landscape_1080p"
+    full_resolution: bool = False
 
 
 class WordIn(BaseModel):
@@ -479,9 +487,78 @@ def director_analyze(body: DirectorRequest):
         raise HTTPException(status_code=502, detail=str(error)) from error
 
 
+def _preview_payload(result: dict) -> dict:
+    preview_id = result["id"]
+    return {
+        "id": preview_id,
+        "url": f"/api/studio/preview/{preview_id}",
+        "width": result["width"],
+        "height": result["height"],
+        "duration": result["duration"],
+    }
+
+
+def _prune_studio_jobs() -> None:
+    """Drop finished Studio jobs older than the TTL, then cap the list."""
+    now = time.time()
+    stale = [
+        job_id
+        for job_id, record in _studio_jobs.items()
+        if record["status"] in {"done", "error"}
+        and now - record["created"] > _STUDIO_JOB_TTL_SECONDS
+    ]
+    for job_id in stale:
+        _studio_jobs.pop(job_id, None)
+    if len(_studio_jobs) <= _STUDIO_JOB_LIMIT:
+        return
+    finished = sorted(
+        (record["created"], job_id)
+        for job_id, record in _studio_jobs.items()
+        if record["status"] in {"done", "error"}
+    )
+    for _created, job_id in finished:
+        if len(_studio_jobs) <= _STUDIO_JOB_LIMIT:
+            break
+        _studio_jobs.pop(job_id, None)
+
+
+def _run_studio_job(
+    job_id: str,
+    path: Path,
+    body: StudioRenderRequest,
+) -> None:
+    try:
+        result = render_preview(
+            path,
+            body.effect_plan,
+            duration=body.duration,
+            output_profile=body.output_profile,
+            full_resolution=True,
+        )
+        payload = _preview_payload(result)
+        with _lock:
+            record = _studio_jobs.get(job_id)
+            if record is not None:
+                record["status"] = "done"
+                record["result"] = payload
+    except Exception:
+        traceback.print_exc()
+        with _lock:
+            record = _studio_jobs.get(job_id)
+            if record is not None:
+                record["status"] = "error"
+                record["error"] = (
+                    "Không render được bản chuẩn. Xem terminal Python để xem chi tiết."
+                )
+
+
 @app.post("/api/studio/render")
 def studio_render(body: StudioRenderRequest):
-    """Render an independent Studio preview loop (no Gemini call, no consent)."""
+    """Render an independent Studio preview loop (no Gemini call, no consent).
+
+    ``full_resolution=true`` starts a background job and returns HTTP 202 with
+    ``job_id``; poll ``/api/studio/render-job/{job_id}`` for the result.
+    """
     text = str(body.image_path or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Hãy chọn ảnh để render preview.")
@@ -491,6 +568,27 @@ def studio_render(body: StudioRenderRequest):
         raise HTTPException(status_code=403, detail=str(error)) from error
     if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
         raise HTTPException(status_code=400, detail="Không đọc được ảnh này.")
+    if body.full_resolution:
+        job_id = uuid.uuid4().hex
+        with _lock:
+            _prune_studio_jobs()
+            _studio_jobs[job_id] = {
+                "id": job_id,
+                "status": "rendering",
+                "created": time.time(),
+                "error": "",
+                "result": None,
+            }
+        thread = threading.Thread(
+            target=_run_studio_job,
+            args=(job_id, path, body),
+            daemon=True,
+        )
+        thread.start()
+        return JSONResponse(
+            status_code=202,
+            content={"job_id": job_id, "status": "rendering"},
+        )
     try:
         result = render_preview(
             path,
@@ -500,20 +598,32 @@ def studio_render(body: StudioRenderRequest):
         )
     except StudioError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception as error:
+    except Exception:
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail="Không render được preview. Xem terminal Python để xem chi tiết.",
-        ) from error
-    preview_id = result["id"]
-    return {
-        "id": preview_id,
-        "url": f"/api/studio/preview/{preview_id}",
-        "width": result["width"],
-        "height": result["height"],
-        "duration": result["duration"],
-    }
+        )
+    return _preview_payload(result)
+
+
+@app.get("/api/studio/render-job/{job_id}")
+def studio_render_job(job_id: str):
+    """Return the status of a background full-resolution Studio render."""
+    if not _STUDIO_JOB_PATTERN.fullmatch(str(job_id or "")):
+        raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
+    with _lock:
+        _prune_studio_jobs()
+        record = _studio_jobs.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
+        return {
+            "id": record["id"],
+            "status": record["status"],
+            "created": record["created"],
+            "error": record["error"],
+            "result": record["result"],
+        }
 
 
 @app.get("/api/studio/preview/{preview_id}")

@@ -30,7 +30,7 @@ MAX_DURATION = 30.0
 # The Studio is a preview surface; full-resolution export stays in Karaoke.
 # 640 px keeps a 4 s multi-effect preview well under the proxy timeout.
 PREVIEW_MAX_SIDE = 640
-PREVIEW_VERSION = "preview_v19"
+PREVIEW_VERSION = "preview_v20"
 # Serialize preview renders in this process. Two simultaneous 1080p renders
 # otherwise fight over CPU and can race on cache materialization.
 _PREVIEW_LOCK = threading.Lock()
@@ -93,8 +93,13 @@ def render_preview(
     *,
     duration: float,
     output_profile: str,
+    full_resolution: bool = False,
 ) -> dict:
     """Render a cached preview loop for one image and effect plan.
+
+    ``full_resolution=False`` keeps the fast 640 px preview. ``True`` renders at
+    the selected profile's real resolution (for the 16 s standard preview); the
+    HTTP layer should run that as a background job.
 
     Returns ``{"id", "path", "duration", "width", "height"}``. Raises
     :class:`StudioError` for invalid input; filesystem/FFmpeg failures propagate
@@ -121,7 +126,10 @@ def render_preview(
     image_hash = _file_hash(source)
     plan_hash = _plan_hash(plan)
     duration_key = f"{seconds:g}"
-    preview_width, preview_height = _preview_size(profile)
+    if full_resolution:
+        preview_width, preview_height = profile.width, profile.height
+    else:
+        preview_width, preview_height = _preview_size(profile)
     preview_id = hashlib.sha256(
         f"{image_hash}|{plan_hash}|{duration_key}|{profile.id}|"
         f"{PREVIEW_VERSION}|{preview_width}x{preview_height}".encode("utf-8")

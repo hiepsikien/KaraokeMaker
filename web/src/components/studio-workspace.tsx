@@ -25,6 +25,13 @@ const PROFILE_OPTIONS = [
 ];
 
 const PREVIEW_DURATION = 4;
+const STANDARD_DURATION = 16;
+const PROFILE_SIZE: Record<string, string> = {
+  landscape_1080p: "1920×1080",
+  portrait_1080x1920: "1080×1920",
+  square_1080: "1080×1080",
+  portrait_4x5: "1080×1350",
+};
 
 function fileName(path: string) {
   const parts = path.split(/[/\\]/);
@@ -61,6 +68,8 @@ export function StudioWorkspace() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [renderingPath, setRenderingPath] = useState("");
+  const [renderingMode, setRenderingMode] = useState<"preview" | "standard" | "">("");
+  const [renderHint, setRenderHint] = useState("");
   const [previews, setPreviews] = useState<Record<string, PreviewResult>>({});
 
   async function pickImages() {
@@ -108,6 +117,8 @@ export function StudioWorkspace() {
   async function renderPreview(effect: BackgroundEffect) {
     if (renderingPath) return;
     setRenderingPath(effect.image_path);
+    setRenderingMode("preview");
+    setRenderHint("");
     setError("");
     try {
       const response = await fetch("/api/studio/render", {
@@ -130,6 +141,72 @@ export function StudioWorkspace() {
       setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");
     } finally {
       setRenderingPath("");
+      setRenderingMode("");
+    }
+  }
+
+  async function renderStandard(effect: BackgroundEffect) {
+    if (renderingPath) return;
+    setRenderingPath(effect.image_path);
+    setRenderingMode("standard");
+    setRenderHint(
+      `Đang render bản chuẩn ${STANDARD_DURATION}s ở ${PROFILE_SIZE[profile] || profile}; có thể mất 1–2 phút.`,
+    );
+    setError("");
+    try {
+      const response = await fetch("/api/studio/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_path: effect.image_path,
+          effect_plan: effect.effect_plan,
+          duration: STANDARD_DURATION,
+          output_profile: profile,
+          full_resolution: true,
+        }),
+      });
+      if (!response.ok) {
+        setError(await readError(response));
+        return;
+      }
+      let data = (await response.json()) as PreviewResult | { job_id?: string };
+      if ("job_id" in data && data.job_id) {
+        const jobId = data.job_id;
+        // Full renders run in a background job; poll until done.
+        for (let attempt = 0; attempt < 480; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const statusResponse = await fetch(`/api/studio/render-job/${jobId}`);
+          if (!statusResponse.ok) {
+            setError(await readError(statusResponse));
+            return;
+          }
+          const status = (await statusResponse.json()) as {
+            status: string;
+            result?: PreviewResult;
+            error?: string;
+          };
+          if (status.status === "done" && status.result) {
+            setPreviews((current) => ({ ...current, [effect.image_path]: status.result! }));
+            setRenderHint("");
+            return;
+          }
+          if (status.status === "error") {
+            setError(status.error || "Render bản chuẩn thất bại.");
+            return;
+          }
+        }
+        setError("Render bản chuẩn quá lâu. Xem terminal Python để kiểm tra.");
+        return;
+      }
+      if ("url" in data && data.url) {
+        setPreviews((current) => ({ ...current, [effect.image_path]: data as PreviewResult }));
+        setRenderHint("");
+      }
+    } catch {
+      setError("Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.");
+    } finally {
+      setRenderingPath("");
+      setRenderingMode("");
     }
   }
 
@@ -217,14 +294,26 @@ export function StudioWorkspace() {
                       <p className="truncate text-sm">{fileName(effect.image_path)}</p>
                       <p className="text-xs leading-5 text-[var(--muted)]">{effectNames(effect)}</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => renderPreview(effect)}
-                      disabled={Boolean(renderingPath)}
-                      className="w-full rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] transition hover:bg-black/25 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {rendering ? "Đang render preview…" : "Render preview"}
-                    </button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => renderPreview(effect)}
+                        disabled={Boolean(renderingPath)}
+                        className="rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] transition hover:bg-black/25 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {rendering && renderingMode === "preview" ? "Đang render…" : `Preview ${PREVIEW_DURATION}s`}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => renderStandard(effect)}
+                        disabled={Boolean(renderingPath)}
+                        className="rounded-xl border border-[var(--line)] px-3 py-2 text-sm font-semibold text-[var(--muted)] transition hover:border-[var(--gold)] hover:text-[var(--gold)] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {rendering && renderingMode === "standard"
+                          ? "Đang render…"
+                          : `Bản chuẩn ${STANDARD_DURATION}s`}
+                      </button>
+                    </div>
                     {preview && (
                       <div className="space-y-1.5">
                         <video
@@ -251,6 +340,11 @@ export function StudioWorkspace() {
           {renderingPath && (
             <p className="text-xs leading-5 text-[var(--muted)]">
               FFmpeg đang dựng vòng hiệu ứng; lần đầu có thể mất vài chục giây.
+            </p>
+          )}
+          {renderHint && (
+            <p className="rounded-xl border border-[var(--line)] bg-black/20 px-3 py-2 text-xs leading-5 text-[var(--muted)]">
+              {renderHint}
             </p>
           )}
           {error && (

@@ -386,7 +386,7 @@ speed * T = k * span
   sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
   thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
   `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
-- 104 tests pass.
+- 108 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=22`, `PREVIEW_VERSION=preview_v19`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=23`, `PREVIEW_VERSION=preview_v20`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -434,16 +434,21 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   lời, text/bar vẽ sau vẫn đảm bảo đọc được.
 - **Nước gần đáy**: sửa regression do `strip_rect=None`; mask nước giờ phủ tới
   foreground và vẫn giữ occluder cho thuyền/người/cọc.
-- **Chim rõ hơn**: patch bám sát flock hơn, feather nhỏ, drift ~5 px và bob ~2,5 px
-  ở 640×360 (scale theo output); chu kỳ nguyên nên loop khít.
+- **Chim nhẹ hơn**: patch bám sát flock, feather nhỏ, drift ~1,8 px và bob ~0,9 px
+  ở 640×360 (scale theo output); cycle 8 s để bản chuẩn 16 s thấy đàn trượt chậm
+  mà không vô lí.
 - **Tia nắng rõ hơn trong 4 s**: ray pattern có trọng số ngẫu nhiên từng tia,
   screen blend + shadow nhẹ giữa các tia, breathing luôn ở mức thấy được; anchor
   theo object sun hoặc vùng sáng ấm nhất.
 - **Cờ/buồm rung lại**: bỏ lớp ghim `prevent` lên rigid patch. Flag/banner xoay
   nguyên khối nên chữ không bị warp; cloth vẫn dùng `prevent` trong mask. Đây là
   regression từ lần sửa review trước.
-- **Protect object**: ember sprite bị clip theo toàn bộ `prevent` (không chỉ tâm);
-  wind rigid vẫn áp `prevent` lên patch để mặt/chữ được bảo vệ.
+- **Protect object**: ember sprite bị clip theo toàn bộ `prevent` (không chỉ tâm).
+  Cloth wind vẫn dùng `prevent` trong mask; rigid flag/banner xoay nguyên khối nên
+  chữ không bị warp và cờ vẫn rung.
+- **Bản chuẩn 16 s**: Studio có nút `Bản chuẩn 16s`, render đúng resolution của
+  profile (1920×1080, 1080×1920, 1080×1080, 1080×1350). Render chạy job nền +
+  polling nên không bị timeout proxy; preview nhanh 4 s / 640 px vẫn giữ.
 - **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung
   sẽ bỏ qua effect và yêu cầu phân tích lại thay vì áp box cũ.
 - **Inspect ảnh**: `fits_frame`/note tính theo `output_profile`; thêm 4:5. Preview

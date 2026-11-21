@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -356,6 +357,44 @@ class DirectorEndpointTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as caught:
             director_analyze(body)
         self.assertEqual(caught.exception.status_code, 400)
+
+    def test_full_resolution_render_returns_a_job_and_polls_to_done(self):
+        from karaoke import server
+
+        body = server.StudioRenderRequest(
+            image_path=str(self.image),
+            effect_plan={"items": [{"effect": "rain", "target_ids": [], "params": {}}]},
+            duration=16,
+            output_profile="landscape_1080p",
+            full_resolution=True,
+        )
+        result = {
+            "id": "a" * 64,
+            "path": "/tmp/preview.mp4",
+            "width": 1920,
+            "height": 1080,
+            "duration": 16.0,
+        }
+        with patch("karaoke.server.render_preview", return_value=result) as fake:
+            response = server.studio_render(body)
+            self.assertEqual(response.status_code, 202)
+            payload = json.loads(response.body)
+            self.assertEqual(payload["status"], "rendering")
+            job_id = payload["job_id"]
+            self.assertRegex(job_id, r"^[0-9a-f]{32}$")
+
+            status = None
+            for _ in range(200):
+                status = server.studio_render_job(job_id)
+                if status["status"] == "done":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(status["status"], "done")
+            self.assertEqual(status["result"]["width"], 1920)
+            self.assertEqual(status["result"]["height"], 1080)
+            fake.assert_called_once()
+            self.assertTrue(fake.call_args.kwargs["full_resolution"])
+        server._studio_jobs.pop(job_id, None)
 
     def test_success_returns_the_analyze_dict(self):
         from karaoke.server import DirectorRequest, director_analyze

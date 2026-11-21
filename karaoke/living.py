@@ -208,7 +208,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 22
+MOTION_CACHE_VERSION = 23
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
