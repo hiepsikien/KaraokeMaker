@@ -121,7 +121,7 @@ class FrameAndIdentityTests(unittest.TestCase):
 
         wider = replace(profile, width=640, height=360)
         self.assertNotEqual(first, _motion_identity(plan, "a" * 64, 80, wider))
-        self.assertEqual(MOTION_CACHE_VERSION, 32)
+        self.assertEqual(MOTION_CACHE_VERSION, 33)
 
     def test_profile_fingerprint_includes_cover_typography(self):
         profile = small_profile()

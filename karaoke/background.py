@@ -210,6 +210,32 @@ def _effect_plan(effect: dict | None) -> dict | None:
     return plan if isinstance(plan, dict) else None
 
 
+def _parse_created(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _asset_is_newer_than_effect(effect: dict | None, meta: dict) -> bool:
+    """True when the selected asset was created after the stored effect plan."""
+    if not isinstance(effect, dict) or not isinstance(meta, dict):
+        return False
+    asset_created = _parse_created(meta.get("created"))
+    if asset_created is None:
+        return False
+    effect_created = _parse_created(effect.get("created"))
+    if effect_created is None:
+        return True
+    return asset_created > effect_created
+
+
 def _cover_identity(
     cover_photo: Path | None,
     title: str,
@@ -892,11 +918,22 @@ def _plan_background(
         asset_reason = ""
         if asset_id:
             meta = load_asset(asset_id)
+            if (
+                meta is not None
+                and _asset_is_newer_than_effect(effect, meta)
+                and isinstance(meta.get("effect_plan"), dict)
+            ):
+                # The project still carries the old plan but the user selected
+                # an asset created after it. Use the asset's plan as the source
+                # of truth. If the asset clip itself is stale (e.g. old
+                # renderer version), the inline render still gets the new plan.
+                plan = meta["effect_plan"]
             valid, reason = validate_asset(
                 meta,
                 image_hash=image_hash_prefixed,
                 image_frames=image_frames,
                 profile=profile,
+                plan=plan,
             )
             if valid and meta is not None:
                 identity = asset_fingerprint(meta)

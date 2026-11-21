@@ -86,6 +86,8 @@ export type EffectPlan = {
   fit_transform: DirectorFitTransform;
   regions?: DirectorRegion[];
   protect?: DirectorProtect[];
+  /** Objects are part of the compiled plan; keep their boxes editable. */
+  objects?: DirectorObject[];
   /** Optional global filter applied when the plan is rendered. */
   selected_object_ids?: string[];
   items: EffectPlanItem[];
@@ -152,6 +154,7 @@ export type StudioAsset = {
   source_image: string;
   image_hash: string;
   effect_plan?: EffectPlan;
+  plan_hash?: string;
   asset_version?: number;
   profile_id?: string;
   profile_fingerprint?: string;

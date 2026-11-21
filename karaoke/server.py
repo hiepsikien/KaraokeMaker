@@ -26,6 +26,7 @@ from karaoke.assets import (
     delete_asset,
     known_project_paths,
     list_assets,
+    load_asset,
     register_project_path,
     save_asset_from_preview,
 )
@@ -523,6 +524,9 @@ def director_analyze(body: DirectorRequest):
         )
     except DirectorError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Phân tích ảnh lỗi: {error}") from error
 
 
 def _preview_payload(result: dict) -> dict:
@@ -590,15 +594,13 @@ def _run_studio_job(
                 record["status"] = "done"
                 record["result"] = payload
                 record["percent"] = 100
-    except Exception:
+    except Exception as error:
         traceback.print_exc()
         with _lock:
             record = _studio_jobs.get(job_id)
             if record is not None:
                 record["status"] = "error"
-                record["error"] = (
-                    "Không render được bản chuẩn. Xem terminal Python để xem chi tiết."
-                )
+                record["error"] = f"Không render được bản chuẩn: {error}"
 
 
 @app.post("/api/studio/render")
@@ -650,12 +652,12 @@ def studio_render(body: StudioRenderRequest):
         )
     except StudioError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception:
+    except Exception as error:
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail="Không render được preview. Xem terminal Python để xem chi tiết.",
-        )
+            detail=f"Không render được preview: {error}",
+        ) from error
     return _preview_payload(result)
 
 
@@ -832,6 +834,22 @@ def studio_asset_cleanup():
         return cleanup_assets(keep_ids=referenced)
     except AssetError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/studio/assets/{asset_id}/open")
+def studio_asset_open(asset_id: str):
+    """Grant an asset's source image and return its metadata for editing."""
+    meta = load_asset(asset_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    text = str(meta.get("source_image") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Asset không có ảnh nguồn.")
+    image = Path(text).expanduser()
+    if not image.is_file() or image.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không thấy ảnh nguồn của asset.")
+    grant(image)
+    return {"asset": meta, "image": str(image)}
 
 
 @app.get("/api/studio/assets/{asset_id}/clip")

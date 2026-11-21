@@ -533,6 +533,7 @@ def object_entry(
     affordances: list[str] | None = None,
     pivot: tuple[float, float] | None = None,
     opening: tuple[float, float] | None = None,
+    source: str | None = None,
 ) -> dict:
     return {
         "id": object_id,
@@ -543,6 +544,7 @@ def object_entry(
             "opening": {"x": opening[0], "y": opening[1]} if opening else None,
         },
         "affordances": affordances or [],
+        "source": source or "",
     }
 
 
@@ -752,6 +754,200 @@ class SelectedObjectFilterTests(unittest.TestCase):
 
 
 class WindFlagTests(unittest.TestCase):
+    def test_headband_hair_and_coat_are_wind_candidates(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry("headband-1", "headband", (0.55, 0.10, 0.75, 0.35), pivot=(0.62, 0.12)),
+                object_entry("hair-1", "ponytail", (0.60, 0.12, 0.70, 0.30), pivot=(0.66, 0.14)),
+                object_entry("coat-1", "coat", (0.45, 0.35, 0.70, 0.80), pivot=(0.58, 0.38)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(
+            {spec["id"] for spec in specs},
+            {"headband-1", "hair-1", "coat-1"},
+        )
+        self.assertTrue(all(spec["cloth"] for spec in specs))
+
+    def test_manual_object_respects_wind_movable_choice(self):
+        base_objects = [
+            object_entry(
+                "manual-1",
+                "khăn",
+                (0.55, 0.10, 0.75, 0.40),
+                pivot=(0.65, 0.11),
+                source="manual",
+            )
+        ]
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.55}}],
+            objects=base_objects,
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        self.assertEqual(
+            living._wind_specs(plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None),
+            [],
+        )
+        plan["objects"][0]["affordances"] = ["wind_movable"]
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
+        self.assertTrue(specs[0]["cloth"])
+
+    def test_manual_wind_movable_object_is_targeted(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.55}}],
+            objects=[
+                object_entry(
+                    "manual-1",
+                    "khăn",
+                    (0.55, 0.10, 0.75, 0.40),
+                    affordances=["wind_movable"],
+                    pivot=(0.65, 0.11),
+                )
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
+        self.assertTrue(specs[0]["cloth"])
+
+    def test_detected_wind_pivot_stays_attached(self):
+        for label in ("flag", "lantern"):
+            base = Image.new("RGB", (400, 400), (30, 60, 90))
+            draw = ImageDraw.Draw(base)
+            draw.rectangle([120, 120, 280, 280], fill=(220, 40, 40))
+            draw.ellipse([194, 114, 206, 126], fill=(255, 255, 255))
+            plan = effect_plan(
+                [{"effect": "wind", "target_ids": ["detected-1"], "params": {"intensity": 0.55, "speed": 0.55}}],
+                objects=[
+                    object_entry(
+                        "detected-1",
+                        label,
+                        (0.30, 0.30, 0.70, 0.70),
+                        pivot=(0.50, 0.30),
+                    )
+                ],
+            )
+            transform = living._fit_transform(plan, (400, 400), (400, 400), "contain")
+            prevent = np.ones((400, 400), dtype=np.float32)
+            specs = living._wind_specs(
+                plan, transform, 400, 400, 4.0, 1234, prevent, lambda _m: None
+            )
+
+            def pivot_centroid(u: float) -> np.ndarray:
+                frame = np.asarray(living._wind_frame(base.copy(), specs, u), dtype=np.float32)
+                white = (
+                    (frame[:, :, 0] > 235)
+                    & (frame[:, :, 1] > 235)
+                    & (frame[:, :, 2] > 235)
+                )
+                points = np.argwhere(white)
+                self.assertGreater(len(points), 0, label)
+                return points.mean(axis=0)
+
+            first = pivot_centroid(0.0)
+            second = pivot_centroid(0.25)
+            self.assertLess(float(np.linalg.norm(first - second)), 1.5, label)
+
+    def test_manual_object_has_visible_translation_for_cloth_and_rigid(self):
+        base = Image.new("RGB", (400, 400), (30, 60, 90))
+        draw = ImageDraw.Draw(base)
+        draw.rectangle([120, 120, 280, 280], fill=(230, 40, 40))
+
+        for label in ("khăn", "cây"):
+            plan = effect_plan(
+                [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.15, "speed": 0.1}}],
+                objects=[
+                    object_entry(
+                        "manual-1",
+                        label,
+                        (0.30, 0.30, 0.70, 0.70),
+                        affordances=["wind_movable"],
+                        pivot=(0.50, 0.31),
+                        source="manual",
+                    )
+                ],
+            )
+            transform = living._fit_transform(plan, (400, 400), (400, 400), "contain")
+            prevent = np.ones((400, 400), dtype=np.float32)
+            specs = living._wind_specs(
+                plan, transform, 400, 400, 4.0, 1234, prevent, lambda _m: None
+            )
+            self.assertEqual(len(specs), 1, label)
+
+            def centroid(u: float) -> np.ndarray:
+                frame = np.asarray(living._wind_frame(base.copy(), specs, u), dtype=np.float32)
+                red = (
+                    (frame[:, :, 0] > 170)
+                    & (frame[:, :, 1] < 110)
+                    & (frame[:, :, 2] < 110)
+                )
+                points = np.argwhere(red)
+                self.assertGreater(len(points), 100, label)
+                return points.mean(axis=0)
+
+            first = centroid(0.0)
+            second = centroid(0.25)
+            self.assertGreater(float(np.linalg.norm(first - second)), 1.0, label)
+
+    def test_low_wind_speed_still_animates(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.15, "speed": 0.1}}],
+            objects=[
+                object_entry(
+                    "manual-1",
+                    "hoa đào",
+                    (0.55, 0.10, 0.75, 0.40),
+                    affordances=["wind_movable"],
+                    pivot=(0.65, 0.11),
+                    source="manual",
+                )
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        self.assertGreaterEqual(specs[0]["cycles"], 1)
+        rng = np.random.default_rng(7)
+        image = Image.fromarray(rng.integers(0, 255, (100, 100, 3), dtype=np.uint8), "RGB")
+        first = np.asarray(living._wind_frame(image.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._wind_frame(image.copy(), specs, 0.5), dtype=np.float32)
+        self.assertGreater(float(np.abs(first - second).max()), 0.5)
+
+    def test_zero_wind_speed_freezes_the_target(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["flag-1"], "params": {"intensity": 0.35, "speed": 0.0}}],
+            objects=[
+                object_entry("flag-1", "flag", (0.6, 0.05, 0.9, 0.3), pivot=(0.6, 0.05)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["cycles"], 0)
+        self.assertEqual(specs[0]["amplitude"], 0.0)
+        image = Image.new("RGB", (100, 100), (30, 60, 90))
+        first = np.asarray(living._wind_frame(image.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._wind_frame(image.copy(), specs, 0.5), dtype=np.float32)
+        self.assertLessEqual(float(np.abs(first - second).max()), 1.0)
+
     def test_sail_target_also_moves_the_flag_on_the_same_mast(self):
         plan = effect_plan(
             [{"effect": "wind", "target_ids": ["sail-1"], "params": {"intensity": 0.35}}],

@@ -6,6 +6,7 @@ import type {
   BackgroundEffect,
   DirectorAnalysis,
   DirectorBox,
+  DirectorObject,
   DirectorPoint,
   DirectorUsage,
   StudioAsset,
@@ -126,6 +127,27 @@ function usageText(usage: DirectorUsage) {
   return parts.length > 0 ? `Token · ${parts.join(" · ")}` : "";
 }
 
+function analysisFromAsset(asset: StudioAsset): DirectorAnalysis | null {
+  const plan = asset.effect_plan;
+  if (!plan) return null;
+  const objects = plan.objects || [];
+  return {
+    image: asset.source_image,
+    image_hash: asset.image_hash,
+    width: asset.width || 1920,
+    height: asset.height || 1080,
+    model: "studio",
+    scene: `Asset ${asset.name}`,
+    objects,
+    regions: plan.regions || [],
+    protect: plan.protect || [],
+    intent: null,
+    effect_plan: plan,
+    usage: null,
+    cached: true,
+  };
+}
+
 function boxRect(box: DirectorBox, width: number, height: number) {
   return {
     x: box.x1 * width,
@@ -173,6 +195,10 @@ function PlanOverlay({
   frameHeight,
   selectedIds,
   onToggle,
+  onBoxChange,
+  drawMode,
+  onDrawBox,
+  pendingBox,
 }: {
   analysis: DirectorAnalysis | null;
   preview: string;
@@ -180,6 +206,10 @@ function PlanOverlay({
   frameHeight: number;
   selectedIds: string[];
   onToggle: (id: string) => void;
+  onBoxChange: (id: string, box: DirectorBox) => void;
+  drawMode: boolean;
+  onDrawBox: (box: DirectorBox) => void;
+  pendingBox: DirectorBox | null;
 }) {
   const width = frameWidth > 0 ? frameWidth : 1920;
   const height = frameHeight > 0 ? frameHeight : 1080;
@@ -187,10 +217,106 @@ function PlanOverlay({
   const fontSize = Math.max(14, Math.round(unit / 26));
   const stroke = Math.max(2, unit / 260);
   const anchorRadius = Math.max(4, unit / 70);
+  const handleSize = Math.max(12, unit / 60);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [resize, setResize] = useState<{
+    id: string;
+    corner: "nw" | "ne" | "sw" | "se";
+    start: DirectorBox;
+  } | null>(null);
+  const [drawStart, setDrawStart] = useState<DirectorPoint | null>(null);
+  const [drawBox, setDrawBox] = useState<DirectorBox | null>(null);
 
   const objects = analysis?.objects || [];
   const regions = analysis?.regions?.length ? analysis.regions : analysis?.effect_plan.regions || [];
   const protect = analysis?.protect?.length ? analysis.protect : analysis?.effect_plan.protect || [];
+
+  function normalizedPoint(event: React.PointerEvent) {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  }
+
+  function startResize(
+    event: React.PointerEvent<SVGRectElement>,
+    id: string,
+    corner: "nw" | "ne" | "sw" | "se",
+    box: DirectorBox,
+  ) {
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setResize({ id, corner, start: { ...box } });
+  }
+
+  function moveResize(event: React.PointerEvent<SVGRectElement>) {
+    if (!resize) return;
+    const point = normalizedPoint(event);
+    if (!point) return;
+    const box = { ...resize.start };
+    const minSize = 0.01;
+    if (resize.corner.includes("w")) box.x1 = Math.min(point.x, box.x2 - minSize);
+    if (resize.corner.includes("e")) box.x2 = Math.max(point.x, box.x1 + minSize);
+    if (resize.corner.includes("n")) box.y1 = Math.min(point.y, box.y2 - minSize);
+    if (resize.corner.includes("s")) box.y2 = Math.max(point.y, box.y1 + minSize);
+    box.x1 = Math.max(0, Math.min(1, box.x1));
+    box.y1 = Math.max(0, Math.min(1, box.y1));
+    box.x2 = Math.max(0, Math.min(1, box.x2));
+    box.y2 = Math.max(0, Math.min(1, box.y2));
+    onBoxChange(resize.id, box);
+  }
+
+  function endResize(event: React.PointerEvent<SVGRectElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setResize(null);
+  }
+
+  function boxFromPoints(first: DirectorPoint, second: DirectorPoint): DirectorBox {
+    return {
+      x1: Math.min(first.x, second.x),
+      y1: Math.min(first.y, second.y),
+      x2: Math.max(first.x, second.x),
+      y2: Math.max(first.y, second.y),
+    };
+  }
+
+  function startDraw(event: React.PointerEvent<SVGRectElement>) {
+    if (!drawMode) return;
+    const point = normalizedPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDrawStart(point);
+    setDrawBox({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+  }
+
+  function moveDraw(event: React.PointerEvent<SVGRectElement>) {
+    if (!drawStart) return;
+    const point = normalizedPoint(event);
+    if (!point) return;
+    setDrawBox(boxFromPoints(drawStart, point));
+  }
+
+  function endDraw(event: React.PointerEvent<SVGRectElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const point = normalizedPoint(event);
+    const start = drawStart;
+    setDrawStart(null);
+    setDrawBox(null);
+    if (!start || !point) return;
+    const box = boxFromPoints(start, point);
+    if (box.x2 - box.x1 < 0.01 || box.y2 - box.y1 < 0.01) return;
+    onDrawBox(box);
+  }
 
   return (
     <div
@@ -206,7 +332,8 @@ function PlanOverlay({
       )}
       {analysis && (
         <svg
-          className="absolute inset-0 h-full w-full"
+          ref={svgRef}
+          className="absolute inset-0 h-full w-full touch-none"
           viewBox={`0 0 ${width} ${height}`}
           role="img"
           aria-label="Vùng, object và điểm neo do AI phân tích"
@@ -307,9 +434,61 @@ function PlanOverlay({
                     label={`opening ${object.label}`}
                   />
                 )}
+                {(
+                  [
+                    ["nw", rect.x, rect.y, "nwse-resize"],
+                    ["ne", rect.x + rect.width, rect.y, "nesw-resize"],
+                    ["sw", rect.x, rect.y + rect.height, "nesw-resize"],
+                    ["se", rect.x + rect.width, rect.y + rect.height, "nwse-resize"],
+                  ] as const
+                ).map(([corner, x, y, cursor]) => (
+                  <rect
+                    key={`${object.id}-handle-${corner}`}
+                    x={x - handleSize / 2}
+                    y={y - handleSize / 2}
+                    width={handleSize}
+                    height={handleSize}
+                    fill={color}
+                    stroke="#110e0b"
+                    strokeWidth={Math.max(1, stroke / 2)}
+                    style={{ cursor }}
+                    onPointerDown={(event) => startResize(event, object.id, corner, object.box)}
+                    onPointerMove={moveResize}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <title>{`Kéo để chỉnh kích thước ${object.label}`}</title>
+                  </rect>
+                ))}
               </g>
             );
           })}
+          {(drawBox || pendingBox) && (
+            <rect
+              {...boxRect((drawBox || pendingBox)!, width, height)}
+              fill="rgba(125, 211, 252, 0.18)"
+              stroke="#7dd3fc"
+              strokeWidth={stroke}
+              strokeDasharray={`${stroke * 3} ${stroke * 2}`}
+            />
+          )}
+          {drawMode && (
+            <rect
+              x={0}
+              y={0}
+              width={width}
+              height={height}
+              fill="transparent"
+              style={{ cursor: "crosshair" }}
+              onPointerDown={startDraw}
+              onPointerMove={moveDraw}
+              onPointerUp={endDraw}
+              onPointerCancel={endDraw}
+            >
+              <title>Kéo để vẽ vùng object mới</title>
+            </rect>
+          )}
         </svg>
       )}
     </div>
@@ -323,13 +502,17 @@ export function AiEffects({
   imageDuration = "8",
   onEffectsChange,
   onAssetDuration,
+  resumeAsset = null,
+  onAssetSaved,
 }: {
   images: string[];
   effects: BackgroundEffect[];
   outputProfile: string;
   imageDuration?: string;
+  resumeAsset?: { asset: StudioAsset; token: number } | null;
   onEffectsChange: (updater: (current: BackgroundEffect[]) => BackgroundEffect[]) => void;
   onAssetDuration?: (seconds: number) => void;
+  onAssetSaved?: () => void;
 }) {
   const imageSignature = images.join("\n");
   const [selectedImage, setSelectedImage] = useState(() => images[0] || "");
@@ -344,6 +527,10 @@ export function AiEffects({
   const [assets, setAssets] = useState<StudioAsset[]>([]);
   const [assetsError, setAssetsError] = useState("");
   const [renderStates, setRenderStates] = useState<Record<string, RenderState>>({});
+  const [drawMode, setDrawMode] = useState(false);
+  const [draftBox, setDraftBox] = useState<DirectorBox | null>(null);
+  const [manualName, setManualName] = useState("");
+  const [manualWind, setManualWind] = useState(true);
   const renderAbortRef = useRef<AbortController | null>(null);
   const renderTargetRef = useRef("");
 
@@ -365,10 +552,51 @@ export function AiEffects({
     renderAbortRef.current = null;
     renderTargetRef.current = "";
     if (target) setImageRender(target, null);
+    if (resumeAsset?.asset.source_image === selectedImage) {
+      // Restore the opened asset when switching back to its image.
+      const restored = analysisFromAsset(resumeAsset.asset);
+      if (restored) {
+        const plan = restored.effect_plan;
+        setAnalysis(restored);
+        setSelectedObjectIds(
+          plan.selected_object_ids?.length
+            ? plan.selected_object_ids
+            : restored.objects.map((object) => object.id),
+        );
+        setError("");
+        setDrawMode(false);
+        setDraftBox(null);
+        setManualName("");
+        return;
+      }
+    }
     setAnalysis(null);
     setSelectedObjectIds([]);
     setError("");
+    setDrawMode(false);
+    setDraftBox(null);
+    setManualName("");
   }, [selectedImage]);
+
+  useEffect(() => {
+    if (!resumeAsset) return;
+    const { asset } = resumeAsset;
+    const analysis = analysisFromAsset(asset);
+    if (!analysis) return;
+    const plan = analysis.effect_plan;
+    setSelectedImage(asset.source_image);
+    setAnalysis(analysis);
+    setSelectedObjectIds(
+      plan.selected_object_ids?.length
+        ? plan.selected_object_ids
+        : analysis.objects.map((object) => object.id),
+    );
+    setPrompt("");
+    setError("");
+    setDrawMode(false);
+    setDraftBox(null);
+    setManualName("");
+  }, [resumeAsset?.token]);
 
   useEffect(() => {
     setFact(null);
@@ -443,10 +671,164 @@ export function AiEffects({
     );
   }
 
+  function changeObjectBox(id: string, box: DirectorBox) {
+    const update = <T extends DirectorObject,>(object: T): T => {
+      if (object.id !== id) return object;
+      const next = { ...object, box };
+      if (object.source === "manual") {
+        next.anchors = {
+          ...object.anchors,
+          pivot: { x: (box.x1 + box.x2) / 2, y: box.y1 },
+        };
+      } else if (object.anchors?.pivot) {
+        next.anchors = {
+          ...object.anchors,
+          pivot: {
+            x: Math.min(box.x2, Math.max(box.x1, object.anchors.pivot.x)),
+            y: Math.min(box.y2, Math.max(box.y1, object.anchors.pivot.y)),
+          },
+        };
+      }
+      return next;
+    };
+    setAnalysis((current) => {
+      if (!current) return current;
+      const source = current.objects.find((object) => object.id === id);
+      const objects = current.objects.map(update);
+      const mapProtect = (item: { label: string; box: DirectorBox }) => {
+        if (!source) return item;
+        const oldBox = source.box;
+        const centerX = (item.box.x1 + item.box.x2) / 2;
+        const centerY = (item.box.y1 + item.box.y2) / 2;
+        if (
+          centerX < oldBox.x1 ||
+          centerX > oldBox.x2 ||
+          centerY < oldBox.y1 ||
+          centerY > oldBox.y2
+        ) {
+          return item;
+        }
+        const scaleX = (box.x2 - box.x1) / Math.max(1e-6, oldBox.x2 - oldBox.x1);
+        const scaleY = (box.y2 - box.y1) / Math.max(1e-6, oldBox.y2 - oldBox.y1);
+        const mapped = {
+          x1: box.x1 + (item.box.x1 - oldBox.x1) * scaleX,
+          y1: box.y1 + (item.box.y1 - oldBox.y1) * scaleY,
+          x2: box.x1 + (item.box.x2 - oldBox.x1) * scaleX,
+          y2: box.y1 + (item.box.y2 - oldBox.y1) * scaleY,
+        };
+        return {
+          ...item,
+          box: {
+            x1: Math.max(0, Math.min(1, mapped.x1)),
+            y1: Math.max(0, Math.min(1, mapped.y1)),
+            x2: Math.max(0, Math.min(1, mapped.x2)),
+            y2: Math.max(0, Math.min(1, mapped.y2)),
+          },
+        };
+      };
+      const protect = (current.protect || []).map(mapProtect);
+      const planObjects = current.effect_plan.objects;
+      const effectObjects = planObjects ? planObjects.map(update) : objects;
+      const planProtect = (current.effect_plan.protect || []).map(mapProtect);
+      return {
+        ...current,
+        objects,
+        protect,
+        effect_plan: {
+          ...current.effect_plan,
+          objects: effectObjects,
+          protect: planProtect,
+        },
+      };
+    });
+  }
+
+  function startManualDraw() {
+    if (!analysis) return;
+    setDrawMode(true);
+    setDraftBox(null);
+    setManualName("");
+    setManualWind(true);
+  }
+
+  function finishManualDraw(box: DirectorBox) {
+    setDrawMode(false);
+    setDraftBox(box);
+    setManualName("");
+    setManualWind(true);
+  }
+
+  function addManualObject() {
+    if (!analysis || !draftBox) return;
+    const label = manualName.trim() || "vật thể";
+    const existing = new Set(analysis.objects.map((object) => object.id));
+    let id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    while (existing.has(id)) {
+      id = `${id}-x`;
+    }
+    const object: DirectorObject = {
+      id,
+      label,
+      box: draftBox,
+      anchors: {
+        pivot: { x: (draftBox.x1 + draftBox.x2) / 2, y: draftBox.y1 },
+        opening: null,
+      },
+      affordances: manualWind ? ["wind_movable"] : [],
+      confidence: 1,
+      source: "manual",
+    };
+    setAnalysis((current) => {
+      if (!current) return current;
+      const objects = [...current.objects, object];
+      const planObjects = current.effect_plan.objects;
+      return {
+        ...current,
+        objects,
+        effect_plan: {
+          ...current.effect_plan,
+          objects: planObjects ? [...planObjects, object] : objects,
+        },
+      };
+    });
+    setSelectedObjectIds((current) => (current.includes(id) ? current : [...current, id]));
+    setDraftBox(null);
+    setManualName("");
+    setManualWind(true);
+  }
+
+  function cancelManualObject() {
+    setDraftBox(null);
+    setManualName("");
+    setManualWind(true);
+  }
+
+  function removeManualObject(id: string) {
+    setAnalysis((current) => {
+      if (!current) return current;
+      const object = current.objects.find((item) => item.id === id);
+      if (object?.source !== "manual") return current;
+      const objects = current.objects.filter((item) => item.id !== id);
+      const planObjects = current.effect_plan.objects;
+      return {
+        ...current,
+        objects,
+        effect_plan: {
+          ...current.effect_plan,
+          objects: planObjects ? planObjects.filter((item) => item.id !== id) : objects,
+        },
+      };
+    });
+    setSelectedObjectIds((current) => current.filter((value) => value !== id));
+  }
+
   async function analyze() {
     if (!canAnalyze) return;
     setBusy(true);
     setError("");
+    setDrawMode(false);
+    setDraftBox(null);
+    setManualName("");
     try {
       const response = await fetch("/api/director/analyze", {
         method: "POST",
@@ -520,6 +902,7 @@ export function AiEffects({
       // rendering and saving another copy.
       const reusable = assets.find((asset) => {
         if (asset.image_hash !== imageHash || asset.profile_id !== outputProfile) return false;
+        if (!asset.effect_plan || JSON.stringify(asset.effect_plan) !== JSON.stringify(plan)) return false;
         const seconds = asset.asset_frames && asset.fps ? asset.asset_frames / asset.fps : asset.loop_duration;
         if (typeof seconds !== "number") return false;
         return Math.abs(seconds - duration) <= 0.5 / Math.max(1, Number(asset.fps || 30));
@@ -653,6 +1036,7 @@ export function AiEffects({
       );
       setImageRender(imagePath, { status: "done", preview });
       void refreshAssets();
+      onAssetSaved?.();
     } catch {
       if (controller.signal.aborted) return;
       setImageRender(imagePath, {
@@ -669,10 +1053,47 @@ export function AiEffects({
 
   function applyEffect() {
     if (!analysis || !selectedImage) return;
+    const manualWindIds = analysis.objects
+      .filter(
+        (object) =>
+          object.source === "manual" &&
+          selectedObjectIds.includes(object.id) &&
+          (object.affordances || []).includes("wind_movable"),
+      )
+      .map((object) => object.id);
+    let items = analysis.effect_plan.items;
+    if (manualWindIds.length > 0) {
+      let added = false;
+      items = items.map((item) => {
+        if (item.effect !== "wind") return item;
+        added = true;
+        return {
+          ...item,
+          target_ids: Array.from(new Set([...item.target_ids, ...manualWindIds])),
+        };
+      });
+      if (!added) {
+        items = [
+          ...items,
+          {
+            effect: "wind",
+            target_ids: manualWindIds,
+            params: {
+              intensity: 0.55,
+              density: 1.0,
+              speed: 1.0,
+              loop_duration: 8,
+              audio: false,
+            },
+          },
+        ];
+      }
+    }
+    const currentEffect = effects.find((item) => item.image_path === selectedImage);
     const effect: BackgroundEffect = {
       image_path: selectedImage,
       image_hash: analysis.image_hash,
-      effect_prompt: prompt.trim(),
+      effect_prompt: prompt.trim() || currentEffect?.effect_prompt || "",
       effect_consent_receipt: {
         timestamp: new Date().toISOString(),
         image_hash: analysis.image_hash,
@@ -682,7 +1103,9 @@ export function AiEffects({
       selected_object_ids: selectedObjectIds,
       effect_plan: {
         ...analysis.effect_plan,
+        objects: analysis.objects,
         selected_object_ids: selectedObjectIds,
+        items,
       },
       model: analysis.model,
       created: new Date().toISOString(),
@@ -708,6 +1131,14 @@ export function AiEffects({
       Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
   );
   const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
+  const latestMatchingAsset = existingEffect?.effect_plan
+    ? imageAssets.find(
+        (asset) =>
+          asset.id !== existingEffect.asset_id &&
+          asset.effect_plan &&
+          JSON.stringify(asset.effect_plan) === JSON.stringify(existingEffect.effect_plan),
+      )
+    : undefined;
   const currentRenderState = selectedImage ? renderStates[selectedImage] : undefined;
   const assetSeconds = selectedAsset?.asset_frames && selectedAsset?.fps
     ? selectedAsset.asset_frames / selectedAsset.fps
@@ -721,10 +1152,20 @@ export function AiEffects({
 
   function chooseAsset(assetId: string) {
     if (!selectedImage) return;
+    const asset = imageAssets.find((item) => item.id === assetId);
     onEffectsChange((current) =>
-      current.map((item) =>
-        item.image_path === selectedImage ? { ...item, asset_id: assetId || null } : item,
-      ),
+      current.map((item) => {
+        if (item.image_path !== selectedImage) return item;
+        if (!assetId) return { ...item, asset_id: null };
+        if (!asset?.effect_plan) return { ...item, asset_id: assetId };
+        return {
+          ...item,
+          asset_id: assetId,
+          image_hash: asset.image_hash || item.image_hash,
+          effect_plan: asset.effect_plan,
+          selected_object_ids: asset.effect_plan.selected_object_ids || item.selected_object_ids,
+        };
+      }),
     );
   }
 
@@ -761,7 +1202,7 @@ export function AiEffects({
         provider: "studio",
         model: "asset",
       },
-      selected_object_ids: [],
+      selected_object_ids: plan.selected_object_ids || [],
       effect_plan: plan,
       model: "studio",
       created: new Date().toISOString(),
@@ -807,7 +1248,78 @@ export function AiEffects({
         frameHeight={frameHeight}
         selectedIds={selectedObjectIds}
         onToggle={toggleObject}
+        onBoxChange={changeObjectBox}
+        drawMode={drawMode}
+        onDrawBox={finishManualDraw}
+        pendingBox={draftBox}
       />
+      {analysis && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs leading-5">
+            {drawMode ? (
+              <button
+                type="button"
+                onClick={() => setDrawMode(false)}
+                className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-[var(--muted)] hover:border-[var(--gold)]"
+              >
+                Huỷ vẽ
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={startManualDraw}
+                className="rounded-xl border border-[var(--gold)] px-3 py-1.5 font-semibold text-[var(--gold)] hover:bg-black/25"
+              >
+                Vẽ object
+              </button>
+            )}
+            <span className="text-[var(--muted)]">
+              {drawMode
+                ? "Kéo chuột trên ảnh để vẽ vùng object mới."
+                : "Kéo 4 góc ô để chỉnh kích thước; hoặc vẽ object thủ công."}
+            </span>
+          </div>
+          {draftBox && (
+            <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 p-3">
+              <p className="text-sm font-semibold text-[var(--gold)]">Object thủ công</p>
+              <input
+                value={manualName}
+                onChange={(event) => setManualName(event.target.value)}
+                placeholder="Tên object, vd. khăn, lọn tóc, vạt áo"
+                className={fieldClass}
+              />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={manualWind}
+                  onChange={(event) => setManualWind(event.target.checked)}
+                  className="accent-[var(--gold)]"
+                />
+                Bay theo gió (wind_movable)
+              </label>
+              <p className="text-[11px] leading-4 text-[var(--muted)]">
+                Object được chọn + bật wind_movable sẽ được thêm vào hiệu ứng Gió khi bấm Áp dụng.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={addManualObject}
+                  className="rounded-xl bg-[var(--gold)] px-3 py-1.5 text-sm font-semibold text-[#1a1206]"
+                >
+                  Thêm object
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelManualObject}
+                  className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--muted)] hover:border-[var(--gold)]"
+                >
+                  Huỷ
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--muted)]">
         <span>
@@ -926,6 +1438,9 @@ export function AiEffects({
                   const meta = PARAM_META[key];
                   const raw = item.params?.[key];
                   const value = typeof raw === "number" ? Math.round(raw * 100) : meta.default;
+                  // Wind can be fully stopped; other effects keep a small
+                  // minimum so their particles/loops still resolve.
+                  const min = key === "speed" && item.effect === "wind" ? 0 : meta.min;
                   return (
                     <label key={key} className="block">
                       <span className="flex items-center justify-between text-[11px] text-[var(--muted)]">
@@ -934,7 +1449,7 @@ export function AiEffects({
                       </span>
                       <input
                         type="range"
-                        min={meta.min}
+                        min={min}
                         max={meta.max}
                         step={meta.step}
                         value={value}
@@ -1021,6 +1536,15 @@ export function AiEffects({
               </button>
             </div>
           </label>
+          {latestMatchingAsset && (
+            <button
+              type="button"
+              onClick={() => chooseAsset(latestMatchingAsset.id)}
+              className="text-left text-xs text-[var(--gold)] hover:text-white"
+            >
+              Có clip mới khớp plan: dùng “{latestMatchingAsset.name}”
+            </button>
+          )}
           {currentRenderState?.status !== "rendering" && currentRenderState?.status !== "error" && (
             <button
               type="button"
@@ -1113,6 +1637,11 @@ export function AiEffects({
                       <span className="flex flex-wrap items-baseline gap-2">
                         <span className="text-sm">{object.label}</span>
                         <span className="text-xs text-[var(--muted)]">{percent}%</span>
+                        {object.source === "manual" && (
+                          <span className="rounded-full border border-[var(--gold)] px-2 py-0.5 text-[11px] text-[var(--gold)]">
+                            thủ công
+                          </span>
+                        )}
                       </span>
                       {object.affordances.length > 0 && (
                         <span className="mt-1 flex flex-wrap gap-1">
@@ -1128,6 +1657,15 @@ export function AiEffects({
                       )}
                     </span>
                   </label>
+                  {object.source === "manual" && (
+                    <button
+                      type="button"
+                      onClick={() => removeManualObject(object.id)}
+                      className="mt-1 text-[11px] text-[var(--muted)] hover:text-red-200"
+                    >
+                      Xoá object thủ công
+                    </button>
+                  )}
                 </li>
               );
             })}

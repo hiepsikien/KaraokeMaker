@@ -450,6 +450,115 @@ class TargetResolutionTests(unittest.TestCase):
         )
 
 
+    def test_vietnamese_wind_clothing_and_hair_labels_resolve(self):
+        objects = [
+            {"id": "headband-1", "label": "headband"},
+            {"id": "hair-1", "label": "ponytail"},
+            {"id": "coat-1", "label": "coat"},
+        ]
+        plan = director.build_effect_plan(
+            "sha256:" + "f" * 64,
+            {
+                "effects": [
+                    {
+                        "type": "wind",
+                        "target_labels": ["khăn đỏ", "lọn tóc", "vạt áo"],
+                        "intensity": 0.35,
+                        "audio": False,
+                    }
+                ]
+            },
+            objects,
+            [],
+            [],
+            640,
+            360,
+        )
+        self.assertEqual(
+            set(plan["items"][0]["target_ids"]),
+            {"headband-1", "hair-1", "coat-1"},
+        )
+
+
+class FocusedInventoryTests(unittest.TestCase):
+    def test_generic_wind_labels_do_not_trigger_focus_inventory(self):
+        self.assertEqual(
+            director._unresolved_wind_targets(
+                {"effects": [{"type": "wind", "target_labels": ["gió", "wind"]}]},
+                [],
+            ),
+            [],
+        )
+        self.assertEqual(
+            director._unresolved_wind_targets(
+                {"effects": [{"type": "wind", "target_labels": ["khăn", "tóc"]}]},
+                [],
+            ),
+            ["khăn", "tóc"],
+        )
+        self.assertEqual(
+            director._unresolved_wind_targets(
+                {"effects": [{"type": "wind", "target_labels": ["cột buồm"]}]},
+                [],
+            ),
+            [],
+        )
+
+    def test_unresolved_wind_target_triggers_one_focused_inventory_pass(self):
+        intent = {
+            "effects": [
+                {
+                    "type": "wind",
+                    "target_labels": ["tóc"],
+                    "intensity": 0.5,
+                    "audio": False,
+                }
+            ]
+        }
+        base = {
+            "objects": [{"label": "person", "box_2d": [0, 0, 1000, 1000]}],
+            "regions": [],
+            "protect": [],
+        }
+        focused = {
+            "objects": [
+                {
+                    "id": "loose-hair-1",
+                    "label": "loose_hair",
+                    "box_2d": [100, 100, 400, 400],
+                    "pivot_2d": [120, 120],
+                    "affordances": ["wind_movable"],
+                }
+            ],
+            "regions": [],
+            "protect": [],
+        }
+        calls: list[str] = []
+
+        def fake_inventory(_image, _image_hash, _model, _api_key, *, focus=""):
+            calls.append(focus)
+            return (focused if focus else base), {}, False
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / "scene.png"
+            Image.new("RGB", (64, 36), (30, 60, 90)).save(image)
+            with patch.object(director, "_cache_dir", return_value=root / "cache"), patch.object(
+                director, "_api_key", return_value="test-key"
+            ), patch.object(
+                director, "_load_intent", return_value=(intent, {}, False, False)
+            ), patch.object(
+                director, "_load_inventory", side_effect=fake_inventory
+            ):
+                result = analyze_scene(image, "tóc bay", consent=True)
+        self.assertEqual(calls, ["", "tóc"])
+        self.assertIn("loose_hair", [obj["label"] for obj in result["objects"]])
+        self.assertEqual(
+            result["effect_plan"]["items"][0]["target_ids"],
+            ["loose-hair-1"],
+        )
+
+
 class ScaledCoordinateTests(unittest.TestCase):
     def test_unit_box_is_treated_as_normalized_full_frame(self):
         self.assertEqual(director._scaled([0.0, 0.0, 1.0, 1.0]), [0.0, 0.0, 1.0, 1.0])
@@ -478,6 +587,20 @@ class IntentKeywordTests(unittest.TestCase):
         effects = [item["type"] for item in director.keyword_intent("lửa cháy và tàn lửa")["effects"]]
         self.assertIn("embers", effects)
         self.assertIn("fire", effects)
+
+    def test_fluttering_clothing_and_hair_imply_wind(self):
+        for text in (
+            "khăn buộc đầu phất phơ",
+            "lọn tóc bay",
+            "vạt áo tung bay",
+            "red scarf fluttering",
+        ):
+            effects = [item["type"] for item in director.keyword_intent(text)["effects"]]
+            self.assertIn("wind", effects, text)
+
+    def test_rain_mist_alone_does_not_imply_wind(self):
+        effects = [item["type"] for item in director.keyword_intent("mưa bay nhẹ")["effects"]]
+        self.assertNotIn("wind", effects)
 
 
 class EffectParamPlanTests(unittest.TestCase):

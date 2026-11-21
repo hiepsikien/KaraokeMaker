@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { AiEffects } from "@/components/ai-effects";
 import { ImageCards } from "@/components/image-cards";
-import type { BackgroundEffect } from "@/lib/types";
+import type { BackgroundEffect, StudioAsset } from "@/lib/types";
 
 type PreviewResult = {
   id: string;
@@ -24,7 +24,6 @@ const PROFILE_OPTIONS = [
   { value: "portrait_4x5", label: "Dọc 4:5 · 1080×1350" },
 ];
 
-const PREVIEW_DURATION = 4;
 const PROFILE_SIZE: Record<string, string> = {
   landscape_1080p: "1920×1080",
   portrait_1080x1920: "1080×1920",
@@ -72,13 +71,98 @@ export function StudioWorkspace() {
   const [renderHint, setRenderHint] = useState("");
   const [previews, setPreviews] = useState<Record<string, PreviewResult>>({});
   const [savingPath, setSavingPath] = useState("");
+  const [assets, setAssets] = useState<StudioAsset[]>([]);
+  const [assetsError, setAssetsError] = useState("");
+  const [resumeAsset, setResumeAsset] = useState<{ asset: StudioAsset; token: number } | null>(null);
   const renderAbortRef = useRef<AbortController | null>(null);
+  const workRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     return () => {
       renderAbortRef.current?.abort();
     };
   }, []);
+
+  async function loadAssets() {
+    try {
+      const response = await fetch("/api/studio/assets");
+      if (!response.ok) {
+        setAssetsError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { assets?: StudioAsset[] };
+      setAssets(Array.isArray(data.assets) ? data.assets : []);
+      setAssetsError("");
+    } catch {
+      setAssetsError("Không tải được asset đã lưu. Kiểm tra server Python.");
+    }
+  }
+
+  useEffect(() => {
+    void loadAssets();
+  }, []);
+
+  function effectFromAsset(asset: StudioAsset): BackgroundEffect | null {
+    const plan = asset.effect_plan;
+    if (!asset.source_image || !plan) return null;
+    return {
+      image_path: asset.source_image,
+      image_hash: asset.image_hash,
+      effect_prompt: `Asset ${asset.name}`,
+      effect_consent_receipt: {
+        timestamp: asset.created || new Date().toISOString(),
+        image_hash: asset.image_hash,
+        provider: "studio",
+        model: "asset",
+      },
+      selected_object_ids: plan.selected_object_ids || [],
+      effect_plan: plan,
+      model: "studio",
+      created: asset.created || new Date().toISOString(),
+      asset_id: asset.id,
+    };
+  }
+
+  async function openAsset(asset: StudioAsset) {
+    setNotice("");
+    let opened = asset;
+    try {
+      const response = await fetch(`/api/studio/assets/${asset.id}/open`, { method: "POST" });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { asset?: StudioAsset };
+      if (data.asset) opened = data.asset;
+    } catch {
+      setNotice("Không mở được asset. Kiểm tra server Python đang chạy.");
+      return;
+    }
+    const effect = effectFromAsset(opened);
+    if (!effect) {
+      setNotice("Asset này thiếu ảnh nguồn hoặc effect plan nên chưa mở chỉnh sửa được.");
+      return;
+    }
+    setImages((current) =>
+      current.includes(opened.source_image) ? current : [...current, opened.source_image],
+    );
+    if (opened.profile_id && PROFILE_OPTIONS.some((option) => option.value === opened.profile_id)) {
+      setProfile(opened.profile_id);
+    }
+    if (opened.asset_frames && opened.fps) {
+      const seconds = opened.asset_frames / opened.fps;
+      setStandardDuration(Math.max(0.5, Math.min(30, Number(seconds.toFixed(1)))));
+    }
+    setEffects((current) => [
+      ...current.filter((item) => item.image_path !== opened.source_image),
+      effect,
+    ]);
+    setPreviews({});
+    setResumeAsset({ asset: opened, token: Date.now() });
+    window.setTimeout(() => {
+      workRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }
 
   async function pickImages() {
     if (busyBrowse) return;
@@ -146,7 +230,7 @@ export function StudioWorkspace() {
         body: JSON.stringify({
           image_path: effect.image_path,
           effect_plan: effect.effect_plan,
-          duration: PREVIEW_DURATION,
+          duration: standardDuration,
           output_profile: profile,
         }),
         signal: controller.signal,
@@ -286,6 +370,7 @@ export function StudioWorkspace() {
       }
       const data = (await response.json()) as { asset: { id: string; name: string } };
       setNotice(`Đã lưu asset “${data.asset.name}”. Asset sẽ hiện trong phần Hiệu ứng nền của dự án Karaoke.`);
+      void loadAssets();
     } catch {
       setError("Không lưu được asset. Kiểm tra server Python đang chạy.");
     } finally {
@@ -294,8 +379,9 @@ export function StudioWorkspace() {
   }
 
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]">
-      <section className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
+    <div className="space-y-6">
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]">
+      <section ref={workRef} className="scroll-mt-4 space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Ảnh nền</p>
@@ -349,6 +435,9 @@ export function StudioWorkspace() {
           >
             <option value={8}>8 giây</option>
             <option value={16}>16 giây</option>
+            {standardDuration !== 8 && standardDuration !== 16 && (
+              <option value={standardDuration}>{standardDuration} giây (theo asset)</option>
+            )}
           </select>
         </label>
 
@@ -361,11 +450,14 @@ export function StudioWorkspace() {
             effects={effects}
             outputProfile={profile}
             imageDuration={String(standardDuration)}
+            resumeAsset={resumeAsset}
+            onAssetSaved={() => void loadAssets()}
             onEffectsChange={(updater) => {
               setEffects((current) => updater(current));
               // The old preview belongs to the previous plan; never show it
               // as if it reflected the newly applied effects.
               setPreviews({});
+              setResumeAsset(null);
             }}
           />
         </div>
@@ -375,7 +467,7 @@ export function StudioWorkspace() {
         <section className="space-y-3 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Preview</h2>
-            <span className="text-xs text-[var(--muted)]">{PREVIEW_DURATION}s</span>
+            <span className="text-xs text-[var(--muted)]">{standardDuration}s</span>
           </div>
 
           {effects.length === 0 ? (
@@ -403,7 +495,7 @@ export function StudioWorkspace() {
                         disabled={Boolean(renderingPath)}
                         className="rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] transition hover:bg-black/25 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {rendering && renderingMode === "preview" ? "Đang render…" : `Preview ${PREVIEW_DURATION}s`}
+                        {rendering && renderingMode === "preview" ? "Đang render…" : `Preview ${standardDuration}s`}
                       </button>
                       <button
                         type="button"
@@ -469,10 +561,89 @@ export function StudioWorkspace() {
         </section>
 
         <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 text-xs leading-5 text-[var(--muted)]">
-          Preview là video ngắn {PREVIEW_DURATION} giây, lặp lại. Render bản chuẩn rồi bấm “Lưu thành asset” để dùng
-          clip đó trong phần Hiệu ứng nền của dự án Karaoke.
+          Preview dùng cùng thời lượng với bản chuẩn ({standardDuration}s) ở độ phân giải thấp để tốc độ gió khớp.
+          Render bản chuẩn rồi bấm “Lưu thành asset” để dùng clip đó trong phần Hiệu ứng nền của dự án Karaoke.
         </section>
       </aside>
+      </div>
+
+      <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Thư viện</p>
+            <h2 className="mt-1 text-xl font-semibold">Asset đã lưu</h2>
+            <p className="mt-1 text-sm leading-6 text-[var(--muted)]">
+              Bấm “Mở để sửa” để nạp lại ảnh, effect plan, object và các tag thủ công vào Studio.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadAssets()}
+            className="rounded-xl border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--gold)]"
+          >
+            Tải lại
+          </button>
+        </div>
+        {assetsError && <p className="mt-3 text-sm text-red-200">{assetsError}</p>}
+        {assets.length === 0 ? (
+          <p className="mt-3 rounded-2xl border border-dashed border-[var(--line)] p-4 text-sm leading-6 text-[var(--muted)]">
+            Chưa có asset nào. Render bản chuẩn rồi bấm “Lưu thành asset”.
+          </p>
+        ) : (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {assets.map((asset) => {
+              const plan = asset.effect_plan;
+              const effectList = (plan?.items || []).map((item) => item.effect).filter(Boolean);
+              const manualLabels = (plan?.objects || [])
+                .filter((object) => object.source === "manual")
+                .map((object) => object.label);
+              const seconds = asset.asset_frames && asset.fps ? asset.asset_frames / asset.fps : asset.loop_duration;
+              return (
+                <article
+                  key={asset.id}
+                  className="flex min-w-0 flex-col gap-2 rounded-2xl border border-[var(--line)] bg-black/20 p-3"
+                >
+                  <video
+                    src={`/api/studio/assets/${asset.id}/clip`}
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                    className="aspect-video w-full rounded-xl border border-[var(--line)] bg-black object-cover"
+                  />
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-semibold">{asset.name}</p>
+                    <span className="shrink-0 text-xs text-[var(--muted)]">
+                      {typeof seconds === "number" ? `${seconds.toFixed(1)}s` : ""}
+                    </span>
+                  </div>
+                  <p className="truncate text-xs text-[var(--muted)]">
+                    {fileName(asset.source_image)} · {asset.profile_id || "profile?"}
+                  </p>
+                  <p className="text-xs leading-5 text-[var(--muted)]">
+                    Hiệu ứng: {effectList.length ? effectList.join(", ") : "—"}
+                  </p>
+                  {manualLabels.length > 0 && (
+                    <p className="text-xs leading-5 text-[var(--muted)]">
+                      Object thủ công: {manualLabels.join(", ")}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-[var(--muted)]">
+                    {asset.created ? new Date(asset.created).toLocaleString("vi-VN") : ""}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => openAsset(asset)}
+                    className="mt-auto rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] hover:bg-black/25"
+                  >
+                    Mở để sửa
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
