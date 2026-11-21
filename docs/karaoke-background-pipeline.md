@@ -786,8 +786,8 @@ chỉ dựa vào job record. API đã triển khai theo job, nhưng trạng thá
 - Truyền progress xuống `render_motion_loop(progress=...)` (đã hỗ trợ sẵn,
   `living.py:2819`).
 - Với concat FFmpeg, dùng `-progress pipe:1` hoặc progress thô theo số clip.
-- `_overlay_text()` thêm callback progress theo frame.
-- Nếu không nối progress ở Phase 1, UI sẽ hiện phần trăm giả; nên đưa vào Phase 1.
+- `_overlay_text()` đã có callback progress theo frame.
+- Background build cập nhật `background.percent`; UI poll `GET /api/jobs/{id}` để hiển thị.
 
 ### 5.3. UI
 
