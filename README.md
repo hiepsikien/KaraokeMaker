@@ -76,8 +76,18 @@ server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
 - Cache: dùng thư mục cache theo platform (`~/Library/Caches/KaraokeMaker` trên macOS,
   `%LOCALAPPDATA%\KaraokeMaker\Cache` trên Windows, `~/.cache/karaokemaker` trên Linux);
   override bằng `KARAOKE_CACHE_DIR`.
+- Asset Studio nằm ở thư mục dữ liệu ổn định (`~/Library/Application Support/KaraokeMaker/assets`
+  trên macOS, `%APPDATA%\KaraokeMaker\assets` trên Windows, `~/.local/share/karaokemaker/assets`
+  trên Linux), override bằng `KARAOKE_DATA_DIR`; không bị dọn cùng cache.
 - Ảnh nằm ngoài thư mục nhạc/`KARAOKE_ALLOWED_ROOTS` phải được chọn qua hộp thoại
   của ứng dụng, giống các file khác.
+- Trong **Biên tập**, mục **Nền có hiệu ứng** cho phép dựng nền trước khi ghép lời,
+  xem trạng thái sẵn sàng/cần dựng lại, mở thư mục nền và dọn bản cũ. Nền lưu tại
+  `<thư mục xuất>/.karaoke-media/backgrounds/`.
+- Trong **AI Studio**, sau khi render bản chuẩn 16 s, bấm **Lưu thành asset** để dùng
+  lại clip trong mục Hiệu ứng nền. Asset lưu ở thư mục dữ liệu ứng dụng, không bị
+  dọn cùng cache. Nếu clip khác định dạng hoặc khác “Mỗi ảnh nền”, export sẽ render
+  lại từ `effect_plan`.
 
 ## Cách dùng
 
@@ -140,7 +150,10 @@ karaoke/
   align.py       # căn lời vào vocal và kéo chữ về đoạn đang hát
   lyrics.py      # bỏ dòng ghi chú, so khớp tên bài
   media.py       # ảnh, thời lượng, chuyển vocal sang WAV
-  render.py      # dựng hình, đếm ngược, chữ và hai file MP4
+  living.py      # hiệu ứng nền động (mưa, khói, nước…)
+  assets.py      # lưu clip Studio thành asset ổn định
+  background.py  # dựng nền có hiệu ứng trước, rồi overlay lời và ghép tiếng
+  render.py      # dựng chữ, đếm ngược, overlay và mux
 web/
   src/app        # trang Next.js
   src/components/maker-form.tsx      # điều phối các bước

@@ -8,6 +8,7 @@ import type {
   DirectorBox,
   DirectorPoint,
   DirectorUsage,
+  StudioAsset,
 } from "@/lib/types";
 
 type InspectFact = {
@@ -65,6 +66,13 @@ const PROFILE_LABELS: Record<string, string> = {
   portrait_1080x1920: "Dọc 9:16",
   square_1080: "Vuông 1:1",
   portrait_4x5: "Dọc 4:5",
+};
+
+const PROFILE_DIMENSIONS: Record<string, [number, number]> = {
+  landscape_1080p: [1920, 1080],
+  portrait_1080x1920: [1080, 1920],
+  square_1080: [1080, 1080],
+  portrait_4x5: [1080, 1350],
 };
 
 function profileLabel(id: string) {
@@ -297,12 +305,16 @@ export function AiEffects({
   images,
   effects,
   outputProfile,
+  imageDuration = "8",
   onEffectsChange,
+  onAssetDuration,
 }: {
   images: string[];
   effects: BackgroundEffect[];
   outputProfile: string;
+  imageDuration?: string;
   onEffectsChange: (updater: (current: BackgroundEffect[]) => BackgroundEffect[]) => void;
+  onAssetDuration?: (seconds: number) => void;
 }) {
   const imageSignature = images.join("\n");
   const [selectedImage, setSelectedImage] = useState(() => images[0] || "");
@@ -314,6 +326,8 @@ export function AiEffects({
   const [error, setError] = useState("");
   const [fact, setFact] = useState<InspectFact | null>(null);
   const [inspectError, setInspectError] = useState("");
+  const [assets, setAssets] = useState<StudioAsset[]>([]);
+  const [assetsError, setAssetsError] = useState("");
 
   useEffect(() => {
     const current = imageSignature.split("\n").filter(Boolean);
@@ -355,6 +369,25 @@ export function AiEffects({
       });
     return () => controller.abort();
   }, [selectedImage, outputProfile]);
+
+  async function refreshAssets() {
+    try {
+      const response = await fetch("/api/studio/assets");
+      if (!response.ok) {
+        setAssetsError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { assets?: StudioAsset[] };
+      setAssets(Array.isArray(data.assets) ? data.assets : []);
+      setAssetsError("");
+    } catch {
+      setAssetsError("Không tải được asset đã render. Kiểm tra server Python.");
+    }
+  }
+
+  useEffect(() => {
+    void refreshAssets();
+  }, []);
 
   const existingEffect = selectedImage ? effects.find((item) => item.image_path === selectedImage) : undefined;
   const preview = fact?.preview || fact?.thumbnail || "";
@@ -462,6 +495,77 @@ export function AiEffects({
   function removeEffect() {
     if (!selectedImage) return;
     onEffectsChange((current) => current.filter((item) => item.image_path !== selectedImage));
+  }
+
+  const imageAssets = assets.filter(
+    (asset) =>
+      asset.source_image === selectedImage ||
+      Boolean(existingEffect?.image_hash && asset.image_hash === existingEffect.image_hash) ||
+      Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
+  );
+  const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
+  const assetSeconds = selectedAsset?.asset_frames && selectedAsset?.fps
+    ? selectedAsset.asset_frames / selectedAsset.fps
+    : selectedAsset?.loop_duration;
+  const assetMismatch =
+    typeof assetSeconds === "number" &&
+    Math.abs(assetSeconds - Number(imageDuration || 8)) > 0.5 / Math.max(1, Number(selectedAsset?.fps || 30));
+  const assetProfileMismatch = Boolean(
+    selectedAsset?.profile_id && selectedAsset.profile_id !== outputProfile,
+  );
+
+  function chooseAsset(assetId: string) {
+    if (!selectedImage) return;
+    onEffectsChange((current) =>
+      current.map((item) =>
+        item.image_path === selectedImage ? { ...item, asset_id: assetId || null } : item,
+      ),
+    );
+  }
+
+  function useAssetForImage(assetId: string) {
+    if (!selectedImage) return;
+    const asset = imageAssets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const [frameWidth, frameHeight] = PROFILE_DIMENSIONS[outputProfile] || PROFILE_DIMENSIONS.landscape_1080p;
+    const plan =
+      asset.effect_plan ||
+      ({
+        version: 1,
+        image_hash: asset.image_hash,
+        profile_id: outputProfile,
+        fit_transform: {
+          mode: "contain",
+          source_width: asset.width || frameWidth,
+          source_height: asset.height || frameHeight,
+          frame_width: frameWidth,
+          frame_height: frameHeight,
+          scale: 1,
+          offset_x: 0,
+          offset_y: 0,
+        },
+        items: [],
+      } as BackgroundEffect["effect_plan"]);
+    const effect: BackgroundEffect = {
+      image_path: selectedImage,
+      image_hash: asset.image_hash,
+      effect_prompt: "Clip Studio",
+      effect_consent_receipt: {
+        timestamp: new Date().toISOString(),
+        image_hash: asset.image_hash,
+        provider: "studio",
+        model: "asset",
+      },
+      selected_object_ids: [],
+      effect_plan: plan,
+      model: "studio",
+      created: new Date().toISOString(),
+      asset_id: asset.id,
+    };
+    onEffectsChange((current) => [
+      ...current.filter((item) => item.image_path !== selectedImage),
+      effect,
+    ]);
   }
 
   if (images.length === 0) {
@@ -648,19 +752,92 @@ export function AiEffects({
       )}
 
       {existingEffect && (
-        <div className="flex items-start justify-between gap-3 rounded-xl border border-[var(--gold)] bg-black/25 px-3 py-2">
-          <div>
-            <p className="text-sm text-[var(--gold)]">Đã áp dụng</p>
-            <p className="text-xs leading-5 text-[var(--muted)]">
-              {existingEffect.effect_prompt}
-              {(existingEffect.effect_plan?.items?.length ?? 0) > 0
-                ? ` · ${existingEffect.effect_plan.items.map((item) => item.effect).join(", ")}`
-                : ""}
-            </p>
+        <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 px-3 py-2">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm text-[var(--gold)]">Đã áp dụng</p>
+              <p className="text-xs leading-5 text-[var(--muted)]">
+                {existingEffect.effect_prompt}
+                {(existingEffect.effect_plan?.items?.length ?? 0) > 0
+                  ? ` · ${existingEffect.effect_plan.items.map((item) => item.effect).join(", ")}`
+                  : ""}
+              </p>
+            </div>
+            <button type="button" onClick={removeEffect} className="shrink-0 text-xs text-[var(--muted)] hover:text-white">
+              Xóa
+            </button>
           </div>
-          <button type="button" onClick={removeEffect} className="shrink-0 text-xs text-[var(--muted)] hover:text-white">
-            Xóa
-          </button>
+          <label className="block">
+            <span className="mb-1 block text-[11px] text-[var(--muted)]">Clip đã render (Studio)</span>
+            <div className="flex gap-2">
+              <select
+                className={fieldClass}
+                value={existingEffect.asset_id || ""}
+                onChange={(event) => chooseAsset(event.target.value)}
+              >
+                <option value="">Render từ effect_plan</option>
+                {imageAssets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.name} · {asset.asset_frames && asset.fps ? `${(asset.asset_frames / asset.fps).toFixed(1)}s` : "clip"}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => void refreshAssets()}
+                className="shrink-0 rounded-xl border border-[var(--line)] px-3 text-xs hover:border-[var(--gold)]"
+              >
+                Tải lại
+              </button>
+            </div>
+          </label>
+          {assetsError && <p className="text-[11px] text-red-200">{assetsError}</p>}
+          {assetProfileMismatch && (
+            <p className="text-[11px] leading-4 text-amber-200">
+              Clip được render ở {selectedAsset?.profile_id}, khác định dạng hiện tại ({outputProfile}). Export sẽ
+              fallback render từ effect_plan.
+            </p>
+          )}
+          {assetMismatch && (
+            <div className="space-y-1">
+              <p className="text-[11px] leading-4 text-amber-200">
+                Clip dài {assetSeconds?.toFixed(1)}s, khác “Mỗi ảnh nền” ({imageDuration}s). Export sẽ fallback render từ
+                effect_plan; hãy render lại đúng thời lượng nếu muốn dùng clip này.
+              </p>
+              {onAssetDuration && assetSeconds ? (
+                <button
+                  type="button"
+                  onClick={() => onAssetDuration(assetSeconds)}
+                  className="text-[11px] text-[var(--gold)] hover:text-white"
+                >
+                  Đặt “Mỗi ảnh nền” = {assetSeconds.toFixed(1)}s
+                </button>
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!existingEffect && selectedImage && imageAssets.length > 0 && (
+        <div className="space-y-1 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-2">
+          <p className="text-xs text-[var(--gold)]">Dùng clip Studio cho ảnh này</p>
+          <select
+            className={fieldClass}
+            defaultValue=""
+            onChange={(event) => {
+              if (event.target.value) useAssetForImage(event.target.value);
+            }}
+          >
+            <option value="">Chọn clip đã render…</option>
+            {imageAssets.map((asset) => (
+              <option key={asset.id} value={asset.id}>
+                {asset.name}
+              </option>
+            ))}
+          </select>
+          <p className="text-[11px] leading-4 text-[var(--muted)]">
+            Chọn clip sẽ tạo một hiệu ứng chỉ dùng asset, không cần phân tích Gemini.
+          </p>
         </div>
       )}
 

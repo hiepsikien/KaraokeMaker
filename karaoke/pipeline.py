@@ -16,7 +16,7 @@ from karaoke.media import (
     safe_title,
     write_timing,
 )
-from karaoke.render import render_videos
+from karaoke.background import BackgroundRef, render_videos
 from karaoke.profiles import normalize_profile_id
 
 EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
@@ -252,6 +252,11 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
             if str(item).strip()
         ],
         "background_effects": _dict_list(payload.get("background_effects")),
+        "background_render": (
+            dict(payload["background_render"])
+            if isinstance(payload.get("background_render"), dict)
+            else None
+        ),
         "output_profile": normalize_profile_id(payload.get("output_profile")),
         "cover_image": _optional_existing(payload.get("cover_image", ""), "ảnh bìa", IMAGE_SUFFIXES),
         "output_dir": str(output_dir),
@@ -465,7 +470,14 @@ def unique_export_names(
     raise JobError("Không tạo được tên file xuất mới. Thử lại sau một giây.")
 
 
-def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict | None = None) -> dict:
+def render_job(
+    prepared: dict,
+    lines: list[dict],
+    log,
+    *,
+    export_options: dict | None = None,
+    progress=None,
+) -> dict:
     from karaoke.project import sync_project_file
 
     options = export_options or {}
@@ -500,7 +512,8 @@ def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict |
         log(f"Đã lưu thời gian từng chữ vào {timing_path}.")
         prepared["timing_path"] = str(timing_path)
         log(f"Xuất {fmt.upper()} vào {output_dir} — {vocal_name}")
-        vocal_out, instrumental_out = render_videos(
+        background_ref = BackgroundRef.from_project(prepared.get("background_render"), output_dir)
+        result = render_videos(
             lines=lines,
             title=title,
             artist=prepared["artist"],
@@ -516,8 +529,19 @@ def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict |
             image_duration=float(prepared["image_duration"]),
             background_effects=prepared.get("background_effects") or [],
             output_profile=profile_id,
+            background=background_ref,
+            rebuild_background=bool(options.get("rebuild_background")),
+            progress=progress,
             log=log,
         )
+        if isinstance(result, tuple):
+            # Compatibility with older/test mocks.
+            vocal_out, instrumental_out = result
+            background_path = None
+        else:
+            vocal_out, instrumental_out = result.vocal, result.instrumental
+            prepared["background_render"] = result.background.to_project()
+            background_path = result.background.path
     except (MediaError, JobError):
         raise
     except Exception as error:
@@ -530,6 +554,8 @@ def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict |
         "timing": str(timing_path),
         "format": fmt,
     }
+    if background_path is not None:
+        outputs["background"] = str(background_path)
     try:
         project_path = sync_project_file(prepared, lines=lines, status="exported", outputs=outputs)
         outputs["project"] = str(project_path)

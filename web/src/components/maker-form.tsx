@@ -63,7 +63,12 @@ export function MakerForm() {
   }, []);
 
   useEffect(() => {
-    if (!job || (job.status !== "running" && job.status !== "rendering")) return;
+    if (
+      !job ||
+      (job.status !== "running" && job.status !== "rendering" && job.background?.state !== "building")
+    ) {
+      return;
+    }
     const jobId = job.id;
     const timer = setInterval(async () => {
       const response = await fetch(`/api/jobs/${jobId}`);
@@ -79,7 +84,7 @@ export function MakerForm() {
       // Keep phase "align" on error so the Ghép chữ screen can show job.error.
     }, 1000);
     return () => clearInterval(timer);
-  }, [job?.id, job?.status]);
+  }, [job?.id, job?.status, job?.background?.state]);
 
   async function browse(kind: BrowseKind) {
     setNotice("");
@@ -360,6 +365,46 @@ export function MakerForm() {
     return selected;
   }
 
+  async function buildBackground(rebuild: boolean) {
+    if (!job) return;
+    setNotice("");
+    try {
+      const response = await fetch(`/api/jobs/${job.id}/background`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rebuild }),
+      });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      setJob((current) =>
+        current ? { ...current, background: { state: "building", percent: 0 } } : current,
+      );
+    } catch {
+      setNotice("Không gửi được lệnh dựng nền. Kiểm tra server Python đang chạy.");
+    }
+  }
+
+  async function cleanupBackground() {
+    if (!job) return;
+    try {
+      const response = await fetch(`/api/jobs/${job.id}/background/cleanup`, { method: "POST" });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { deleted?: string[] };
+      setNotice(
+        data.deleted?.length
+          ? `Đã dọn ${data.deleted.length} bản nền cũ.`
+          : "Không có bản nền cũ nào đủ điều kiện để dọn.",
+      );
+    } catch {
+      setNotice("Không dọn được bản nền cũ. Kiểm tra server Python đang chạy.");
+    }
+  }
+
   async function renderVideos(nextLines: TimedLine[], options: ExportOptions) {
     if (!job) return;
     setNotice("");
@@ -550,8 +595,12 @@ export function MakerForm() {
           log={job.log}
           outputs={job.outputs}
           defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
+          background={job.background}
+          renderPercent={job.render_percent ?? 0}
           onRender={renderVideos}
           onReveal={reveal}
+          onBuildBackground={buildBackground}
+          onCleanupBackground={cleanupBackground}
           onResumeEditing={resumeEditing}
           onBrowseOutput={browseExportDir}
           onRealign={() => openAlign("edit")}

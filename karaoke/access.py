@@ -69,6 +69,11 @@ def grant_project_paths(payload: dict) -> None:
         stem = str(restore.get("instrumental_stem") or "").strip()
         if stem:
             grant(Path(stem))
+    background = payload.get("background_render")
+    if isinstance(background, dict):
+        source = str(background.get("source_output_dir") or "").strip()
+        if source:
+            grant(Path(source))
 
 
 def allowed_roots() -> list[Path]:

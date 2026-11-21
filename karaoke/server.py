@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -16,6 +17,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
+from karaoke.assets import (
+    AssetError,
+    delete_asset,
+    list_assets,
+    save_asset_from_preview,
+)
+from karaoke.background import (
+    BackgroundRef,
+    background_status,
+    build_background,
+    cleanup_backgrounds,
+)
 from karaoke.director import DirectorError, analyze_scene
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
@@ -178,6 +191,20 @@ class StudioRenderRequest(BaseModel):
     full_resolution: bool = False
 
 
+class StudioAssetRequest(BaseModel):
+    preview_id: str = ""
+    name: str = ""
+    image_path: str = ""
+    image_hash: str = ""
+    effect_plan: dict = Field(default_factory=dict)
+    duration: float = 16
+    output_profile: str = "landscape_1080p"
+
+
+class BackgroundRequest(BaseModel):
+    rebuild: bool = False
+
+
 class WordIn(BaseModel):
     text: str = ""
     start: float = 0
@@ -204,6 +231,7 @@ class RenderRequest(BaseModel):
     lines: list[LineIn] = Field(default_factory=list)
     output_dir: str = ""
     format: str = "mp4"
+    rebuild_background: bool = False
 
 
 _AUDIO_TYPES = {
@@ -653,8 +681,83 @@ def studio_preview(preview_id: str):
     return FileResponse(path, media_type="video/mp4", filename=f"{preview_id}.mp4")
 
 
+def _image_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+@app.post("/api/studio/assets")
+def studio_asset_create(body: StudioAssetRequest):
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh nguồn.")
+    try:
+        image = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not image.is_file():
+        raise HTTPException(status_code=400, detail="Không thấy ảnh nguồn.")
+    try:
+        meta = save_asset_from_preview(
+            preview_id=body.preview_id,
+            name=body.name,
+            image_path=image,
+            image_hash=_image_hash(image),
+            effect_plan=body.effect_plan,
+            duration=body.duration,
+            output_profile=body.output_profile,
+        )
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Không lưu được asset. Xem terminal Python.")
+    return {"asset": meta}
+
+
+@app.get("/api/studio/assets")
+def studio_assets():
+    return {"assets": list_assets()}
+
+
+@app.get("/api/studio/assets/{asset_id}/clip")
+def studio_asset_clip(asset_id: str):
+    from karaoke.assets import clip_path, load_asset
+
+    meta = load_asset(asset_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    try:
+        path = clip_path(meta)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy clip asset.")
+    return FileResponse(path, media_type="video/mp4", filename=f"{asset_id}.mp4")
+
+
+@app.delete("/api/studio/assets/{asset_id}")
+def studio_asset_delete(asset_id: str):
+    try:
+        deleted = delete_asset(asset_id)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    return {"deleted": True}
+
+
 def _public_job(record: dict) -> dict:
     prepared = record.get("prepared") or {}
+    background = record.get("background")
+    if background is None and prepared:
+        try:
+            background = background_status(prepared, prepared.get("output_dir"))
+        except Exception:
+            background = None
     return {
         "id": record["id"],
         "status": record["status"],
@@ -664,10 +767,26 @@ def _public_job(record: dict) -> dict:
         "lines": record["lines"],
         "duration": record["duration"],
         "export_gaps": export_gaps(prepared) if prepared else [],
+        "render_percent": record.get("render_percent", 0),
         "project_path": prepared.get("project_path") or "",
         "project": record.get("project"),
         "restore": record.get("restore"),
+        "background": background,
     }
+
+
+def _finish_render_record(record: dict, prepared: dict, lines: list[dict], outputs: dict) -> None:
+    try:
+        background = background_status(prepared, prepared.get("output_dir"))
+    except Exception:
+        background = None
+    with _lock:
+        record["status"] = "done"
+        record["outputs"] = outputs
+        record["lines"] = lines
+        record["prepared"] = prepared
+        if background is not None:
+            record["background"] = background
 
 
 def _store_job(record: dict) -> dict:
@@ -924,7 +1043,113 @@ def get_job(job_id: str):
         record = _jobs.get(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Không thấy việc này.")
-        return _public_job(record)
+    return _public_job(record)
+
+
+@app.get("/api/jobs/{job_id}/background")
+def get_job_background(job_id: str):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Chưa có dự án để dựng nền.")
+        prepared = record["prepared"]
+        current = record.get("background")
+    if current is not None and str(current.get("state")) in {"building", "error"}:
+        return current
+    return background_status(prepared, prepared.get("output_dir"))
+
+
+@app.post("/api/jobs/{job_id}/background")
+def build_job_background(job_id: str, body: BackgroundRequest):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Chưa có dự án để dựng nền.")
+        prepared = record["prepared"]
+        if record.get("status") in {"running", "rendering", "separating"}:
+            raise HTTPException(status_code=409, detail="Việc này đang chạy.")
+        current = record.get("background") or {}
+        if str(current.get("state")) == "building":
+            raise HTTPException(status_code=409, detail="Nền đang được dựng.")
+        output_dir = str(prepared.get("output_dir") or "").strip()
+        if not output_dir:
+            raise HTTPException(status_code=400, detail="Hãy chọn thư mục xuất.")
+        try:
+            output = ensure_allowed(Path(output_dir))
+        except AccessError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        grant(output)
+        prepared["output_dir"] = str(output)
+        record["background"] = {"state": "building", "percent": 0, "reason": ""}
+        record["log"].append("Bắt đầu dựng nền có hiệu ứng.")
+
+    def log(message: str) -> None:
+        with _lock:
+            record["log"].append(message)
+
+    def progress(done, total) -> None:
+        with _lock:
+            current = record.get("background") or {}
+            if str(current.get("state")) == "building":
+                current["percent"] = round(100.0 * float(done) / max(1.0, float(total)))
+                record["background"] = current
+
+    def worker() -> None:
+        try:
+            background_ref = BackgroundRef.from_project(prepared.get("background_render"), output)
+            build = build_background(
+                prepared,
+                output_dir=output,
+                background=background_ref,
+                force=body.rebuild,
+                progress=progress,
+                log=log,
+            )
+            prepared["background_render"] = build.to_project()
+            lines = record.get("lines")
+            project_path = sync_project_file(prepared, lines=lines, status=None)
+            saved_project, saved_path = load_project(Path(project_path))
+            status = background_status(prepared, output)
+            with _lock:
+                record["prepared"] = prepared
+                record["project"] = public_project(saved_project, saved_path)
+                record["background"] = status
+                record["log"].append(
+                    "Nền đã sẵn sàng." if status.get("state") == "ready" else "Nền đã dựng nhưng cần kiểm tra lại."
+                )
+        except Exception as error:
+            traceback.print_exc()
+            with _lock:
+                record["background"] = {"state": "error", "percent": 0, "reason": str(error)}
+                record["log"].append(f"Không dựng được nền: {error}")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"id": job_id, "background": {"state": "building", "percent": 0}}
+
+
+@app.post("/api/jobs/{job_id}/background/cleanup")
+def cleanup_job_backgrounds(job_id: str):
+    with _lock:
+        record = _jobs.get(job_id)
+        if record is None or not record.get("prepared"):
+            raise HTTPException(status_code=404, detail="Chưa có dự án để dọn nền.")
+        prepared = record["prepared"]
+        output_text = str(prepared.get("output_dir") or "").strip()
+        project_path = str(prepared.get("project_path") or "").strip()
+        meta = prepared.get("background_render")
+    if not output_text:
+        raise HTTPException(status_code=400, detail="Hãy chọn thư mục xuất.")
+    try:
+        output = ensure_allowed(Path(output_text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    keep = [str(meta.get("hash"))] if isinstance(meta, dict) and meta.get("hash") else []
+    deleted = cleanup_backgrounds(
+        output,
+        keep_hashes=keep,
+        project_paths=[Path(project_path)] if project_path else [],
+    )
+    return {"deleted": deleted}
 
 
 @app.get("/api/jobs/{job_id}/audio")
@@ -1054,24 +1279,39 @@ def start_render(job_id: str, body: RenderRequest):
             raise HTTPException(status_code=409, detail="Hãy căn lời trước khi xuất video.")
         if record["status"] in {"running", "rendering"}:
             raise HTTPException(status_code=409, detail="Việc này đang chạy.")
+        if str((record.get("background") or {}).get("state")) == "building":
+            raise HTTPException(status_code=409, detail="Nền đang được dựng. Hãy đợi xong.")
         record["status"] = "rendering"
         record["error"] = ""
+        record["render_percent"] = 0
         prepared = dict(record["prepared"])
         lines = [line.model_dump() for line in body.lines]
-        export_options = {"output_dir": body.output_dir, "format": body.format}
+        export_options = {
+            "output_dir": body.output_dir,
+            "format": body.format,
+            "rebuild_background": body.rebuild_background,
+        }
 
     def log(message: str) -> None:
         with _lock:
             record["log"].append(message)
 
+    def progress(done, total) -> None:
+        with _lock:
+            record["render_percent"] = round(100.0 * float(done) / max(1.0, float(total)))
+
     def worker() -> None:
         try:
-            outputs = render_job(prepared, lines, log, export_options=export_options)
+            outputs = render_job(
+                prepared,
+                lines,
+                log,
+                export_options=export_options,
+                progress=progress,
+            )
             with _lock:
-                record["status"] = "done"
-                record["outputs"] = outputs
-                record["lines"] = lines
-                record["prepared"]["output_dir"] = prepared.get("output_dir") or record["prepared"].get("output_dir")
+                record["render_percent"] = 100
+            _finish_render_record(record, prepared, lines, outputs)
         except JobError as error:
             with _lock:
                 record["status"] = "error"

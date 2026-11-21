@@ -58,8 +58,12 @@ export function TimingEditor({
   log,
   outputs,
   defaultOutputDir = "",
+  background = null,
+  renderPercent = 0,
   onRender,
   onReveal,
+  onBuildBackground,
+  onCleanupBackground,
   onResumeEditing,
   onBrowseOutput,
   onBack,
@@ -76,8 +80,24 @@ export function TimingEditor({
   log: string[];
   outputs: { vocal: string; instrumental: string; directory: string } | null;
   defaultOutputDir?: string;
+  renderPercent?: number;
+  background?: {
+    state: "missing" | "stale" | "ready" | "building" | "error";
+    percent?: number;
+    reason?: string;
+    hash?: string;
+    path?: string;
+    total_frames?: number;
+    cover_frames?: number;
+    song_frames?: number;
+    image_frames?: number;
+    profile_id?: string;
+    fps?: number;
+  } | null;
   onRender: (lines: TimedLine[], options: ExportOptions) => void;
   onReveal: (path: string) => void;
+  onBuildBackground?: (rebuild: boolean) => void;
+  onCleanupBackground?: () => void;
   onResumeEditing?: () => void;
   onBrowseOutput?: () => Promise<string | null>;
   onBack: () => void;
@@ -101,6 +121,18 @@ export function TimingEditor({
   const [browsingOutput, setBrowsingOutput] = useState(false);
   const [removed, setRemoved] = useState<TimedLine[]>([]);
   const cue = cueAt(lines, time);
+  const backgroundBuilding = background?.state === "building";
+  const backgroundReady = background?.state === "ready";
+  const backgroundLabel =
+    background?.state === "building"
+      ? `Đang dựng nền${typeof background.percent === "number" ? ` ${background.percent}%` : "…"}`
+      : backgroundReady
+        ? "Nền đã sẵn sàng"
+        : background?.state === "stale"
+          ? "Nền cần dựng lại"
+          : background?.state === "error"
+            ? "Dựng nền lỗi"
+            : "Chưa dựng nền";
 
   useEffect(() => {
     if (defaultOutputDir) setExportDir((current) => current || defaultOutputDir);
@@ -590,14 +622,86 @@ export function TimingEditor({
         <p className="text-xs leading-5 text-[var(--muted)]">
           Tên file có hậu tố thời gian (vd. 20261019-161005) nên xuất lại không ghi đè bản trước.
         </p>
+        {background && (
+          <div className="space-y-2 rounded-2xl border border-[var(--line)] bg-black/20 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-semibold tracking-[0.12em] text-[var(--gold)] uppercase">
+                Nền có hiệu ứng
+              </span>
+              <span
+                className={
+                  backgroundReady
+                    ? "text-xs text-emerald-200"
+                    : background?.state === "error"
+                      ? "text-xs text-red-200"
+                      : "text-xs text-[var(--muted)]"
+                }
+              >
+                {backgroundLabel}
+              </span>
+            </div>
+            {background.reason && background.state !== "ready" && (
+              <p className="text-xs leading-5 text-[var(--muted)]">{background.reason}</p>
+            )}
+            {typeof background.total_frames === "number" && background.total_frames > 0 && (
+              <p className="text-xs text-[var(--muted)]">
+                {background.total_frames} frame
+                {background.fps ? ` · ${(background.total_frames / background.fps).toFixed(1)}s` : ""}
+                {background.profile_id ? ` · ${background.profile_id}` : ""}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={locked || backgroundBuilding || exportGaps.length > 0}
+                onClick={() => onBuildBackground?.(backgroundReady || background?.state === "stale")}
+                className="rounded-xl border border-[var(--gold)] px-3 py-2 text-xs font-semibold text-[var(--gold)] disabled:opacity-50"
+              >
+                {backgroundBuilding ? "Đang dựng…" : backgroundReady ? "Dựng lại nền" : "Dựng nền"}
+              </button>
+              {background.path && (
+                <button
+                  type="button"
+                  onClick={() => onReveal(background.path!.replace(/[\\/][^\\/]+$/, ""))}
+                  className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)]"
+                >
+                  Mở thư mục nền
+                </button>
+              )}
+              {onCleanupBackground && (
+                <button
+                  type="button"
+                  disabled={locked || backgroundBuilding}
+                  onClick={onCleanupBackground}
+                  className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)] disabled:opacity-50"
+                >
+                  Dọn bản nền cũ
+                </button>
+              )}
+            </div>
+            <p className="text-[11px] leading-4 text-[var(--muted)]">
+              Xuất video vẫn tự dựng nền nếu chưa có. Dựng trước giúp kiểm tra nền và tách khỏi bước ghép lời.
+            </p>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            disabled={locked || lines.length === 0 || exportGaps.length > 0 || !exportDir.trim()}
+            disabled={
+              locked ||
+              backgroundBuilding ||
+              lines.length === 0 ||
+              exportGaps.length > 0 ||
+              !exportDir.trim()
+            }
             onClick={startExport}
             className="rounded-2xl bg-[var(--gold)] px-5 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
           >
-            {locked ? "Đang xuất video…" : outputs ? "Xuất lại hai video" : "Xuất hai video"}
+            {locked
+              ? `Đang xuất video…${renderPercent ? ` ${renderPercent}%` : ""}`
+              : outputs
+                ? "Xuất lại hai video"
+                : "Xuất hai video"}
           </button>
         </div>
         {exportGaps.length > 0 && (

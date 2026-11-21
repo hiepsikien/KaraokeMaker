@@ -209,7 +209,8 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 30
+# v31: visual plan hash ignores non-visual params (audio, legacy loop_duration).
+MOTION_CACHE_VERSION = 31
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -374,9 +375,44 @@ def _file_hash(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _plan_hash(plan: dict) -> str:
-    payload = json.dumps(plan, sort_keys=True)
+NON_VISUAL_PLAN_PARAMS = frozenset({"audio", "loop_duration"})
+
+
+def _visual_plan(plan: dict) -> dict:
+    """Return a copy of the plan with non-visual params removed.
+
+    ``audio`` only drives the mux stage and ``loop_duration`` is legacy metadata;
+    changing either must not invalidate a visual clip or change its seed.
+    """
+    if not isinstance(plan, dict):
+        return {}
+    data = dict(plan)
+    items: list[dict] = []
+    for item in data.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        params = entry.get("params")
+        if isinstance(params, dict):
+            entry["params"] = {
+                key: value
+                for key, value in params.items()
+                if key not in NON_VISUAL_PLAN_PARAMS
+            }
+        items.append(entry)
+    data["items"] = items
+    return data
+
+
+def visual_plan_hash(plan: dict) -> str:
+    """Hash only the parts of the plan that affect rendered pixels."""
+    payload = json.dumps(_visual_plan(plan), sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _plan_hash(plan: dict) -> str:
+    """Backward-compatible alias for the visual-only plan hash."""
+    return visual_plan_hash(plan)
 
 
 def _finite(value, fallback: float) -> float:
@@ -2848,7 +2884,7 @@ def _render_loop(
             "Hãy phân tích lại ảnh."
         )
         return None
-    plan_hash = _plan_hash(plan)
+    plan_hash = visual_plan_hash(plan)
     selection = ",".join(effect for effect in SUPPORTED_EFFECTS if effect in effects)
     key = hashlib.sha256(
         (
