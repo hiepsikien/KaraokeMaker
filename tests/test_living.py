@@ -550,6 +550,49 @@ class WindFlagTests(unittest.TestCase):
 
 
 class EmbersTests(unittest.TestCase):
+    def test_embers_ignore_the_sun_and_burning_ship_boxes(self):
+        plan = effect_plan(
+            [
+                {
+                    "effect": "embers",
+                    "target_ids": [],
+                    "params": {"intensity": 0.6, "speed": 1.0, "density": 1.0},
+                }
+            ],
+            objects=[
+                object_entry(
+                    "ship-1",
+                    "burning ship",
+                    (0.0, 0.2, 0.5, 0.8),
+                    affordances=["fire", "burn", "emissive"],
+                ),
+                object_entry(
+                    "fire-1",
+                    "fire",
+                    (0.4, 0.55, 0.55, 0.7),
+                    affordances=["fire", "burn", "emissive"],
+                ),
+                object_entry(
+                    "sun-1",
+                    "sun",
+                    (0.7, 0.0, 1.0, 0.4),
+                    affordances=["sun", "light_source", "glow"],
+                ),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        shapes = living._fire_shapes(plan, set(), flames_only=True)
+        self.assertEqual(len(shapes), 1)
+        spec = living._embers_spec(
+            plan, transform, 100, 100, 4.0, prevent, 1234, lambda _m: None
+        )
+        self.assertIsNotNone(spec)
+        for particle in spec["particles"]:
+            self.assertGreaterEqual(particle["x"], 40.0)
+            self.assertLessEqual(particle["x"], 55.0)
+            self.assertGreaterEqual(particle["y"], 40.0)
+
     def test_embers_use_fire_object_and_rise(self):
         plan = effect_plan(
             [

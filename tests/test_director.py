@@ -458,6 +458,16 @@ class ScaledCoordinateTests(unittest.TestCase):
         self.assertEqual(director._scaled([0.0, 0.0, 500.0, 1000.0]), [0.0, 0.0, 0.5, 1.0])
 
 
+class EmbersAliasTests(unittest.TestCase):
+    def test_vietnamese_ash_words_map_to_embers(self):
+        for text in ("tàn tro", "tàn trò", "ash", "ashes"):
+            self.assertEqual(director._effect_type(text), "embers")
+        for text in ("tàn tro", "tàn trò", "tro bay", "ash", "ashes"):
+            effects = [item["type"] for item in director.keyword_intent(text)["effects"]]
+            self.assertIn("embers", effects)
+            self.assertNotIn("fire", effects)
+
+
 class IntentKeywordTests(unittest.TestCase):
     def test_embers_only_does_not_also_add_fire(self):
         effects = [item["type"] for item in director.keyword_intent("tàn lửa bốc bay")["effects"]]

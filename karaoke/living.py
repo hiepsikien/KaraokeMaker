@@ -209,7 +209,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 28
+MOTION_CACHE_VERSION = 29
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -2091,18 +2091,61 @@ def _token_match(identity: str, tokens: tuple[str, ...]) -> bool:
     return any(word in tokens for word in words)
 
 
-def _fire_shapes(plan: dict, targets: set[str]) -> list[list[tuple[float, float]]]:
-    """Fire object boxes first; fall back to an explicit fire/flame region."""
-    shapes: list[list[tuple[float, float]]] = []
-    for entry in _plan_objects(plan):
-        if targets and entry["id"] not in targets:
-            continue
-        if not targets and not _matches_hints(entry, FIRE_AFFORDANCES, FIRE_LABELS):
-            continue
-        x1, y1, x2, y2 = entry["box"]
-        shapes.append([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+def _is_light_source_entry(entry: dict) -> bool:
+    """True for the sun/light-source object, which must never count as fire."""
+    label = str(entry.get("label") or "").casefold()
+    affordances = " ".join(entry.get("affordances") or [])
+    return (
+        "sun" in label
+        or "sunlight" in label
+        or "light_source" in affordances
+        or "light source" in affordances
+    )
+
+
+def _is_flame_object(entry: dict) -> bool:
+    """Strict flame labels, so a burning-ship hull box is not an ember source."""
+    label = str(entry.get("label") or "").casefold()
+    return any(
+        token in label
+        for token in ("fire", "flame", "ember", "torch", "candle", "brazier", "hearth")
+    )
+
+
+def _fire_shapes(
+    plan: dict,
+    targets: set[str],
+    *,
+    flames_only: bool = False,
+) -> list[list[tuple[float, float]]]:
+    """Fire object boxes first; fall back to an explicit fire/flame region.
+
+    ``flames_only`` prefers compact flame objects so embers rise from the
+    fire itself instead of a whole burning-ship box (or the sun).
+    """
+
+    def collect(strict: bool) -> list[list[tuple[float, float]]]:
+        shapes: list[list[tuple[float, float]]] = []
+        for entry in _plan_objects(plan):
+            if _is_light_source_entry(entry):
+                continue
+            if targets and entry["id"] not in targets:
+                continue
+            if not targets and not _matches_hints(entry, FIRE_AFFORDANCES, FIRE_LABELS):
+                continue
+            if strict and not _is_flame_object(entry):
+                continue
+            x1, y1, x2, y2 = entry["box"]
+            shapes.append([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+        return shapes
+
+    shapes = collect(flames_only)
     if shapes:
         return shapes
+    if flames_only:
+        shapes = collect(False)
+        if shapes:
+            return shapes
     regions = plan.get("regions") if isinstance(plan, dict) else None
     if not isinstance(regions, list):
         return []
@@ -2216,7 +2259,7 @@ def _embers_spec(
     if intensity <= 1e-3 or density_multiplier <= 0.0:
         log("Bỏ qua tàn lửa: intensity hoặc density bằng 0.")
         return None
-    shapes = _fire_shapes(plan, _target_ids(items))
+    shapes = _fire_shapes(plan, _target_ids(items), flames_only=True)
     if not shapes:
         log("Bỏ qua tàn lửa: không có object/vùng lửa khớp target.")
         return None
@@ -2248,7 +2291,7 @@ def _embers_spec(
 
     speed = _items_speed(items)
     density = math.sqrt((width * height) / (WIDTH * HEIGHT)) * density_multiplier
-    count = max(0, int(round(95 * density * (0.5 + 0.9 * intensity))))
+    count = max(0, int(round(150 * density * (0.5 + 0.9 * intensity))))
     if count == 0:
         return None
     total_area = sum(emitter["area"] for emitter in emitters)
@@ -2274,8 +2317,15 @@ def _embers_spec(
                 "sway": float(max(1.0, rng.uniform(2.0, 8.0) * height / HEIGHT)),
                 "phase": float(rng.uniform(0.0, 1.0)),
                 "cycles": max(1, int(round(int(rng.integers(2, 5)) * speed))),
-                "size": float(max(1.0, rng.uniform(1.4, 3.2) * height / HEIGHT)),
-                "alpha": float(rng.uniform(0.55, 1.0)),
+                # Fixed-ish pixel size: embers are point sparks, so scaling
+                # them down to sub-pixel at 640 made them invisible.
+                "size": float(
+                    max(
+                        1.2,
+                        rng.uniform(1.3, 2.8) * math.sqrt(height / HEIGHT),
+                    )
+                ),
+                "alpha": float(rng.uniform(0.65, 1.0)),
                 "color": np.asarray(
                     (
                         rng.uniform(235.0, 255.0),

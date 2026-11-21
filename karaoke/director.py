@@ -304,7 +304,8 @@ def _intent_text(prompt: str) -> str:
         "Return JSON only. Supported effect types are rain, snow, water, steam, wind, "
         "fire, embers, birds, sunrays, fog, light. "
         "Vietnamese hints: mưa -> rain, tuyết -> snow, nước/sóng -> water, "
-        "khói/hơi -> steam, gió -> wind, lửa/cháy -> fire, tàn lửa/tia lửa -> embers, "
+        "khói/hơi -> steam, gió -> wind, lửa/cháy -> fire, "
+        "tàn lửa/tia lửa/tàn tro/tro/ash/ashes -> embers, "
         "chim/đàn chim -> birds, nắng/tia nắng/ánh sáng mặt trời -> sunrays, "
         "sương mù -> fog, ánh sáng/bụi -> light. "
         "Only add birds or sunrays when the user explicitly asks for the birds/flock "
@@ -732,6 +733,12 @@ def _effect_type(value: Any) -> str | None:
         "spark": "embers",
         "tàn lửa": "embers",
         "tia lửa": "embers",
+        "tàn tro": "embers",
+        "tàn trò": "embers",
+        "tan tro": "embers",
+        "tro": "embers",
+        "ash": "embers",
+        "ashes": "embers",
         "fire": "fire",
         "flame": "fire",
         "lửa": "fire",
@@ -824,7 +831,18 @@ def keyword_intent(prompt: str) -> dict:
         found.append("water")
     if "tuyết" in text or "snow" in text:
         found.append("snow")
-    if "tàn lửa" in text or "tia lửa" in text or "embers" in text or "sparks" in text:
+    words = text.split()
+    if (
+        "tàn lửa" in text
+        or "tia lửa" in text
+        or "tàn tro" in text
+        or "tàn trò" in text
+        or "embers" in text
+        or "sparks" in text
+        or "tro" in words
+        or "ash" in words
+        or "ashes" in words
+    ):
         found.append("embers")
     fire_text = text.replace("tàn lửa", " ").replace("tia lửa", " ")
     if (

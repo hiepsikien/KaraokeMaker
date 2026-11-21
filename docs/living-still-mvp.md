@@ -386,7 +386,7 @@ speed * T = k * span
   sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
   thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
   `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
-- 121 tests pass.
+- 123 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=28`, `PREVIEW_VERSION=preview_v24`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=29`, `PREVIEW_VERSION=preview_v25`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -472,6 +472,9 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   và dừng khi rời trang.
 - **Dọn dẹp**: xoá cover cũng prune effect; wind “same support” chỉ expand cho
   cloth target; `profile_id` được normalize; keyword “tàn lửa” không tự thêm fire.
+- **Tàn tro/embers**: thêm alias `tàn tro`, `tàn trò`, `tro`, `ash`, `ashes`.
+  Embers chỉ lấy **flame object** (bỏ qua `sun` và box tàu cháy lớn), nên hạt
+  bốc đúng chỗ lửa; size/count tăng để thấy rõ ở 640×360 lẫn 1080p.
 - **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung
   sẽ bỏ qua effect và yêu cầu phân tích lại thay vì áp box cũ.
 - **Inspect ảnh**: `fits_frame`/note tính theo `output_profile`; thêm 4:5. Preview
