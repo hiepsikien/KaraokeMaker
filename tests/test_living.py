@@ -752,6 +752,26 @@ class SelectedObjectFilterTests(unittest.TestCase):
 
 
 class WindFlagTests(unittest.TestCase):
+    def test_headband_hair_and_coat_are_wind_candidates(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry("headband-1", "headband", (0.55, 0.10, 0.75, 0.35), pivot=(0.62, 0.12)),
+                object_entry("hair-1", "ponytail", (0.60, 0.12, 0.70, 0.30), pivot=(0.66, 0.14)),
+                object_entry("coat-1", "coat", (0.45, 0.35, 0.70, 0.80), pivot=(0.58, 0.38)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(
+            {spec["id"] for spec in specs},
+            {"headband-1", "hair-1", "coat-1"},
+        )
+        self.assertTrue(all(spec["cloth"] for spec in specs))
+
     def test_sail_target_also_moves_the_flag_on_the_same_mast(self):
         plan = effect_plan(
             [{"effect": "wind", "target_ids": ["sail-1"], "params": {"intensity": 0.35}}],

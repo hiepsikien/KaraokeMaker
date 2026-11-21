@@ -463,6 +463,12 @@ Mục tiêu thực tế:
 | Bụi/tia sáng | vùng tối, cửa sổ | mask | particle + ray |
 | Bảo vệ mặt/chữ | face detection, OCR | mask protect | không warp, không mưa |
 
+Gió/Sway hiện nhận cả **khăn/headband, scarf tail, lọn tóc/ponytail, vạt áo/coat/
+robe/cape/sleeve/hem**. Inventory prompt yêu cầu tách các phần này khỏi box `person`
+và gắn pivot ở nút buộc/gốc tóc/vai/gấu áo. Nếu prompt nhắc một target gió mà lượt
+inventory chung bỏ sót, director chạy thêm **một lượt inventory focus** cho đúng target
+đó (có cache riêng), rồi merge object vào inventory gốc.
+
 Mỗi hiệu ứng là một **recipe** có schema tham số. Thêm hiệu ứng mới = thêm recipe +
 perception cue + test, không cần sửa toàn pipeline.
 
