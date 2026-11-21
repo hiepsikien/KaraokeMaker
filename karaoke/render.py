@@ -572,9 +572,11 @@ def render_videos(
                         fps=profile.fps,
                         fit_mode=profile.fit_mode,
                         # Background effects render before the lyric overlay.
-                        # They may animate behind the lyric strip; the opaque
-                        # text/bar drawn later keeps lyrics readable.
-                        strip_rect=None,
+                        # A zero-height strip explicitly means "do not mask the
+                        # bottom"; the opaque text/bar drawn later keeps lyrics
+                        # readable. Passing None would enable the legacy
+                        # bottom-280px mask instead.
+                        strip_rect=(0, 0, 0, 0),
                         log=log,
                     )
                 except Exception as error:  # keep export usable if the effect fails
