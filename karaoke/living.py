@@ -1236,8 +1236,8 @@ def _items_intensity(items: list[dict], default: float) -> float:
 
 
 def _items_speed(items: list[dict], default: float = 1.0) -> float:
-    """Speed multiplier; 1.0 = the original loop timing."""
-    return _items_param(items, "speed", default, 0.2, 2.0)
+    """Speed multiplier; 1.0 = the original loop timing. Zero freezes wind."""
+    return _items_param(items, "speed", default, 0.0, 2.0)
 
 
 def _items_density(items: list[dict], default: float = 1.0) -> float:
@@ -1704,7 +1704,7 @@ def _wind_specs(
         log("Bỏ qua gió: intensity bằng 0.")
         return []
     speed = _items_speed(items)
-    cycles = max(1, int(round(seconds / 3.0 * speed)))
+    cycles = max(0, int(round(seconds / 3.0 * speed)))
     rng = np.random.default_rng(seed ^ 0x51D)
     size_scale = height / HEIGHT
     specs: list[dict] = []
@@ -1776,6 +1776,10 @@ def _wind_specs(
             1.5,
             min(24.0 * size_scale, min(box_width, box_height) * 0.12),
         ) * (0.65 + 0.55 * intensity)
+        if speed <= 0.0:
+            # Zero speed means "wind off": keep the target selected so the plan
+            # still resolves, but do not deform the pixels.
+            amplitude = 0.0
 
         specs.append(
             {
@@ -1792,7 +1796,7 @@ def _wind_specs(
                 "max_distance": max(1.0, max_distance),
                 "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "cycles": cycles,
-                "angle": 1.5 + 3.0 * intensity,
+                "angle": 0.0 if speed <= 0.0 else 1.5 + 3.0 * intensity,
                 "amplitude": amplitude,
             }
         )

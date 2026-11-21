@@ -173,6 +173,7 @@ function PlanOverlay({
   frameHeight,
   selectedIds,
   onToggle,
+  onBoxChange,
 }: {
   analysis: DirectorAnalysis | null;
   preview: string;
@@ -180,6 +181,7 @@ function PlanOverlay({
   frameHeight: number;
   selectedIds: string[];
   onToggle: (id: string) => void;
+  onBoxChange: (id: string, box: DirectorBox) => void;
 }) {
   const width = frameWidth > 0 ? frameWidth : 1920;
   const height = frameHeight > 0 ? frameHeight : 1080;
@@ -187,10 +189,64 @@ function PlanOverlay({
   const fontSize = Math.max(14, Math.round(unit / 26));
   const stroke = Math.max(2, unit / 260);
   const anchorRadius = Math.max(4, unit / 70);
+  const handleSize = Math.max(12, unit / 60);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [resize, setResize] = useState<{
+    id: string;
+    corner: "nw" | "ne" | "sw" | "se";
+    start: DirectorBox;
+  } | null>(null);
 
   const objects = analysis?.objects || [];
   const regions = analysis?.regions?.length ? analysis.regions : analysis?.effect_plan.regions || [];
   const protect = analysis?.protect?.length ? analysis.protect : analysis?.effect_plan.protect || [];
+
+  function normalizedPoint(event: React.PointerEvent) {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  }
+
+  function startResize(
+    event: React.PointerEvent<SVGRectElement>,
+    id: string,
+    corner: "nw" | "ne" | "sw" | "se",
+    box: DirectorBox,
+  ) {
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setResize({ id, corner, start: { ...box } });
+  }
+
+  function moveResize(event: React.PointerEvent<SVGRectElement>) {
+    if (!resize) return;
+    const point = normalizedPoint(event);
+    if (!point) return;
+    const box = { ...resize.start };
+    const minSize = 0.01;
+    if (resize.corner.includes("w")) box.x1 = Math.min(point.x, box.x2 - minSize);
+    if (resize.corner.includes("e")) box.x2 = Math.max(point.x, box.x1 + minSize);
+    if (resize.corner.includes("n")) box.y1 = Math.min(point.y, box.y2 - minSize);
+    if (resize.corner.includes("s")) box.y2 = Math.max(point.y, box.y1 + minSize);
+    box.x1 = Math.max(0, Math.min(1, box.x1));
+    box.y1 = Math.max(0, Math.min(1, box.y1));
+    box.x2 = Math.max(0, Math.min(1, box.x2));
+    box.y2 = Math.max(0, Math.min(1, box.y2));
+    onBoxChange(resize.id, box);
+  }
+
+  function endResize(event: React.PointerEvent<SVGRectElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setResize(null);
+  }
 
   return (
     <div
@@ -206,7 +262,8 @@ function PlanOverlay({
       )}
       {analysis && (
         <svg
-          className="absolute inset-0 h-full w-full"
+          ref={svgRef}
+          className="absolute inset-0 h-full w-full touch-none"
           viewBox={`0 0 ${width} ${height}`}
           role="img"
           aria-label="Vùng, object và điểm neo do AI phân tích"
@@ -307,6 +364,33 @@ function PlanOverlay({
                     label={`opening ${object.label}`}
                   />
                 )}
+                {(
+                  [
+                    ["nw", rect.x, rect.y, "nwse-resize"],
+                    ["ne", rect.x + rect.width, rect.y, "nesw-resize"],
+                    ["sw", rect.x, rect.y + rect.height, "nesw-resize"],
+                    ["se", rect.x + rect.width, rect.y + rect.height, "nwse-resize"],
+                  ] as const
+                ).map(([corner, x, y, cursor]) => (
+                  <rect
+                    key={`${object.id}-handle-${corner}`}
+                    x={x - handleSize / 2}
+                    y={y - handleSize / 2}
+                    width={handleSize}
+                    height={handleSize}
+                    fill={color}
+                    stroke="#110e0b"
+                    strokeWidth={Math.max(1, stroke / 2)}
+                    style={{ cursor }}
+                    onPointerDown={(event) => startResize(event, object.id, corner, object.box)}
+                    onPointerMove={moveResize}
+                    onPointerUp={endResize}
+                    onPointerCancel={endResize}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <title>{`Kéo để chỉnh kích thước ${object.label}`}</title>
+                  </rect>
+                ))}
               </g>
             );
           })}
@@ -441,6 +525,24 @@ export function AiEffects({
     setSelectedObjectIds((current) =>
       current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
     );
+  }
+
+  function changeObjectBox(id: string, box: DirectorBox) {
+    setAnalysis((current) => {
+      if (!current) return current;
+      const objects = current.objects.map((object) =>
+        object.id === id ? { ...object, box } : object,
+      );
+      const planObjects = current.effect_plan.objects;
+      const effectObjects = planObjects
+        ? planObjects.map((object) => (object.id === id ? { ...object, box } : object))
+        : objects;
+      return {
+        ...current,
+        objects,
+        effect_plan: { ...current.effect_plan, objects: effectObjects },
+      };
+    });
   }
 
   async function analyze() {
@@ -682,6 +784,7 @@ export function AiEffects({
       selected_object_ids: selectedObjectIds,
       effect_plan: {
         ...analysis.effect_plan,
+        objects: analysis.objects,
         selected_object_ids: selectedObjectIds,
       },
       model: analysis.model,
@@ -807,7 +910,13 @@ export function AiEffects({
         frameHeight={frameHeight}
         selectedIds={selectedObjectIds}
         onToggle={toggleObject}
+        onBoxChange={changeObjectBox}
       />
+      {analysis && (
+        <p className="text-xs leading-5 text-[var(--muted)]">
+          Kéo 4 góc ô để chỉnh kích thước object trước khi áp dụng.
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--muted)]">
         <span>
@@ -926,6 +1035,9 @@ export function AiEffects({
                   const meta = PARAM_META[key];
                   const raw = item.params?.[key];
                   const value = typeof raw === "number" ? Math.round(raw * 100) : meta.default;
+                  // Wind can be fully stopped; other effects keep a small
+                  // minimum so their particles/loops still resolve.
+                  const min = key === "speed" && item.effect === "wind" ? 0 : meta.min;
                   return (
                     <label key={key} className="block">
                       <span className="flex items-center justify-between text-[11px] text-[var(--muted)]">
@@ -934,7 +1046,7 @@ export function AiEffects({
                       </span>
                       <input
                         type="range"
-                        min={meta.min}
+                        min={min}
                         max={meta.max}
                         step={meta.step}
                         value={value}

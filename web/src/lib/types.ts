@@ -86,6 +86,8 @@ export type EffectPlan = {
   fit_transform: DirectorFitTransform;
   regions?: DirectorRegion[];
   protect?: DirectorProtect[];
+  /** Objects are part of the compiled plan; keep their boxes editable. */
+  objects?: DirectorObject[];
   /** Optional global filter applied when the plan is rendered. */
   selected_object_ids?: string[];
   items: EffectPlanItem[];
