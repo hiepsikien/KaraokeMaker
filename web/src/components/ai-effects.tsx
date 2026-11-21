@@ -785,6 +785,7 @@ export function AiEffects({
       // rendering and saving another copy.
       const reusable = assets.find((asset) => {
         if (asset.image_hash !== imageHash || asset.profile_id !== outputProfile) return false;
+        if (!asset.effect_plan || JSON.stringify(asset.effect_plan) !== JSON.stringify(plan)) return false;
         const seconds = asset.asset_frames && asset.fps ? asset.asset_frames / asset.fps : asset.loop_duration;
         if (typeof seconds !== "number") return false;
         return Math.abs(seconds - duration) <= 0.5 / Math.max(1, Number(asset.fps || 30));
@@ -1011,6 +1012,14 @@ export function AiEffects({
       Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
   );
   const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
+  const latestMatchingAsset = existingEffect?.effect_plan
+    ? imageAssets.find(
+        (asset) =>
+          asset.id !== existingEffect.asset_id &&
+          asset.effect_plan &&
+          JSON.stringify(asset.effect_plan) === JSON.stringify(existingEffect.effect_plan),
+      )
+    : undefined;
   const currentRenderState = selectedImage ? renderStates[selectedImage] : undefined;
   const assetSeconds = selectedAsset?.asset_frames && selectedAsset?.fps
     ? selectedAsset.asset_frames / selectedAsset.fps
@@ -1398,6 +1407,15 @@ export function AiEffects({
               </button>
             </div>
           </label>
+          {latestMatchingAsset && (
+            <button
+              type="button"
+              onClick={() => chooseAsset(latestMatchingAsset.id)}
+              className="text-left text-xs text-[var(--gold)] hover:text-white"
+            >
+              Có clip mới khớp plan: dùng “{latestMatchingAsset.name}”
+            </button>
+          )}
           {currentRenderState?.status !== "rendering" && currentRenderState?.status !== "error" && (
             <button
               type="button"

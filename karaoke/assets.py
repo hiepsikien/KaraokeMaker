@@ -31,11 +31,11 @@ except ImportError:  # pragma: no cover - macOS/Linux
     msvcrt = None
 
 from karaoke.cache import data_root
-from karaoke.living import MOTION_CACHE_VERSION
+from karaoke.living import MOTION_CACHE_VERSION, visual_plan_hash
 from karaoke.profiles import get_profile, normalize_profile_id
 from karaoke.studio import cache_path, is_preview_id, preview_id_for
 
-ASSET_VERSION = 1
+ASSET_VERSION = 2
 ASSET_ID_PATTERN = re.compile(r"^bg_[0-9a-f]{32}$")
 # Studio renders effects with a zero-height strip. Keep this in the asset
 # fingerprint so a later profile change does not silently reuse the clip.
@@ -199,6 +199,7 @@ def asset_fingerprint(meta: dict) -> str:
             "renderer_version": meta.get("renderer_version"),
             "asset_frames": meta.get("asset_frames"),
             "image_hash": meta.get("image_hash"),
+            "plan_hash": meta.get("plan_hash"),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -233,6 +234,7 @@ def _save_asset_from_preview_impl(
     """Copy a rendered Studio preview into the stable asset store."""
     if not is_preview_id(preview_id):
         raise AssetError("Preview không hợp lệ.")
+    plan_hash = visual_plan_hash(effect_plan) if isinstance(effect_plan, dict) else ""
     profile = get_profile(normalize_profile_id(output_profile))
     try:
         expected_id = preview_id_for(
@@ -283,6 +285,7 @@ def _save_asset_from_preview_impl(
             "image_hash": image_hash,
             "preview_id": preview_id,
             "effect_plan": effect_plan if isinstance(effect_plan, dict) else {},
+            "plan_hash": plan_hash,
             "asset_version": ASSET_VERSION,
             "profile_id": profile.id,
             "profile_fingerprint": _hash_text(_profile_payload(profile)),
@@ -554,11 +557,14 @@ def validate_asset(
     image_hash: str,
     image_frames: int,
     profile,
+    plan: dict | None = None,
 ) -> tuple[bool, str]:
     if not isinstance(meta, dict):
         return False, "không thấy asset"
     if int(meta.get("asset_version") or 0) != ASSET_VERSION:
         return False, "asset_version không khớp"
+    if plan is not None and str(meta.get("plan_hash") or "") != visual_plan_hash(plan):
+        return False, "effect plan đã đổi"
     if int(meta.get("renderer_version") or 0) != MOTION_CACHE_VERSION:
         return False, "renderer_version không khớp"
     if str(meta.get("image_hash") or "") != image_hash:

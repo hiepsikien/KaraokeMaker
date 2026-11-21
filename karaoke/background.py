@@ -897,6 +897,7 @@ def _plan_background(
                 image_hash=image_hash_prefixed,
                 image_frames=image_frames,
                 profile=profile,
+                plan=plan,
             )
             if valid and meta is not None:
                 identity = asset_fingerprint(meta)

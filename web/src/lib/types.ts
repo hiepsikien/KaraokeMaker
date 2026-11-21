@@ -154,6 +154,7 @@ export type StudioAsset = {
   source_image: string;
   image_hash: string;
   effect_plan?: EffectPlan;
+  plan_hash?: string;
   asset_version?: number;
   profile_id?: string;
   profile_fingerprint?: string;
