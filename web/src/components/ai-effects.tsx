@@ -481,13 +481,17 @@ export function AiEffects({
   imageDuration = "8",
   onEffectsChange,
   onAssetDuration,
+  resumeAsset = null,
+  onAssetSaved,
 }: {
   images: string[];
   effects: BackgroundEffect[];
   outputProfile: string;
   imageDuration?: string;
+  resumeAsset?: { asset: StudioAsset; token: number } | null;
   onEffectsChange: (updater: (current: BackgroundEffect[]) => BackgroundEffect[]) => void;
   onAssetDuration?: (seconds: number) => void;
+  onAssetSaved?: () => void;
 }) {
   const imageSignature = images.join("\n");
   const [selectedImage, setSelectedImage] = useState(() => images[0] || "");
@@ -527,13 +531,52 @@ export function AiEffects({
     renderAbortRef.current = null;
     renderTargetRef.current = "";
     if (target) setImageRender(target, null);
+    if (resumeAsset?.asset.source_image === selectedImage) {
+      // The resume effect below populates the asset's plan for this image.
+      return;
+    }
     setAnalysis(null);
     setSelectedObjectIds([]);
     setError("");
     setDrawMode(false);
     setDraftBox(null);
     setManualName("");
-  }, [selectedImage]);
+  }, [selectedImage, resumeAsset?.token]);
+
+  useEffect(() => {
+    if (!resumeAsset) return;
+    const { asset } = resumeAsset;
+    const plan = asset.effect_plan;
+    if (!plan) return;
+    const objects = plan.objects || [];
+    const analysis: DirectorAnalysis = {
+      image: asset.source_image,
+      image_hash: asset.image_hash,
+      width: asset.width || 1920,
+      height: asset.height || 1080,
+      model: "studio",
+      scene: `Asset ${asset.name}`,
+      objects,
+      regions: plan.regions || [],
+      protect: plan.protect || [],
+      intent: null,
+      effect_plan: plan,
+      usage: null,
+      cached: true,
+    };
+    setSelectedImage(asset.source_image);
+    setAnalysis(analysis);
+    setSelectedObjectIds(
+      plan.selected_object_ids?.length
+        ? plan.selected_object_ids
+        : objects.map((object) => object.id),
+    );
+    setPrompt("");
+    setError("");
+    setDrawMode(false);
+    setDraftBox(null);
+    setManualName("");
+  }, [resumeAsset?.token]);
 
   useEffect(() => {
     setFact(null);
@@ -919,6 +962,7 @@ export function AiEffects({
       );
       setImageRender(imagePath, { status: "done", preview });
       void refreshAssets();
+      onAssetSaved?.();
     } catch {
       if (controller.signal.aborted) return;
       setImageRender(imagePath, {

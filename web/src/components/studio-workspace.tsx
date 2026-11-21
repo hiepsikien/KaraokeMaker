@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { AiEffects } from "@/components/ai-effects";
 import { ImageCards } from "@/components/image-cards";
-import type { BackgroundEffect } from "@/lib/types";
+import type { BackgroundEffect, StudioAsset } from "@/lib/types";
 
 type PreviewResult = {
   id: string;
@@ -72,6 +72,9 @@ export function StudioWorkspace() {
   const [renderHint, setRenderHint] = useState("");
   const [previews, setPreviews] = useState<Record<string, PreviewResult>>({});
   const [savingPath, setSavingPath] = useState("");
+  const [assets, setAssets] = useState<StudioAsset[]>([]);
+  const [assetsError, setAssetsError] = useState("");
+  const [resumeAsset, setResumeAsset] = useState<{ asset: StudioAsset; token: number } | null>(null);
   const renderAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -79,6 +82,71 @@ export function StudioWorkspace() {
       renderAbortRef.current?.abort();
     };
   }, []);
+
+  async function loadAssets() {
+    try {
+      const response = await fetch("/api/studio/assets");
+      if (!response.ok) {
+        setAssetsError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { assets?: StudioAsset[] };
+      setAssets(Array.isArray(data.assets) ? data.assets : []);
+      setAssetsError("");
+    } catch {
+      setAssetsError("Không tải được asset đã lưu. Kiểm tra server Python.");
+    }
+  }
+
+  useEffect(() => {
+    void loadAssets();
+  }, []);
+
+  function effectFromAsset(asset: StudioAsset): BackgroundEffect | null {
+    const plan = asset.effect_plan;
+    if (!asset.source_image || !plan) return null;
+    return {
+      image_path: asset.source_image,
+      image_hash: asset.image_hash,
+      effect_prompt: `Asset ${asset.name}`,
+      effect_consent_receipt: {
+        timestamp: asset.created || new Date().toISOString(),
+        image_hash: asset.image_hash,
+        provider: "studio",
+        model: "asset",
+      },
+      selected_object_ids: plan.selected_object_ids || [],
+      effect_plan: plan,
+      model: "studio",
+      created: asset.created || new Date().toISOString(),
+      asset_id: asset.id,
+    };
+  }
+
+  function openAsset(asset: StudioAsset) {
+    const effect = effectFromAsset(asset);
+    if (!effect) {
+      setNotice("Asset này thiếu ảnh nguồn hoặc effect plan nên chưa mở chỉnh sửa được.");
+      return;
+    }
+    setNotice("");
+    setImages((current) =>
+      current.includes(asset.source_image) ? current : [...current, asset.source_image],
+    );
+    if (asset.profile_id && PROFILE_OPTIONS.some((option) => option.value === asset.profile_id)) {
+      setProfile(asset.profile_id);
+    }
+    if (asset.asset_frames && asset.fps) {
+      const seconds = asset.asset_frames / asset.fps;
+      setStandardDuration(seconds >= 12 ? 16 : 8);
+    }
+    setEffects((current) => [
+      ...current.filter((item) => item.image_path !== asset.source_image),
+      effect,
+    ]);
+    setPreviews({});
+    setResumeAsset({ asset, token: Date.now() });
+  }
 
   async function pickImages() {
     if (busyBrowse) return;
@@ -286,6 +354,7 @@ export function StudioWorkspace() {
       }
       const data = (await response.json()) as { asset: { id: string; name: string } };
       setNotice(`Đã lưu asset “${data.asset.name}”. Asset sẽ hiện trong phần Hiệu ứng nền của dự án Karaoke.`);
+      void loadAssets();
     } catch {
       setError("Không lưu được asset. Kiểm tra server Python đang chạy.");
     } finally {
@@ -294,7 +363,8 @@ export function StudioWorkspace() {
   }
 
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]">
+    <div className="space-y-6">
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]">
       <section className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -361,6 +431,8 @@ export function StudioWorkspace() {
             effects={effects}
             outputProfile={profile}
             imageDuration={String(standardDuration)}
+            resumeAsset={resumeAsset}
+            onAssetSaved={() => void loadAssets()}
             onEffectsChange={(updater) => {
               setEffects((current) => updater(current));
               // The old preview belongs to the previous plan; never show it
@@ -473,6 +545,85 @@ export function StudioWorkspace() {
           clip đó trong phần Hiệu ứng nền của dự án Karaoke.
         </section>
       </aside>
+      </div>
+
+      <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Thư viện</p>
+            <h2 className="mt-1 text-xl font-semibold">Asset đã lưu</h2>
+            <p className="mt-1 text-sm leading-6 text-[var(--muted)]">
+              Bấm “Mở để sửa” để nạp lại ảnh, effect plan, object và các tag thủ công vào Studio.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadAssets()}
+            className="rounded-xl border border-[var(--line)] px-3 py-2 text-sm text-[var(--muted)] hover:border-[var(--gold)]"
+          >
+            Tải lại
+          </button>
+        </div>
+        {assetsError && <p className="mt-3 text-sm text-red-200">{assetsError}</p>}
+        {assets.length === 0 ? (
+          <p className="mt-3 rounded-2xl border border-dashed border-[var(--line)] p-4 text-sm leading-6 text-[var(--muted)]">
+            Chưa có asset nào. Render bản chuẩn rồi bấm “Lưu thành asset”.
+          </p>
+        ) : (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {assets.map((asset) => {
+              const plan = asset.effect_plan;
+              const effectList = (plan?.items || []).map((item) => item.effect).filter(Boolean);
+              const manualLabels = (plan?.objects || [])
+                .filter((object) => object.source === "manual")
+                .map((object) => object.label);
+              const seconds = asset.asset_frames && asset.fps ? asset.asset_frames / asset.fps : asset.loop_duration;
+              return (
+                <article
+                  key={asset.id}
+                  className="flex min-w-0 flex-col gap-2 rounded-2xl border border-[var(--line)] bg-black/20 p-3"
+                >
+                  <video
+                    src={`/api/studio/assets/${asset.id}/clip`}
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                    className="aspect-video w-full rounded-xl border border-[var(--line)] bg-black object-cover"
+                  />
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-semibold">{asset.name}</p>
+                    <span className="shrink-0 text-xs text-[var(--muted)]">
+                      {typeof seconds === "number" ? `${seconds.toFixed(1)}s` : ""}
+                    </span>
+                  </div>
+                  <p className="truncate text-xs text-[var(--muted)]">
+                    {fileName(asset.source_image)} · {asset.profile_id || "profile?"}
+                  </p>
+                  <p className="text-xs leading-5 text-[var(--muted)]">
+                    Hiệu ứng: {effectList.length ? effectList.join(", ") : "—"}
+                  </p>
+                  {manualLabels.length > 0 && (
+                    <p className="text-xs leading-5 text-[var(--muted)]">
+                      Object thủ công: {manualLabels.join(", ")}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-[var(--muted)]">
+                    {asset.created ? new Date(asset.created).toLocaleString("vi-VN") : ""}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => openAsset(asset)}
+                    className="mt-auto rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] hover:bg-black/25"
+                  >
+                    Mở để sửa
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
