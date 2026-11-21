@@ -1,7 +1,9 @@
 """Render profiles for Living Still exports (P1b).
 
-One profile per export. ``strip_rect`` is the lyric strip in output pixels and
-is a no-effect zone: effect masks must be exactly zero inside it.
+One profile per export. ``strip_rect`` is the lyric strip in output pixels.
+Background motion is rendered **before** the lyric overlay, so effects may
+animate behind the strip; the lyric text/bar is composited on top afterwards.
+``safe_left``/``safe_right`` keep lyrics inside the app's horizontal safe area.
 """
 
 from __future__ import annotations

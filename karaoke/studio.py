@@ -19,17 +19,18 @@ import re
 import threading
 from pathlib import Path
 
+from karaoke.cache import cache_root, prune
 from karaoke.living import plan_has_motion, render_motion_loop
 from karaoke.profiles import get_profile
 
-CACHE_ROOT = Path.home() / "Library" / "Caches" / "KaraokeMaker" / "studio"
+CACHE_ROOT = cache_root("studio")
 PREVIEW_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MIN_DURATION = 0.5
 MAX_DURATION = 30.0
 # The Studio is a preview surface; full-resolution export stays in Karaoke.
 # 640 px keeps a 4 s multi-effect preview well under the proxy timeout.
 PREVIEW_MAX_SIDE = 640
-PREVIEW_VERSION = "preview_v13"
+PREVIEW_VERSION = "preview_v14"
 # Serialize preview renders in this process. Two simultaneous 1080p renders
 # otherwise fight over CPU and can race on cache materialization.
 _PREVIEW_LOCK = threading.Lock()
@@ -140,7 +141,7 @@ def render_preview(
             fps=profile.fps,
             fit_mode=profile.fit_mode,
             # Studio preview has no lyric strip: show the full background loop.
-            strip_rect=(0, preview_height, 0, 0),
+            strip_rect=None,
         )
     if result is None:
         raise StudioError(
@@ -151,6 +152,7 @@ def render_preview(
     if not destination.is_file() or destination.stat().st_size <= 0:
         raise StudioError("Không tạo được file preview.")
 
+    prune(CACHE_ROOT, max_files=100, max_bytes=1_500_000_000)
     return {
         "id": preview_id,
         "path": str(destination),

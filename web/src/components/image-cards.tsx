@@ -20,9 +20,11 @@ function fileName(path: string) {
 export function ImageCards({
   paths,
   onRemove,
+  outputProfile = "landscape_1080p",
 }: {
   paths: string[];
   onRemove: (path: string) => void;
+  outputProfile?: string;
 }) {
   const [facts, setFacts] = useState<ImageFact[]>([]);
   const signature = paths.join("\n");
@@ -37,7 +39,7 @@ export function ImageCards({
     fetch("/api/images/inspect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths: current }),
+      body: JSON.stringify({ paths: current, output_profile: outputProfile, with_preview: false }),
       signal: controller.signal,
     })
       .then((response) => (response.ok ? response.json() : { images: [] }))
@@ -46,7 +48,7 @@ export function ImageCards({
         if (!controller.signal.aborted) setFacts([]);
       });
     return () => controller.abort();
-  }, [signature]);
+  }, [signature, outputProfile]);
 
   if (paths.length === 0) return null;
 

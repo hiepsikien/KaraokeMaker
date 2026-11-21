@@ -76,6 +76,24 @@ class BackgroundEffectProjectTests(unittest.TestCase):
     def tearDown(self):
         clear_grants()
 
+    def test_malformed_effect_plan_is_normalized(self):
+        project = project_from_fields(
+            {
+                "title": "Bài",
+                "background_effects": [
+                    {"image_path": "/tmp/a.png", "effect_plan": None},
+                    {"image_path": "/tmp/b.png", "effect_plan": {"items": "not-a-list"}},
+                ],
+            }
+        )
+        for effect in project["background_effects"]:
+            self.assertIsInstance(effect["effect_plan"], dict)
+            self.assertIsInstance(effect["effect_plan"]["items"], list)
+        self.assertEqual(
+            [effect["effect_plan"]["items"] for effect in project["background_effects"]],
+            [[], []],
+        )
+
     def test_project_from_fields_and_public_project_keep_the_effect(self):
         image = Path("/tmp/bg.png")
         item = effect_item(image)

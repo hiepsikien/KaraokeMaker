@@ -273,6 +273,32 @@ class AnalyzeSceneTests(unittest.TestCase):
         self.assertEqual(second["usage"]["total"], 0)
         self.assertEqual(second["effect_plan"], first["effect_plan"])
 
+    def test_profile_and_intent_fallback_are_reported(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            with patch.object(director, "_cache_dir", return_value=self.cache):
+                with patch.object(
+                    director,
+                    "_load_intent",
+                    return_value=(
+                        director.keyword_intent("mưa nhẹ"),
+                        {},
+                        False,
+                        True,
+                    ),
+                ), patch.object(
+                    director,
+                    "_load_inventory",
+                    return_value=(self.inventory_payload, {}, False),
+                ):
+                    result = analyze_scene(
+                        self.image,
+                        "mưa nhẹ",
+                        consent=True,
+                        output_profile="portrait_1080x1920",
+                    )
+        self.assertTrue(result["intent_fallback"])
+        self.assertEqual(result["effect_plan"]["profile_id"], "portrait_1080x1920")
+
     def test_consent_false_is_refused_before_any_call(self):
         with patch("karaoke.director.requests.post") as post:
             with self.assertRaises(DirectorError) as caught:
@@ -383,6 +409,31 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual(
             set(plan["items"][0]["target_ids"]), {"flag-1", "sail-1"}
         )
+
+
+class EnvLoadingTests(unittest.TestCase):
+    def test_non_empty_environment_wins_and_blank_values_are_filled(self):
+        from karaoke.server import _load_env
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / ".env"
+            path.write_text(
+                "GEMINI_API_KEY=from-file\nGOOGLE_API_KEY=from-file\nEMPTY_KEY=filled\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "from-shell",
+                    "GOOGLE_API_KEY": "",
+                    "EMPTY_KEY": "",
+                },
+                clear=False,
+            ):
+                _load_env(path)
+                self.assertEqual(os.environ["GEMINI_API_KEY"], "from-shell")
+                self.assertEqual(os.environ["GOOGLE_API_KEY"], "from-file")
+                self.assertEqual(os.environ["EMPTY_KEY"], "filled")
 
 
 if __name__ == "__main__":

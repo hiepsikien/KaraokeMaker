@@ -254,6 +254,8 @@ def _ratio_label(width: int, height: int) -> str:
         (16, 9, "16:9"),
         (2, 3, "2:3"),
         (9, 16, "9:16"),
+        (4, 5, "4:5"),
+        (5, 4, "5:4"),
     )
     for wide, tall, label in known:
         if abs(value - (wide / tall)) < 0.04:
@@ -270,20 +272,35 @@ def _data_url(image: Image.Image, size: tuple[int, int], quality: int) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def inspect_image(source: Path) -> dict:
-    """Size, aspect, a 360×202 thumbnail, and a ~1280 preview. The frame is 1920×1080."""
+def inspect_image(
+    source: Path,
+    *,
+    output_profile: str | None = None,
+    with_preview: bool = False,
+) -> dict:
+    """Size, aspect, a thumbnail, and optionally a ~1280 preview.
+
+    ``fits_frame`` compares against the selected render profile instead of a
+    hardcoded 16:9 frame. Thumbnails are cheap and always returned; the large
+    preview is opt-in so image lists do not ship megabytes of base64.
+    """
+    profile = get_profile(output_profile)
     with Image.open(source) as opened:
         image = ImageOps.exif_transpose(opened)
         width, height = image.size
         oriented = image.convert("RGB")
     thumbnail = _data_url(oriented, (360, 202), 80)
-    preview = _data_url(oriented, (1280, 1280), 85)
+    preview = _data_url(oriented, (1280, 1280), 85) if with_preview else ""
     ratio = _ratio_label(width, height)
-    fits = ratio == "16:9"
+    frame_ratio = profile.width / profile.height
+    fits = height > 0 and abs(width / height - frame_ratio) < 0.04
     if fits:
-        note = "Đúng 16:9, đầy khung video."
+        note = f"Đúng tỉ lệ khung {profile.width}×{profile.height}, đầy khung video."
     else:
-        note = f"Tỉ lệ {ratio}. Khung video là 1920×1080, ảnh này nằm giữa và có viền tối."
+        note = (
+            f"Tỉ lệ {ratio}. Khung video là {profile.width}×{profile.height}, "
+            "ảnh này nằm giữa và có viền tối."
+        )
     return {
         "path": str(source),
         "width": width,

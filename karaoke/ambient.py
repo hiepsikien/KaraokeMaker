@@ -17,6 +17,9 @@ Recipes:
 
 The bed is mono-compatible stereo 16-bit PCM. Audio is synthesised in chunks so
 even a 10-minute bed stays well under a few hundred MB of working memory.
+
+Beds are capped at ``MAX_DURATION`` (600 s). The renderer loops the file for
+longer songs, so ambience never stops mid-song while disk use stays bounded.
 """
 
 from __future__ import annotations

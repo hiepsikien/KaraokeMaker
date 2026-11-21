@@ -57,9 +57,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
+from karaoke.cache import cache_root, prune
 from karaoke.media import HEIGHT, WIDTH, MediaError, fit_image
 
-CACHE_ROOT = Path.home() / "Library" / "Caches" / "KaraokeMaker" / "living"
+CACHE_ROOT = cache_root("living")
 STRIP_HEIGHT_1080 = 280
 # count at 1080p, speed px/s at 1080p, streak length px, alpha 0..255, blur px
 RAIN_LAYERS = (
@@ -205,8 +206,9 @@ EFFECT_LABELS = {
 # v4: adds fire glow/flicker and slow fog drift.
 # v5: first AI Studio / inventory-v3 pass.
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
-# v7: object-aware water/smoke masks + painted-smoke billow warp.
-MOTION_CACHE_VERSION = 16
+# v7: object-aware water/smoke masks.
+# v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
+MOTION_CACHE_VERSION = 17
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1020,6 +1022,7 @@ def _add_alpha_sprite(
     cy: float,
     alpha: float,
     color: np.ndarray,
+    protect: np.ndarray | None = None,
 ) -> None:
     if alpha <= 0.0:
         return
@@ -1040,6 +1043,10 @@ def _add_alpha_sprite(
     if dest_x1 <= dest_x0 or dest_y1 <= dest_y0:
         return
     patch = sprite[source_y0:source_y1, source_x0:source_x1] * alpha
+    if protect is not None:
+        # Clip the whole sprite, not just its centre: a glowing particle near a
+        # protected face/logo must not bleed into it.
+        patch = patch * protect[dest_y0:dest_y1, dest_x0:dest_x1]
     rgb = layer[dest_y0:dest_y1, dest_x0:dest_x1]
     alpha_window = alpha_layer[dest_y0:dest_y1, dest_x0:dest_x1]
     rgb[:] = color[None, None, :] * patch[:, :, None] + rgb * (
@@ -1088,29 +1095,6 @@ def _steam_candidate(entry: dict) -> bool:
 
 def _fire_smoke_candidate(entry: dict) -> bool:
     return _matches_hints(entry, FIRE_AFFORDANCES, FIRE_LABELS)
-
-
-def _is_background_identity(identity: str) -> bool:
-    tokens = "".join(char if char.isalnum() else " " for char in identity).split()
-    background = {
-        "sky",
-        "backdrop",
-        "background",
-        "cloud",
-        "clouds",
-        "horizon",
-        "water",
-        "sea",
-        "ocean",
-        "liquid",
-        "river",
-        "lake",
-        "ground",
-        "land",
-        "outdoor",
-        "indoor",
-    }
-    return any(token in background for token in tokens)
 
 
 def _steam_sources(
@@ -1222,10 +1206,9 @@ def _steam_sources(
         if smoke:
             # Rising smoke is drawn as free-floating wisps. Clipping them with
             # the smoke bounding box or with solid-object rectangles produced
-            # visible straight edges ("khung chữ nhật"). The lyric-safe
-            # `prevent` mask is applied once at composite time instead.
+            # visible straight edges ("khung chữ nhật"). The `prevent` mask is
+            # applied once at composite time instead.
             stem = np.ones((height, width), dtype=np.float32)
-            warp = None
         else:
             mask = Image.new("L", (width, height), 0)
             draw = ImageDraw.Draw(mask)
@@ -1247,7 +1230,6 @@ def _steam_sources(
                 )
                 / 255.0
             )
-            warp = None
 
         phases = rng.uniform(0.0, 1.0, count).astype(np.float32)
         jitter = rng.uniform(-1.0, 1.0, count).astype(np.float32)
@@ -1276,7 +1258,6 @@ def _steam_sources(
                 "smoke": smoke,
                 "color": color,
                 "mask": stem,
-                "warp": warp,
             }
         )
 
@@ -1366,53 +1347,6 @@ def _steam_frame(
         layer = plume + layer * (1.0 - plume_alpha[:, :, None])
         alpha_layer = plume_alpha + alpha_layer * (1.0 - plume_alpha)
     return layer, alpha_layer
-
-
-def _warp_smoke_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
-    """Billow the painted smoke itself, preserving its colour and texture."""
-    height, width = crop.shape[:2]
-    grid_y, grid_x = np.mgrid[0:height, 0:width]
-    grid_x = grid_x.astype(np.float32)
-    grid_y = grid_y.astype(np.float32)
-    local_x = grid_x / max(1.0, float(width - 1))
-    local_y = grid_y / max(1.0, float(height - 1))
-    phase = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
-    # Bias the sample downward (positive offset) so the painted plume appears
-    # to lift upward instead of oscillating around its rest position.
-    lift = 0.78 + 0.22 * np.sin(
-        2.0 * math.pi * (local_x * 1.8 + local_y * 1.1) + phase
-    )
-    lift += 0.05 * np.sin(2.0 * phase + local_y * 3.0)
-    curl = np.sin(2.0 * math.pi * (local_y * 2.4 - local_x * 0.9) + phase + 0.7)
-    sample_y = grid_y + spec["amplitude"] * lift
-    sample_x = grid_x + spec["amplitude"] * 0.30 * curl
-
-    sample_x = np.clip(sample_x, 0.0, width - 1.0)
-    sample_y = np.clip(sample_y, 0.0, height - 1.0)
-    x0 = np.floor(sample_x).astype(np.int32)
-    y0 = np.floor(sample_y).astype(np.int32)
-    x1 = np.minimum(x0 + 1, width - 1)
-    y1 = np.minimum(y0 + 1, height - 1)
-    wx = (sample_x - x0)[:, :, None]
-    wy = (sample_y - y0)[:, :, None]
-    top = crop[y0, x0] * (1.0 - wx) + crop[y0, x1] * wx
-    bottom = crop[y1, x0] * (1.0 - wx) + crop[y1, x1] * wx
-    return top * (1.0 - wy) + bottom * wy
-
-
-def _smoke_warp_frame(
-    frame: np.ndarray, specs: list[dict], u: float
-) -> np.ndarray:
-    for spec in specs:
-        top, bottom = spec["top"], spec["bottom"]
-        left, right = spec["left"], spec["right"]
-        crop = frame[top:bottom, left:right]
-        if crop.size == 0:
-            continue
-        warped = _warp_smoke_crop(crop, spec, u)
-        mask = spec["mask"][:, :, None]
-        frame[top:bottom, left:right] = crop * (1.0 - mask) + warped * mask
-    return frame
 
 
 # --- wind ------------------------------------------------------------------
@@ -1540,6 +1474,7 @@ def _wind_specs(
                 "bottom": bottom,
                 "box": (x1, y1, x2, y2),
                 "mask": mask,
+                "prevent": prevent[top:bottom, left:right],
                 "cloth": cloth,
                 "rigid": rigid,
                 "pivot_local": (pivot_x, pivot_y),
@@ -1574,6 +1509,11 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
             warped = np.asarray(rotated, dtype=np.float32)
         mask = spec["mask"][:, :, None]
         blended = original * (1.0 - mask) + warped * mask
+        prevent = spec.get("prevent")
+        if prevent is not None:
+            # Rigid flags still sway, but protected faces/text stay pinned.
+            keep = prevent[:, :, None]
+            blended = blended * keep + original * (1.0 - keep)
         image.paste(Image.fromarray(np.clip(blended, 0.0, 255.0).astype(np.uint8), "RGB"), (spec["left"], spec["top"]))
     return image
 
@@ -2271,6 +2211,7 @@ def _apply_embers(
             y,
             alpha,
             particle["color"],
+            protect=prevent,
         )
     return np.clip(frame + layer, 0.0, 255.0).astype(np.float32)
 
@@ -2602,19 +2543,24 @@ def _encode(frames, destination: Path, width: int, height: int, fps: int, log) -
             process.stdin.write(frame)
     except BrokenPipeError:
         pass
+    except BaseException:
+        # A failing generator (bad plan, disk full, ...) must not leave FFmpeg
+        # and the stderr reader thread alive.
+        process.kill()
+        raise
     finally:
         try:
             process.stdin.close()
-        except BrokenPipeError:
+        except (BrokenPipeError, OSError):
             pass
-    reader.join()
-    code = process.wait()
-    try:
-        process.stderr.close()
-    except OSError:
-        pass
+        reader.join()
+        code = process.wait()
+        try:
+            process.stderr.close()
+        except OSError:
+            pass
     if code != 0:
-        raise MediaError(tail[-1] if tail else "FFmpeg dừng với lỗi khi tạo vòng mưa.")
+        raise MediaError(tail[-1] if tail else "FFmpeg dừng với lỗi khi tạo vòng hiệu ứng.")
 
 
 def _materialize(source: Path, destination: Path | None) -> None:
@@ -2685,6 +2631,15 @@ def _render_loop(
     )
 
     image_hash = _file_hash(source)
+    expected_hash = str(plan.get("image_hash") or "").strip()
+    if expected_hash and expected_hash != image_hash:
+        # Boxes/masks were compiled for different pixels. Rendering them over a
+        # replaced file would animate the wrong regions, so fall back to static.
+        log(
+            "Bỏ qua hiệu ứng: ảnh đã thay đổi nội dung so với lúc phân tích. "
+            "Hãy phân tích lại ảnh."
+        )
+        return None
     plan_hash = _plan_hash(plan)
     selection = ",".join(effect for effect in SUPPORTED_EFFECTS if effect in effects)
     key = hashlib.sha256(
@@ -2763,7 +2718,6 @@ def _render_loop(
         if "steam" in effects
         else []
     )
-    smoke_warps = [source["warp"] for source in steam_sources if source.get("warp")]
     wind_specs = (
         _wind_specs(plan, transform, out_width, out_height, seconds, seed, prevent, log)
         if "wind" in effects
@@ -2874,10 +2828,6 @@ def _render_loop(
             u = (index / rate) / seconds
             frame = base_array.copy()
 
-            # Animate the painted smoke itself before any foreground weather.
-            if smoke_warps:
-                frame = _smoke_warp_frame(frame, smoke_warps, u)
-
             # Water is a background surface: animate it before rain/snow so
             # falling streaks stay straight instead of being warped with it.
             if water_spec is not None:
@@ -2943,6 +2893,7 @@ def _render_loop(
     try:
         _encode(frames(), temporary, out_width, out_height, rate, log)
         os.replace(temporary, cached)
+        prune(CACHE_ROOT, max_files=40, max_bytes=2_000_000_000)
     finally:
         temporary.unlink(missing_ok=True)
 

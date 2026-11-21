@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -7,7 +8,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -44,8 +45,28 @@ from karaoke.project import (
     sync_project_file,
 )
 
-# `.env` wins over a stale GEMINI_API_KEY exported in the shell.
-load_dotenv(override=True)
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_env(env_path: Path | None = None) -> None:
+    """Load `.env` without overriding real environment variables.
+
+    A non-empty exported variable always wins (README documents that path).
+    `.env` only fills variables that are missing or blank, so a copied
+    `.env.example` with ``GEMINI_API_KEY=`` cannot erase a shell key. The
+    default absolute path makes the server independent of the current directory.
+    """
+    env_path = Path(env_path) if env_path is not None else ROOT / ".env"
+    if not env_path.is_file():
+        return
+    for key, value in dotenv_values(env_path).items():
+        if value is None:
+            continue
+        if not os.environ.get(key, "").strip():
+            os.environ[key] = value
+
+
+_load_env()
 
 app = FastAPI(title="KaraokeMaker")
 app.add_middleware(
@@ -130,13 +151,16 @@ class RevealRequest(BaseModel):
 
 class ImageInspectRequest(BaseModel):
     paths: list[str] = Field(default_factory=list)
+    output_profile: str = "landscape_1080p"
+    with_preview: bool = False
 
 
 class DirectorRequest(BaseModel):
     image_path: str = ""
-    prompt: str = ""
+    prompt: str = Field(default="", max_length=500)
     consent: bool = False
     model: str = ""
+    output_profile: str = "landscape_1080p"
 
 
 class StudioRenderRequest(BaseModel):
@@ -402,7 +426,13 @@ def inspect_images(body: ImageInspectRequest):
             )
             continue
         try:
-            facts.append(inspect_image(path))
+            facts.append(
+                inspect_image(
+                    path,
+                    output_profile=body.output_profile,
+                    with_preview=body.with_preview,
+                )
+            )
         except Exception:
             facts.append(
                 {
@@ -440,7 +470,10 @@ def director_analyze(body: DirectorRequest):
             path,
             body.prompt,
             consent=body.consent,
+            # The model comes from the client; ignore anything outside the
+            # server allowlist instead of interpolating it into the Gemini URL.
             model=(body.model or "").strip() or None,
+            output_profile=body.output_profile,
         )
     except DirectorError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
@@ -469,7 +502,10 @@ def studio_render(body: StudioRenderRequest):
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Không render được preview: {error}") from error
+        raise HTTPException(
+            status_code=500,
+            detail="Không render được preview. Xem terminal Python để xem chi tiết.",
+        ) from error
     preview_id = result["id"]
     return {
         "id": preview_id,
@@ -579,16 +615,17 @@ def project_session(body: ProjectFieldsRequest):
             "output_profile",
             "background_effects",
         ):
-            if key not in payload:
-                continue
-            # Older clients do not send background_effects; keep the saved plans.
-            if key == "background_effects" and key not in body.model_fields_set:
+            # Only fields the client actually sent may change. Pydantic defaults
+            # (notably output_profile="landscape_1080p") must not overwrite a
+            # saved 9:16 project when an older client omits the field.
+            if key not in body.model_fields_set:
                 continue
             if key == "background_effects":
                 prepared[key] = [dict(item) for item in payload[key] or [] if isinstance(item, dict)]
             else:
                 prepared[key] = payload[key]
-        prepared["background_images"] = list(payload.get("background_images") or [])
+        if "background_images" in body.model_fields_set:
+            prepared["background_images"] = list(payload.get("background_images") or [])
         prepared["project_path"] = path_text
         # status=None keeps exported (same rule as sync_project_file for timing saves).
         saved = sync_project_file(

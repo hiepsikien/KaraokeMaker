@@ -171,7 +171,8 @@ def render_rain_loop(
 
 - Trả `None` nếu plan không có rain.
 - Loop quantization: `speed * duration = k * span`.
-- Mask: `dry` polygon + `protect` boxes + lyric strip (bottom 280 px ở 1080p).
+- Mask: `dry` polygon + `protect` boxes. Lyric strip **không** mask effect vì effect
+  render trước lyric overlay; text/bar được vẽ sau.
 - Cache: `~/Library/Caches/KaraokeMaker/living/<image_hash>_<plan_hash>_<duration>_<width>x<height>.mp4`.
 - Encode: libx264, yuv420p, faststart.
 

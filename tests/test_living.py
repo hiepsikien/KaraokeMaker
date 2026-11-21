@@ -122,10 +122,12 @@ class RainLoopTests(unittest.TestCase):
 
     def test_render_writes_a_yuv420p_loop_with_the_requested_shape(self):
         destination = self.root / "rain.mp4"
+        plan = base_plan()
+        plan["image_hash"] = living._file_hash(self.image)
         with patch.object(living, "CACHE_ROOT", self.cache):
             result = living.render_rain_loop(
                 self.image,
-                base_plan(),
+                plan,
                 destination,
                 duration=1.0,
                 width=640,
@@ -145,6 +147,23 @@ class RainLoopTests(unittest.TestCase):
         self.assertEqual(stream["pix_fmt"], "yuv420p")
         self.assertEqual(stream["r_frame_rate"], "15/1")
         self.assertAlmostEqual(float(facts["format"]["duration"]), 1.0, delta=0.15)
+
+    def test_changed_image_contents_skip_the_stale_plan(self):
+        destination = self.root / "stale.mp4"
+        plan = base_plan()
+        plan["image_hash"] = "sha256:" + "f" * 64
+        with patch.object(living, "CACHE_ROOT", self.cache):
+            result = living.render_rain_loop(
+                self.image,
+                plan,
+                destination,
+                duration=1.0,
+                width=640,
+                height=360,
+                fps=15,
+            )
+        self.assertIsNone(result)
+        self.assertFalse(destination.exists())
 
     def test_a_plan_without_rain_returns_none(self):
         plan = base_plan()
@@ -359,7 +378,7 @@ class SmokeSourceTests(unittest.TestCase):
         )
         self.assertEqual(len(sources), 1)
         # No painted-smoke warp: it swirled in place instead of rising.
-        self.assertIsNone(sources[0]["warp"])
+        self.assertIsNone(sources[0].get("warp"))
         # No rectangular occluder holes that would show as a visible box.
         self.assertEqual(float(sources[0]["mask"].min()), 1.0)
         self.assertEqual(float(sources[0]["mask"][40, 32]), 1.0)
@@ -379,7 +398,7 @@ class SmokeSourceTests(unittest.TestCase):
         )
         self.assertEqual(len(sources), 1)
         self.assertGreater(float(sources[0]["mask"].max()), 0.0)
-        self.assertIsNone(sources[0]["warp"])
+        self.assertIsNone(sources[0].get("warp"))
 
     def test_fire_is_only_a_fallback_when_no_smoke_object_covers_it(self):
         covered = self.sources(

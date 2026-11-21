@@ -49,7 +49,7 @@ async function readError(response: Response) {
 }
 
 function effectNames(effect: BackgroundEffect) {
-  const names = (effect.effect_plan.items || []).map((item) => item.effect).filter(Boolean);
+  const names = (effect.effect_plan?.items || []).map((item) => item.effect).filter(Boolean);
   return names.length > 0 ? names.join(", ") : "chưa có hiệu ứng";
 }
 
@@ -160,7 +160,7 @@ export function StudioWorkspace() {
             Chưa có ảnh. Bấm “Chọn ảnh” để thêm một hoặc nhiều ảnh tĩnh.
           </div>
         ) : (
-          <ImageCards paths={images} onRemove={removeImage} />
+          <ImageCards paths={images} onRemove={removeImage} outputProfile={profile} />
         )}
 
         <label className="block">
@@ -182,7 +182,12 @@ export function StudioWorkspace() {
             images={images}
             effects={effects}
             outputProfile={profile}
-            onEffectsChange={(updater) => setEffects((current) => updater(current))}
+            onEffectsChange={(updater) => {
+              setEffects((current) => updater(current));
+              // The old preview belongs to the previous plan; never show it
+              // as if it reflected the newly applied effects.
+              setPreviews({});
+            }}
           />
         </div>
       </section>

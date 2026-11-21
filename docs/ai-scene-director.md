@@ -1117,7 +1117,8 @@ Plan:      compiler local (Intent + Inventory) → EffectPlan
   8 s), cache theo `image_hash + plan_hash`.
 - Đưa loop vào **stage slideshow** (trước text overlay), giữ nguyên "một picture,
   hai mux" — không render 2 lần.
-- Protect strip lời 280 px: giảm mật độ mưa/khói hoặc không cho effect đi qua vùng chữ.
+- Strip lời 280 px: effect render trước lyric overlay nên có thể đi qua vùng chữ;
+  text/bar vẽ sau đảm bảo đọc được. Protect box cho mặt/logo vẫn giữ.
 - Budget thực tế: demo 8 s ≈ 58 s ≈ **7× realtime**. Bài 4 phút:
   - 30 ảnh unique ≈ 29 phút;
   - 5 ảnh lặp ≈ 5 phút.
@@ -1321,7 +1322,7 @@ class RenderProfile:
 | Mưa | 3 lớp, mật độ nhẹ | Không storm mặc định |
 | Nước | W1/W2, biên độ nhỏ | W3 chỉ khi được yêu cầu |
 | Dust/light rays | thưa | Không hạt dày |
-| Lyric strip | **0 motion** | Không effect đi qua vùng chữ |
+| Lyric strip | Text/bar trên cùng | Effect có thể chạy phía sau; text/bar vẽ sau |
 
 Preset:
 

@@ -143,6 +143,7 @@ export type DirectorAnalysis = {
   effect_plan: EffectPlan;
   usage?: DirectorUsage | null;
   cached?: boolean;
+  intent_fallback?: boolean;
 };
 
 export type Project = {

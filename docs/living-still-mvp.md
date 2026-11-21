@@ -201,7 +201,7 @@ P1 9:16:
 
 ```text
 1080x1920, safe_top=173, safe_bottom=307, safe_right=118,
-strip_rect=(0, 1490, 1080, 280)  # ví dụ, cần test layout
+strip_rect=(0, 1333, 1080, 280)  # portrait_1080x1920
 lyric_font_size=48, max_lyric_width=960
 ```
 
@@ -229,10 +229,9 @@ speed * T = k * span
 
 ### 4.3 Lyric strip
 
-- `strip_rect` là **vùng cấm effect**, không chỉ overlay chữ.
-- Renderer phải mask `strip_rect` trước khi composite strip, hoặc dùng strip nền đục.
-- Test pixel diff trong `strip_rect` phải ~0 (tolerance rất nhỏ).
-- Hiện `_draw_strip` tạo RGBA trong suốt; mưa/khói vẫn lộ sau chữ nếu không mask.
+- `strip_rect` là vị trí lyric strip, không phải vùng cấm effect.
+- Effect render **trước** lyric overlay nên được phép đi qua `strip_rect`; text/bar vẽ sau đảm bảo đọc được và nằm trong `safe_left`/`safe_right`.
+- `_draw_strip` tạo RGBA trong suốt; bar tối phía sau chữ giữ độ tương phản trên nền động.
 
 ### 4.4 Budget
 
@@ -274,7 +273,7 @@ speed * T = k * span
 - Loop seam: frame cuối/đầu so baseline; pass nếu dưới ngưỡng perceptual.
 - Rain leak: % pixel trong `dry` <0,5% (tolerance), không đòi 0.
 - Time/ảnh: tách download, analyze, mask, preview 480p; mục tiêu <60 s sau cache.
-- Strip: pixel diff trong `strip_rect` ~0.
+- Lyric: text nằm trong safe area; effect có thể chạy phía sau strip.
 
 ## 7. Những gì đã sửa theo review
 
@@ -283,7 +282,7 @@ speed * T = k * span
 3. C1 → P2 opt-in; MVP C0. Không ghi "khuyến nghị/mặc định" cho C1.
 4. 9:16 → P1; MVP 16:9 only.
 5. Normalized theo **ảnh gốc sau EXIF, trước letterbox**; có `fit_transform` + cache key.
-6. `strip_rect` là vùng cấm effect; test pixel diff.
+6. `strip_rect` là vị trí lyric; test text nằm trong safe area và không tràn khung.
 7. Loop quantization bắt buộc; sửa splash/blink.
 8. `RenderProfile` đủ field; sửa pixel math 9:16; max width theo profile.
 9. `outputs` MVP flat; P1 `profiles` map.
@@ -312,7 +311,7 @@ speed * T = k * span
 - TypeScript: `npx tsc --noEmit` pass; `npm run build` pass.
 - API thật: consent=false → 400; cached analyze → 200.
 - Gemini thật: inventory + intent chạy; indoor trả `dry`, outdoor trả `outdoor`.
-- Render E2E: 2 MP4 1920×1080/30fps, mưa + lyric + mux; strip diff = 0.
+- Render E2E: 2 MP4 1920×1080/30fps, mưa + lyric + mux; lyric nằm trong safe area, effect phía sau strip.
 - Eval 10 ảnh core:
   - schema **10/10**, effect type **10/10**.
   - strict label recall: micro 0.692 / macro 0.717.
@@ -335,11 +334,11 @@ speed * T = k * span
 5. **Profile bổ sung — xong**: 16:9, 9:16, 1:1, 4:5; tên file có `(dọc)`,
    `(vuông)`, `(4x5)`.
 6. **P2a — xong**: snow (3 lớp, mask outdoor/dry) + water W1 shimmer (region
-   liquid/water). Smoke strip/protect zero; 80 tests pass; 1080p 8 s: snow 39.3 s,
+   liquid/water). Smoke protect boxes respected; test suite pass; 1080p 8 s: snow 39.3 s,
    water 14.9 s; plan thật snow/water render đúng.
 7. **P2b — xong**: fire (glow/flicker theo object/region) + fog (noise drift),
    expose trong intent (`lửa/cháy`, `sương mù/fog`); 80 tests pass; smoke
-   strip/protect zero; fire thật trên ảnh wildfire đã render.
+   protect boxes respected; fire thật trên ảnh wildfire đã render.
 8. **P3 còn lại**:
    - SAM 2 + Depth masks (thay box/ellipse).
    - C1 character micro-motion (thở/tóc/blink).
@@ -350,8 +349,8 @@ speed * T = k * span
 
 ## 10.1 Sửa theo feedback Studio (ảnh hải chiến)
 
-- **Studio preview không mask strip lời**: `studio.py` truyền strip height 0, nên
-  sóng/nước sát foreground hiện đầy đủ. Bản Karaoke export vẫn bảo vệ dải lời.
+- **Effect không còn mask strip lời**: background motion render trước lyric overlay với
+  `strip_rect=None`, nên sóng/nước/khói hiện đầy đủ; text/bar vẽ sau vẫn đảm bảo đọc được.
 - **Inventory v3**: thêm ships/boats, sails, masts, flags, ropes, fire/flames, smoke,
   embers; affordances `wind_movable`, `fire/burn`, `container/steam_source`; region
   `liquid` phủ toàn bộ mặt nước, thêm `fire`/`smoke`. Cache inventory bump v3.
@@ -387,7 +386,7 @@ speed * T = k * span
   sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
   thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
   `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
-- 96 tests pass.
+- 104 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -408,18 +407,43 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   `buồm` được xem là cloth. Cloth warp được ghim tại `pivot` (cột buồm) và biên
   độ theo kích thước object, thay vì xoay 0,7° gần như không thấy.
 - **Khói**: smoke box được dùng làm emitter (không cần `opening`), lấy màu từ
-  vùng khói trong ảnh, mask theo độ tối để không phủ bạt cả bầu trời; mỗi smoke
-  box là một nguồn, fire chỉ thêm nguồn khi không bị smoke box che. Ngoài hạt
-  khói, chính texture khói đã vẽ được warp nhẹ (billow) nên hiệu ứng thấy rõ mà
-  vẫn khớp pattern; box tàu/cột buồm/sky/water bị loại khỏi mask warp. Inventory
-  v4 yêu cầu liệt kê từng cột khói/đám lửa riêng.
+  vùng khói trong ảnh. Painted smoke **không còn warp**; hướng bốc lên do các
+  wisp rời, sparse đảm nhiệm (xem mục smoke sparse bên dưới). Inventory v7 yêu
+  cầu liệt kê từng cột khói/đám lửa riêng và nhận thêm chim/mặt trời.
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=6`, `PREVIEW_VERSION=preview_v3`; inventory
-  `v4` để lần phân tích sau lấy đủ các cột khói.
+- **Cache**: `MOTION_CACHE_VERSION=17`, `PREVIEW_VERSION=preview_v14`; inventory
+  `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
+
+## 10.3 Sửa theo review PR #5
+
+- **`.env`**: nạp bằng path tuyệt đối, chỉ điền biến thiếu/rỗng; biến môi trường
+  thật (khác rỗng) luôn thắng. Không còn `override=True`.
+- **`/api/projects/session`**: chỉ ghi các field client thực sự gửi
+  (`model_fields_set`), nên request cũ thiếu `output_profile` không kéo project
+  9:16 về 16:9.
+- **Lyric + safe area**: text dùng `safe_left`/`safe_right`; một font size chung
+  cho cả bài, tự thu nhỏ nếu dòng quá dài hoặc vượt số hàng của strip. Thêm wrap
+  nhiều hàng thay vì tối đa 2.
+- **Effect trước lời**: background motion render với `strip_rect=None`; effect
+  được phép chạy phía sau dải lời, text/bar vẽ sau vẫn đảm bảo đọc được.
+- **Protect object**: ember sprite bị clip theo toàn bộ `prevent` (không chỉ tâm);
+  wind rigid vẫn áp `prevent` lên patch để mặt/chữ được bảo vệ.
+- **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung
+  sẽ bỏ qua effect và yêu cầu phân tích lại thay vì áp box cũ.
+- **Inspect ảnh**: `fits_frame`/note tính theo `output_profile`; thêm 4:5. Preview
+  lớn chỉ trả khi `with_preview=true`, danh sách ảnh chỉ nhận thumbnail.
+- **Cache**: thư mục theo platform + `KARAOKE_CACHE_DIR`; có eviction theo số file
+  và dung lượng cho living/studio/director.
+- **An toàn**: prompt cap 500 ký tự; model phải nằm trong allowlist; lỗi render
+  preview không trả raw exception ra client.
+- **Intent fallback**: kết quả có `intent_fallback`; UI cảnh báo khi chỉ dùng
+  keyword matching.
+- **Dọn dẹp**: xoá dead code smoke warp; ambient >600 s được loop; xoá ảnh nền
+  cũng xoá effect tương ứng và ambient chỉ lấy từ ảnh còn dùng.
 
 ## 11. Bộ ảnh eval
 

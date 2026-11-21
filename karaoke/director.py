@@ -26,8 +26,13 @@ from typing import Any
 import requests
 from PIL import Image, ImageOps
 
+from karaoke.cache import cache_root, prune
+
 DEFAULT_MODEL = "gemini-3.8-flash"
 INTENT_MODEL = "gemini-3.1-flash-lite"
+# Models the server is willing to call. A client-supplied value is ignored
+# unless it is on this list, so it can never be interpolated into the URL.
+ALLOWED_MODELS = frozenset({DEFAULT_MODEL, INTENT_MODEL})
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 FRAME_WIDTH = 1920
@@ -217,7 +222,7 @@ def _api_key() -> str:
 
 
 def _cache_dir() -> Path:
-    return Path.home() / "Library" / "Caches" / "KaraokeMaker" / "director"
+    return cache_root("director")
 
 
 def _digest(text: str) -> str:
@@ -254,6 +259,7 @@ def _cache_write(path: Path, payload: dict) -> None:
 def _cache_write_best_effort(path: Path, payload: dict) -> None:
     try:
         _cache_write(path, payload)
+        prune(path.parent, max_files=500, max_bytes=60_000_000)
     except OSError:
         pass
 
@@ -917,6 +923,7 @@ def build_effect_plan(
     protect: list[dict],
     width: int,
     height: int,
+    output_profile: str = PROFILE_ID,
 ) -> dict:
     items: list[dict] = []
     seen: set[str] = set()
@@ -939,7 +946,7 @@ def build_effect_plan(
     return {
         "version": 1,
         "image_hash": image_hash,
-        "profile_id": PROFILE_ID,
+        "profile_id": output_profile,
         "fit_transform": build_fit_transform(width, height),
         "objects": [dict(item) for item in objects],
         "regions": [dict(item) for item in regions],
@@ -952,18 +959,19 @@ def build_effect_plan(
 # Cached calls
 
 
-def _load_intent(prompt: str, model: str, api_key: str) -> tuple[dict, dict, bool]:
+def _load_intent(prompt: str, model: str, api_key: str) -> tuple[dict, dict, bool, bool]:
     path = _intent_cache_path(prompt, model)
     cached = _cache_read(path)
     if cached is not None and isinstance(cached.get("intent"), dict):
-        return cached["intent"], _zero_usage(), True
+        return cached["intent"], _zero_usage(), True, False
     try:
         data = _post_generate(INTENT_MODEL, _intent_request(prompt), api_key, timeout=30)
         intent = _extract_payload(data, "intent")
         usage = _usage_from(data)
     except Exception:
-        # A failed intent call must not block the image analysis.
-        return keyword_intent(prompt), _zero_usage(), False
+        # A failed intent call must not block the image analysis, but the caller
+        # must be able to tell the user that only keyword matching was used.
+        return keyword_intent(prompt), _zero_usage(), False, True
     _cache_write_best_effort(
         path,
         {
@@ -974,7 +982,7 @@ def _load_intent(prompt: str, model: str, api_key: str) -> tuple[dict, dict, boo
             "usage": usage,
         },
     )
-    return intent, usage, False
+    return intent, usage, False, False
 
 
 def _load_inventory(image: Image.Image, image_hash: str, model: str, api_key: str) -> tuple[dict, dict, bool]:
@@ -1029,6 +1037,7 @@ def analyze_scene(
     *,
     consent: bool,
     model: str | None = None,
+    output_profile: str = PROFILE_ID,
 ) -> dict:
     """Analyze one still image and compile an effect plan.
 
@@ -1055,8 +1064,12 @@ def analyze_scene(
 
     prompt_text = str(prompt or "")
     inventory_model = (model or "").strip() or DEFAULT_MODEL
+    if inventory_model not in ALLOWED_MODELS:
+        inventory_model = DEFAULT_MODEL
 
-    intent_raw, intent_usage, intent_cached = _load_intent(prompt_text, inventory_model, api_key)
+    intent_raw, intent_usage, intent_cached, intent_fallback = _load_intent(
+        prompt_text, inventory_model, api_key
+    )
     inventory_raw, inventory_usage, inventory_cached = _load_inventory(
         image, image_hash, inventory_model, api_key
     )
@@ -1072,6 +1085,7 @@ def analyze_scene(
         inventory["protect"],
         width,
         height,
+        output_profile=output_profile,
     )
     return {
         "image": str(image_path),
@@ -1088,4 +1102,5 @@ def analyze_scene(
         "effect_plan": plan,
         "usage": usage,
         "cached": bool(intent_cached and inventory_cached),
+        "intent_fallback": intent_fallback,
     }

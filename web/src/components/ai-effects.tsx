@@ -297,7 +297,11 @@ export function AiEffects({
     fetch("/api/images/inspect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths: [selectedImage] }),
+      body: JSON.stringify({
+        paths: [selectedImage],
+        output_profile: outputProfile,
+        with_preview: true,
+      }),
       signal: controller.signal,
     })
       .then((response) => (response.ok ? response.json() : { images: [] }))
@@ -313,7 +317,7 @@ export function AiEffects({
         if (!controller.signal.aborted) setInspectError("Không đọc được ảnh nền. Kiểm tra server Python đang chạy.");
       });
     return () => controller.abort();
-  }, [selectedImage]);
+  }, [selectedImage, outputProfile]);
 
   const existingEffect = selectedImage ? effects.find((item) => item.image_path === selectedImage) : undefined;
   const preview = fact?.preview || fact?.thumbnail || "";
@@ -347,7 +351,12 @@ export function AiEffects({
       const response = await fetch("/api/director/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image_path: selectedImage, prompt: prompt.trim(), consent }),
+        body: JSON.stringify({
+          image_path: selectedImage,
+          prompt: prompt.trim(),
+          consent,
+          output_profile: outputProfile,
+        }),
       });
       if (!response.ok) {
         const detail = await readError(response);
@@ -529,6 +538,11 @@ export function AiEffects({
             )}
             {analysis.usage && <span className="text-[var(--muted)]">{usageText(analysis.usage)}</span>}
           </div>
+          {analysis.intent_fallback && (
+            <p className="text-xs leading-5 text-amber-100/90">
+              Không gọi được Gemini để hiểu prompt; đang dùng từ khóa dự phòng. Kết quả có thể thiếu hiệu ứng.
+            </p>
+          )}
           {analysis.scene && <p className="text-xs leading-5 text-[var(--muted)]">{analysis.scene}</p>}
         </div>
       )}
@@ -539,7 +553,7 @@ export function AiEffects({
             <p className="text-sm text-[var(--gold)]">Đã áp dụng</p>
             <p className="text-xs leading-5 text-[var(--muted)]">
               {existingEffect.effect_prompt}
-              {existingEffect.effect_plan.items.length > 0
+              {(existingEffect.effect_plan?.items?.length ?? 0) > 0
                 ? ` · ${existingEffect.effect_plan.items.map((item) => item.effect).join(", ")}`
                 : ""}
             </p>
