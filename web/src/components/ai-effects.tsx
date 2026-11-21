@@ -381,7 +381,10 @@ export function AiEffects({
         model: analysis.model,
       },
       selected_object_ids: selectedObjectIds,
-      effect_plan: analysis.effect_plan,
+      effect_plan: {
+        ...analysis.effect_plan,
+        selected_object_ids: selectedObjectIds,
+      },
       model: analysis.model,
       created: new Date().toISOString(),
       asset_id: null,

@@ -198,5 +198,287 @@ class RainLoopTests(unittest.TestCase):
                 )
 
 
+def object_entry(
+    object_id: str,
+    label: str,
+    box: tuple[float, float, float, float],
+    *,
+    affordances: list[str] | None = None,
+    pivot: tuple[float, float] | None = None,
+    opening: tuple[float, float] | None = None,
+) -> dict:
+    return {
+        "id": object_id,
+        "label": label,
+        "box": {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]},
+        "anchors": {
+            "pivot": {"x": pivot[0], "y": pivot[1]} if pivot else None,
+            "opening": {"x": opening[0], "y": opening[1]} if opening else None,
+        },
+        "affordances": affordances or [],
+    }
+
+
+def effect_plan(items: list[dict], **extra) -> dict:
+    plan = {
+        "version": 1,
+        "image_hash": "sha256:" + "c" * 64,
+        "fit_transform": {
+            "mode": "contain",
+            "source_width": 100,
+            "source_height": 100,
+            "frame_width": 100,
+            "frame_height": 100,
+            "scale": 1.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+        },
+        "objects": [],
+        "regions": [],
+        "protect": [],
+        "items": items,
+    }
+    plan.update(extra)
+    return plan
+
+
+class WaterMotionTests(unittest.TestCase):
+    def test_liquid_region_is_kept_when_items_target_an_object(self):
+        region = [
+            (0.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ]
+        plan = effect_plan(
+            [{"effect": "water", "target_ids": ["sea-1"], "params": {"intensity": 0.55}}],
+            regions=[
+                {
+                    "id": "liquid",
+                    "polygon": [{"x": x, "y": y} for x, y in region],
+                }
+            ],
+            objects=[
+                object_entry("sea-1", "liquid surface", (0.0, 0.45, 1.0, 1.0))
+            ],
+        )
+        shapes = living._water_shapes(plan, {"sea-1"})
+        self.assertEqual(len(shapes), 1)
+        self.assertEqual([(p[0], p[1]) for p in shapes[0]], region)
+
+    def test_water_shimmer_moves_dark_foreground_rows(self):
+        plan = effect_plan(
+            [{"effect": "water", "target_ids": [], "params": {"intensity": 0.55}}],
+            regions=[
+                {
+                    "id": "liquid",
+                    "polygon": [
+                        {"x": 0.0, "y": 0.5},
+                        {"x": 1.0, "y": 0.5},
+                        {"x": 1.0, "y": 1.0},
+                        {"x": 0.0, "y": 1.0},
+                    ],
+                }
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        spec = living._water_spec(plan, transform, 100, 100, 4.0, prevent, lambda _m: None)
+        self.assertIsNotNone(spec)
+
+        # A vertical gradient makes the per-column vertical bob measurable even
+        # in the dark foreground water.
+        base = np.zeros((100, 100, 3), dtype=np.float32)
+        base[50:, :, :] = np.arange(50, 100, dtype=np.float32)[:, None, None] * 2.0
+        first = living._apply_water(base.copy(), spec, 0.0)
+        second = living._apply_water(base.copy(), spec, 0.5)
+        difference = np.abs(second[60:, :] - first[60:, :]).mean()
+        self.assertGreater(float(difference), 0.5)
+
+    def test_water_mask_does_not_warp_objects_standing_in_it(self):
+        plan = effect_plan(
+            [{"effect": "water", "target_ids": [], "params": {"intensity": 0.55}}],
+            regions=[
+                {
+                    "id": "liquid",
+                    "polygon": [
+                        {"x": 0.0, "y": 0.5},
+                        {"x": 1.0, "y": 0.5},
+                        {"x": 1.0, "y": 1.0},
+                        {"x": 0.0, "y": 1.0},
+                    ],
+                }
+            ],
+            objects=[
+                object_entry("boat-1", "boat", (0.2, 0.6, 0.4, 0.8)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        mask = living._build_water_mask(plan, transform, 100, 100, prevent)
+        self.assertIsNotNone(mask)
+        # Inside the boat: no shimmer. Away from it: shimmer is allowed.
+        self.assertEqual(float(mask[70, 30]), 0.0)
+        self.assertGreater(float(mask[90, 80]), 0.0)
+
+
+class SmokeSourceTests(unittest.TestCase):
+    def sources(self, objects: list[dict], base_value: float = 60.0):
+        plan = effect_plan(
+            [{"effect": "steam", "target_ids": [], "params": {"intensity": 0.55}}],
+            objects=objects,
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        base = np.full((100, 100, 3), base_value, dtype=np.float32)
+        return living._steam_sources(
+            plan, transform, 100, 100, 4.0, 1234, base, lambda _m: None
+        )
+
+    def test_every_smoke_box_is_an_emitter_even_without_an_opening(self):
+        sources = self.sources(
+            [
+                object_entry("smoke-1", "smoke", (0.1, 0.1, 0.3, 0.45)),
+                object_entry("smoke-2", "smoke plume", (0.6, 0.1, 0.8, 0.45)),
+            ]
+        )
+        self.assertEqual(len(sources), 2)
+        self.assertTrue(all(source["smoke"] for source in sources))
+
+    def test_smoke_mask_and_warp_skip_objects_inside_the_box(self):
+        plan = effect_plan(
+            [{"effect": "steam", "target_ids": [], "params": {"intensity": 0.55}}],
+            objects=[
+                object_entry("smoke-1", "smoke", (0.1, 0.1, 0.6, 0.7)),
+                object_entry("boat-1", "boat", (0.25, 0.3, 0.4, 0.5)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        base = np.full((100, 100, 3), 70.0, dtype=np.float32)
+        sources = living._steam_sources(
+            plan, transform, 100, 100, 4.0, 1234, base, lambda _m: None
+        )
+        self.assertEqual(len(sources), 1)
+        self.assertIsNotNone(sources[0]["warp"])
+        # Boat box (25..40, 30..50) is cut out of the smoke/warp mask.
+        self.assertEqual(float(sources[0]["mask"][40, 32]), 0.0)
+        self.assertGreater(float(sources[0]["mask"][15, 20]), 0.0)
+
+    def test_sky_backdrop_does_not_zero_the_smoke_mask(self):
+        plan = effect_plan(
+            [{"effect": "steam", "target_ids": [], "params": {"intensity": 0.55}}],
+            objects=[
+                object_entry("smoke-1", "smoke", (0.1, 0.1, 0.5, 0.6)),
+                object_entry("sky-1", "sky backdrop", (0.0, 0.0, 1.0, 0.55)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        base = np.full((100, 100, 3), 70.0, dtype=np.float32)
+        sources = living._steam_sources(
+            plan, transform, 100, 100, 4.0, 1234, base, lambda _m: None
+        )
+        self.assertEqual(len(sources), 1)
+        self.assertGreater(float(sources[0]["mask"].max()), 0.0)
+        self.assertIsNotNone(sources[0]["warp"])
+
+    def test_fire_is_only_a_fallback_when_no_smoke_object_covers_it(self):
+        covered = self.sources(
+            [
+                object_entry("smoke-1", "smoke", (0.1, 0.1, 0.7, 0.7)),
+                object_entry("fire-1", "fire", (0.5, 0.5, 0.7, 0.7), affordances=["fire"]),
+            ]
+        )
+        self.assertEqual(len(covered), 1)
+        self.assertEqual(covered[0]["cx"], 40.0)
+
+        separate_fire = self.sources(
+            [
+                object_entry("smoke-1", "smoke", (0.1, 0.1, 0.3, 0.45)),
+                object_entry("fire-1", "fire", (0.5, 0.5, 0.7, 0.7), affordances=["fire"]),
+            ]
+        )
+        self.assertEqual(len(separate_fire), 2)
+
+        without_smoke = self.sources(
+            [
+                object_entry("fire-1", "fire", (0.5, 0.5, 0.7, 0.7), affordances=["fire"]),
+            ]
+        )
+        self.assertEqual(len(without_smoke), 1)
+        self.assertTrue(without_smoke[0]["smoke"])
+
+
+class SelectedObjectFilterTests(unittest.TestCase):
+    def test_plan_selection_filters_effect_objects(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry("flag-1", "flag", (0.6, 0.05, 0.9, 0.3)),
+                object_entry("pot-1", "pot", (0.1, 0.1, 0.3, 0.3)),
+            ],
+            selected_object_ids=["flag-1"],
+        )
+        self.assertEqual([item["id"] for item in living._plan_objects(plan)], ["flag-1"])
+
+        plan["selected_object_ids"] = []
+        self.assertEqual(living._plan_objects(plan), [])
+
+
+class WindFlagTests(unittest.TestCase):
+    def test_flag_is_treated_as_cloth_and_moves_around_its_pivot(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["flag-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry("flag-1", "flag", (0.6, 0.05, 0.9, 0.3), pivot=(0.6, 0.05))
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        self.assertTrue(specs[0]["cloth"])
+        self.assertGreater(specs[0]["amplitude"], 1.0)
+
+        image = Image.new("RGB", (100, 100), (20, 20, 20))
+        for x in range(60, 91):
+            for y in range(5, 31):
+                image.putpixel((x, y), (200, 80, 40))
+        first = np.asarray(living._wind_frame(image.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._wind_frame(image.copy(), specs, 0.25), dtype=np.float32)
+        self.assertGreater(float(np.abs(second - first).max()), 0.0)
+
+    def test_protected_flag_sways_rigidly_instead_of_being_skipped(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["flag-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry("flag-1", "flag", (0.6, 0.05, 0.9, 0.3), pivot=(0.6, 0.05))
+            ],
+            protect=[
+                {
+                    "label": "calligraphy",
+                    "box": {"x1": 0.6, "y1": 0.05, "x2": 0.9, "y2": 0.3},
+                }
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = living._build_protect_mask(plan, transform, 100, 100, (0, 100, 0, 0))
+        self.assertEqual(float(prevent[10, 70]), 0.0)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        self.assertTrue(specs[0]["rigid"])
+        self.assertGreater(float(specs[0]["mask"].max()), 0.0)
+
+        image = Image.new("RGB", (100, 100), (20, 20, 20))
+        for x in range(60, 91):
+            for y in range(5, 31):
+                image.putpixel((x, y), (200, 80, 40))
+        first = np.asarray(living._wind_frame(image.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._wind_frame(image.copy(), specs, 0.25), dtype=np.float32)
+        self.assertGreater(float(np.abs(second - first).max()), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

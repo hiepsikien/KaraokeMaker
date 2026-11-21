@@ -35,7 +35,7 @@ FRAME_HEIGHT = 1080
 PROFILE_ID = "landscape_1080p"
 LOOP_DURATION = 8
 MAX_VISION_SIDE = 1024
-PREPROCESSING = "exif_rgb_jpeg1024_q85_inventory_v3"
+PREPROCESSING = "exif_rgb_jpeg1024_q85_inventory_v4"
 
 EFFECT_TYPES = ("rain", "snow", "water", "steam", "wind", "fire", "fog", "light")
 INTENT_VERSION = "intent_v4"
@@ -79,9 +79,13 @@ Identify up to 16 salient visible objects that could receive or block ambient ef
 people/faces, boats/ships, sails, masts, flags, ropes, fire/flames, smoke, embers,
 food, bowls/pots, lanterns, curtains, plants, liquid surfaces, sky, ground.
 Include small or distant ships/sails if they are visible, with lower confidence.
+Return every distinct smoke plume and every distinct flame cluster as its own object;
+do not merge separate smoke columns into one box, and include thin distant plumes.
 Affordances should include: wind_movable for sails/flags/curtains, fire/burn/emissive
-for flames and burning objects, hanging/swayable for hanging objects,
-container/steam_source for pots and bowls.
+for flames and burning objects, smoke for smoke plumes, hanging/swayable for hanging
+objects, container/steam_source for pots and bowls.
+Give sails and flags a pivot_2d at the mast/attachment edge so their sway direction is
+unambiguous; never put the pivot in the middle of a flag.
 For each object return:
 - id: a short stable slug,
 - label: a short lowercase English label,
@@ -804,9 +808,12 @@ _TARGET_SYNONYMS = {
     "biển": ("water", "sea", "ocean", "liquid", "river"),
     "nước": ("water", "liquid"),
     "sóng": ("water", "wave", "liquid"),
-    "buồm": ("sail", "sails"),
+    "buồm": ("sail", "sails", "sailcloth"),
+    "cánh buồm": ("sail", "sails", "sailcloth"),
+    "cờ": ("flag", "banner", "pennant", "ensign"),
+    "lá cờ": ("flag", "banner", "pennant", "ensign"),
     "lửa": ("fire", "flame", "burning", "hearth"),
-    "khói": ("smoke", "steam"),
+    "khói": ("smoke", "steam", "plume"),
     "thuyền": ("boat", "ship", "vessel"),
     "đèn lồng": ("lantern", "lamp"),
     "rèm": ("curtain", "noren"),

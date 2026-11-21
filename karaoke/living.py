@@ -8,8 +8,11 @@ an H.264/yuv420p/faststart encode streamed through FFmpeg.
 P1a adds three micro-motion recipes that share the same encode/mask/cache
 pipeline:
 
-* ``steam`` - soft sprites rising from an object opening, loop-quantized.
-* ``wind``  - a small local warp of hanging/cloth objects around a pivot.
+* ``steam`` - soft sprites rising from an object opening, loop-quantized. Smoke
+  boxes (including fire fallbacks) use their sampled local colour, a darkness-
+  weighted mask, and a full-plume rise so the motion matches painted smoke.
+* ``wind``  - a local cloth warp of sails/flags/curtains pinned at their pivot,
+  or a small rotation for other hanging objects.
 * ``light`` - a very subtle brightness/glow pulse, emitted on bright pixels.
 
 P2a adds two more recipes on the same pipeline:
@@ -18,8 +21,9 @@ P2a adds two more recipes on the same pipeline:
   gentle periodic sideways drift. Like rain it never touches the lyric strip,
   protect boxes, or dry/indoor areas.
 * ``water`` - W1 surface shimmer: a per-row horizontal sine displacement plus a
-  soft specular brightness modulation inside liquid/water regions (or objects
-  advertising a water/liquid affordance). No surf, spray, or caustics.
+  per-column vertical bob and soft specular highlights inside liquid/water
+  regions (or objects advertising a water/liquid affordance). No surf, spray,
+  or caustics.
 
 P2b adds two atmospheric recipes:
 
@@ -59,12 +63,14 @@ CACHE_ROOT = Path.home() / "Library" / "Caches" / "KaraokeMaker" / "living"
 STRIP_HEIGHT_1080 = 280
 # count at 1080p, speed px/s at 1080p, streak length px, alpha 0..255, blur px
 RAIN_LAYERS = (
-    (180, 800.0, 55.0, 95, 0.8),
-    (170, 960.0, 38.0, 70, 0.6),
-    (140, 1120.0, 24.0, 48, 0.4),
+    (320, 900.0, 24.0, 42, 0.8),
+    (260, 1200.0, 36.0, 60, 0.6),
+    (180, 1500.0, 50.0, 82, 0.4),
 )
-RAIN_COLOR = (255, 236, 210)
-SLANT = 0.13  # horizontal drift per vertical pixel
+# Rain catches a little of the ambient light instead of glowing warm; the
+# cool-neutral tint keeps it separate from fire embers.
+RAIN_COLOR = (206, 218, 230)
+SLANT = 0.12  # horizontal drift per vertical pixel
 DEFAULT_INTENSITY = 0.55
 DEFAULT_LIGHT_INTENSITY = 0.3
 DEFAULT_WATER_INTENSITY = 0.45
@@ -99,6 +105,21 @@ WATER_REGION_HINTS = (
     "suối",
 )
 WATER_AFFORDANCES = ("water", "liquid")
+WATER_LABELS = (
+    "water",
+    "sea",
+    "ocean",
+    "liquid",
+    "river",
+    "lake",
+    "pond",
+    "stream",
+    "nước",
+    "biển",
+    "sông",
+    "hồ",
+    "suối",
+)
 
 # Fire targets match on affordances/labels; a `fire` region may substitute.
 FIRE_REGION_HINTS = ("fire", "flame", "hearth", "burn", "ember", "lửa", "cháy")
@@ -149,7 +170,10 @@ EFFECT_LABELS = {
 # Bump whenever the procedural output changes so old caches are not reused.
 # v3: adds snow flakes and water W1 shimmer.
 # v4: adds fire glow/flicker and slow fog drift.
-MOTION_CACHE_VERSION = 5
+# v5: first AI Studio / inventory-v3 pass.
+# v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
+# v7: object-aware water/smoke masks + painted-smoke billow warp.
+MOTION_CACHE_VERSION = 8
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -184,6 +208,10 @@ STEAM_LABELS = (
     "khói",
     "hơi",
 )
+# Smoke behaves differently from kitchen steam: its box already contains the
+# plume, it is dark and turbulent, and it must not be forced to an "opening".
+SMOKE_AFFORDANCES = ("smoke", "exhaust", "plume", "soot")
+SMOKE_LABELS = ("smoke", "plume", "khói", "khói lửa", "khói đen", "cột khói")
 WIND_AFFORDANCES = (
     "hanging",
     "hang",
@@ -204,6 +232,9 @@ WIND_LABELS = (
     "curtain",
     "flag",
     "banner",
+    "pennant",
+    "ensign",
+    "sail",
     "cloth",
     "noren",
     "plant",
@@ -212,9 +243,24 @@ WIND_LABELS = (
     "đèn lồng",
     "rèm",
     "cờ",
+    "buồm",
+    "cánh buồm",
     "cây",
 )
-CLOTH_HINTS = ("cloth", "curtain", "flag", "banner", "noren", "rèm", "cờ", "vải")
+CLOTH_HINTS = (
+    "cloth",
+    "curtain",
+    "flag",
+    "banner",
+    "pennant",
+    "ensign",
+    "sail",
+    "noren",
+    "rèm",
+    "cờ",
+    "buồm",
+    "vải",
+)
 
 
 def _effect_items(plan: dict | None, effect: str) -> list[dict]:
@@ -635,30 +681,54 @@ def _make_layers(width: int, height: int, duration: float, seed: int) -> list[di
         quantized = cycles * span / duration
         xs = rng.uniform(-0.06 * width, 1.06 * width, particles).astype(np.float32)
         ys = rng.uniform(0.0, span, particles).astype(np.float32)
+        # Uneven drop lengths and opacities avoid the "parallel scratches" look
+        # of a single uniform streak template.
+        lengths = (
+            max(2.0, length * size_scale) * rng.uniform(0.55, 1.45, particles)
+        ).astype(np.float32)
+        alphas = (alpha * rng.uniform(0.60, 1.15, particles)).astype(np.float32)
         layers.append(
             {
                 "xs": xs,
                 "ys": ys,
                 "speed": quantized,
                 "span": span,
-                "length": max(2.0, length * size_scale),
-                "alpha": int(alpha),
+                "lengths": lengths,
+                "alphas": alphas,
                 "blur": blur * max(0.35, size_scale),
+                # A slow integer-cycle gust makes the whole curtain lean
+                # together instead of falling in perfectly straight lines.
+                "gust": (1.5 + 3.5 * size_scale) * rng.uniform(0.5, 1.0),
+                "gust_cycles": max(1, int(round(duration / 4.0))),
+                "gust_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
             }
         )
     return layers
 
 
-def _draw_layer(draw: ImageDraw.ImageDraw, layer: dict, t: float, height: int) -> None:
+def _draw_layer(
+    draw: ImageDraw.ImageDraw,
+    layer: dict,
+    t: float,
+    u: float,
+    height: int,
+) -> None:
     span = layer["span"]
-    ys = np.mod(layer["ys"] + layer["speed"] * t, span) - 100.0 * (height / HEIGHT)
-    length = layer["length"]
-    xs = layer["xs"] + SLANT * ys
-    color = tuple(int(round(channel * layer["alpha"] / 255)) for channel in RAIN_COLOR)
-    visible = (ys < height + 4.0) & (ys + length > -4.0)
-    for x, y in zip(xs[visible], ys[visible]):
+    size_scale = height / HEIGHT
+    ys = np.mod(layer["ys"] + layer["speed"] * t, span) - 100.0 * size_scale
+    lengths = layer["lengths"]
+    gust = layer["gust"] * math.sin(
+        2.0 * math.pi * layer["gust_cycles"] * u + layer["gust_phase"]
+    )
+    xs = layer["xs"] + SLANT * ys + gust
+    visible = (ys < height + 4.0) & (ys + lengths > -4.0)
+    base_color = np.asarray(RAIN_COLOR, dtype=np.float32)
+    for x, y, length, alpha in zip(
+        xs[visible], ys[visible], lengths[visible], layer["alphas"][visible]
+    ):
         top = (float(x), float(y))
-        bottom = (float(x) - SLANT * length, float(y) + length)
+        bottom = (float(x) + SLANT * float(length), float(y) + float(length))
+        color = tuple(int(round(channel * float(alpha) / 255.0)) for channel in base_color)
         draw.line([top, bottom], fill=color, width=1)
 
 
@@ -792,8 +862,13 @@ def _object_anchor(entry: dict, name: str) -> tuple[float, float] | None:
     return _norm_point(value)
 
 
-def _plan_objects(plan: dict | None) -> list[dict]:
-    """Read optional ``plan['objects']`` (also tolerates item/inventory copies)."""
+def _plan_objects(plan: dict | None, selected_only: bool = True) -> list[dict]:
+    """Read optional ``plan['objects']`` (also tolerates item/inventory copies).
+
+    ``selected_only`` applies the UI's ``selected_object_ids`` filter. Pass
+    ``False`` when a caller needs every object (for example, water occluders
+    must protect deselected objects too).
+    """
     if not isinstance(plan, dict):
         return []
     raw_entries: list = []
@@ -835,6 +910,10 @@ def _plan_objects(plan: dict | None) -> list[dict]:
                 "affordances": [str(item).strip().casefold() for item in affordances if str(item).strip()],
             }
         )
+    selected = plan.get("selected_object_ids")
+    if selected_only and isinstance(selected, list):
+        allowed = {str(value) for value in selected if str(value).strip()}
+        objects = [entry for entry in objects if entry["id"] in allowed]
     return objects
 
 
@@ -900,10 +979,18 @@ def _soft_sprite(radius: int, cache: dict) -> np.ndarray:
     return sprite
 
 
-def _add_sprite(layer: np.ndarray, sprite: np.ndarray, cx: float, cy: float, alpha: float) -> None:
+def _add_alpha_sprite(
+    layer: np.ndarray,
+    alpha_layer: np.ndarray,
+    sprite: np.ndarray,
+    cx: float,
+    cy: float,
+    alpha: float,
+    color: np.ndarray,
+) -> None:
     if alpha <= 0.0:
         return
-    out_height, out_width = layer.shape[:2]
+    out_height, out_width = alpha_layer.shape[:2]
     sprite_height, sprite_width = sprite.shape
     x0 = int(round(cx)) - sprite_width // 2
     y0 = int(round(cy)) - sprite_height // 2
@@ -919,15 +1006,104 @@ def _add_sprite(layer: np.ndarray, sprite: np.ndarray, cx: float, cy: float, alp
     dest_y1 = dest_y0 + (source_y1 - source_y0)
     if dest_x1 <= dest_x0 or dest_y1 <= dest_y0:
         return
-    color = np.asarray(STEAM_COLOR, dtype=np.float32)
-    patch = sprite[source_y0:source_y1, source_x0:source_x1, None] * (alpha * color)[None, None, :]
-    layer[dest_y0:dest_y1, dest_x0:dest_x1] += patch
+    patch = sprite[source_y0:source_y1, source_x0:source_x1] * alpha
+    rgb = layer[dest_y0:dest_y1, dest_x0:dest_x1]
+    alpha_window = alpha_layer[dest_y0:dest_y1, dest_x0:dest_x1]
+    rgb[:] = color[None, None, :] * patch[:, :, None] + rgb * (
+        1.0 - patch[:, :, None]
+    )
+    alpha_window[:] = patch + alpha_window * (1.0 - patch)
+
+
+def _sample_smoke_color(
+    base_array: np.ndarray | None,
+    box: tuple[float, float, float, float],
+    fallback: np.ndarray,
+) -> np.ndarray:
+    """Sample the local plume colour so generated smoke matches the painting."""
+    if base_array is None:
+        return fallback
+    height, width = base_array.shape[:2]
+    x1, y1, x2, y2 = box
+    left = max(0, min(width - 1, int(math.floor(min(x1, x2)))))
+    right = max(left + 1, min(width, int(math.ceil(max(x1, x2)))))
+    top = max(0, min(height - 1, int(math.floor(min(y1, y2)))))
+    bottom = max(top + 1, min(height, int(math.ceil(max(y1, y2)))))
+    region = base_array[top:bottom, left:right]
+    if region.size == 0:
+        return fallback
+    mean = region.reshape(-1, 3).mean(axis=0).astype(np.float32)
+    luminance = float(mean[0] * 0.2126 + mean[1] * 0.7152 + mean[2] * 0.0722)
+    # Desaturate a little and lift the tone slightly: alpha-blending an exact
+    # copy of the painting would otherwise erase the smoke texture it covers.
+    color = mean * 0.35 + luminance * 0.65
+    color = np.minimum(color, 150.0)
+    return np.clip(color * 1.15 + 12.0, 0.0, 255.0)
+
+
+def _smoke_candidate(entry: dict) -> bool:
+    return _matches_hints(entry, SMOKE_AFFORDANCES, SMOKE_LABELS)
 
 
 def _steam_candidate(entry: dict) -> bool:
+    if _smoke_candidate(entry):
+        return False
     if entry["anchors"].get("opening") is not None:
         return True
     return _matches_hints(entry, STEAM_AFFORDANCES, STEAM_LABELS)
+
+
+def _fire_smoke_candidate(entry: dict) -> bool:
+    return _matches_hints(entry, FIRE_AFFORDANCES, FIRE_LABELS)
+
+
+def _is_background_identity(identity: str) -> bool:
+    tokens = "".join(char if char.isalnum() else " " for char in identity).split()
+    background = {
+        "sky",
+        "backdrop",
+        "background",
+        "cloud",
+        "clouds",
+        "horizon",
+        "water",
+        "sea",
+        "ocean",
+        "liquid",
+        "river",
+        "lake",
+        "ground",
+        "land",
+        "outdoor",
+        "indoor",
+    }
+    return any(token in background for token in tokens)
+
+
+def _smoke_occluder_mask(
+    plan: dict,
+    transform: dict,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """1 where smoke may move, 0 over solid objects (ships, masts, flags)."""
+    mask = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(mask)
+    for entry in _plan_objects(plan, selected_only=False):
+        # Only the smoke itself may be warped. Ships, sails, flags, fire,
+        # pots and containers are solid props and must stay rigid.
+        if _smoke_candidate(entry):
+            continue
+        identity = f"{entry['label']} {entry['id']}".casefold()
+        if _is_background_identity(identity):
+            # Sky/water/background boxes are not solid props; cutting them out
+            # would erase almost the whole smoke mask.
+            continue
+        x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
+        draw.rectangle([x1, y1, x2, y2], fill=0)
+    feather = max(1.0, 2.0 * height / HEIGHT)
+    mask = mask.filter(ImageFilter.GaussianBlur(feather))
+    return np.asarray(mask, dtype=np.float32) / 255.0
 
 
 def _steam_sources(
@@ -937,66 +1113,177 @@ def _steam_sources(
     height: int,
     seconds: float,
     seed: int,
+    base_array: np.ndarray | None,
     log,
+    prevent: np.ndarray | None = None,
 ) -> list[dict]:
     items = _effect_items(plan, "steam")
     if not items:
         return []
     objects = _plan_objects(plan)
     if not objects:
-        log("Bỏ qua steam: plan không có objects.")
+        log("Bỏ qua khói/hơi: plan không có objects.")
         return []
     targets = _target_ids(items)
     intensity = _items_intensity(items, DEFAULT_INTENSITY)
     cycles = max(1, int(round(seconds / 3.5)))
     rng = np.random.default_rng(seed ^ 0x5EA)
     sources: list[dict] = []
-    for entry in objects:
-        if targets and entry["id"] not in targets:
-            continue
-        if not targets and not _steam_candidate(entry):
-            continue
+    occluder = _smoke_occluder_mask(plan, transform, width, height)
+
+    def add_source(entry: dict) -> None:
+        smoke = _smoke_candidate(entry) or _fire_smoke_candidate(entry)
+        if not smoke and not _steam_candidate(entry):
+            return
         x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
         box_width = max(3.0, x2 - x1)
         box_height = max(3.0, y2 - y1)
         opening = entry["anchors"].get("opening")
-        if opening is not None:
-            cx, cy = _map_point(opening, transform, width, height)
-        else:
-            cx, cy = (x1 + x2) / 2.0, y1
-        rise = max(box_height * 2.2, height * 0.16)
-        rise = min(rise, height * 0.6)
-        base_radius = max(2.5, box_width * 0.16)
-        max_radius = max(base_radius + 2.0, box_width * 0.46)
-        count = max(
-            7,
-            int(
-                round(
-                    30
-                    * (0.5 + 0.7 * intensity)
-                    * (0.5 + min(1.0, box_width / max(1.0, width * 0.25)))
+        if smoke:
+            # A smoke box already contains the plume: animate inside it and
+            # only spill a little past the top. Fire boxes have no smoke inside
+            # them, so their plume starts at the flame top and rises upward.
+            fire_only = _fire_smoke_candidate(entry) and not _smoke_candidate(entry)
+            cx = (x1 + x2) / 2.0
+            if fire_only:
+                cy = y1
+                rise = max(box_height * 3.0, height * 0.20)
+                rise = min(rise, height * 0.65)
+                base_radius = max(3.0, box_width * 0.15)
+                max_radius = max(base_radius + 3.0, box_width * 0.55)
+                spread = 0.28
+                sample_box = (x1, max(0.0, y1 - box_height * 1.6), x2, y1)
+            else:
+                # Keep the plume inside the painted smoke body; starting at
+                # the box bottom would draw over a burning ship below it.
+                cy = y1 + box_height * 0.72
+                rise = max(box_height * 1.0, height * 0.06)
+                rise = min(rise, height * 0.45)
+                plume_scale = max(4.0, min(box_width, box_height * 1.35))
+                base_radius = max(3.0, plume_scale * 0.12)
+                max_radius = max(base_radius + 3.0, plume_scale * 0.52)
+                spread = 0.32
+                sample_box = (
+                    x1 + box_width * 0.22,
+                    y1 + box_height * 0.42,
+                    x2 - box_width * 0.22,
+                    y2,
                 )
-            ),
-        )
+            count = max(
+                12,
+                int(
+                    round(
+                        36
+                        * (0.5 + 0.7 * intensity)
+                        * (0.55 + min(1.0, box_width / max(1.0, width * 0.24)))
+                    )
+                ),
+            )
+            base_alpha = 0.07 * max(
+                0.45, min(1.0, (height * 0.16) / max(1.0, box_height))
+            )
+            color = _sample_smoke_color(
+                base_array, sample_box, np.asarray((78.0, 73.0, 68.0))
+            )
+        else:
+            if opening is not None:
+                cx, cy = _map_point(opening, transform, width, height)
+            else:
+                cx, cy = (x1 + x2) / 2.0, y1
+            rise = max(box_height * 2.2, height * 0.16)
+            rise = min(rise, height * 0.6)
+            base_radius = max(2.5, box_width * 0.16)
+            max_radius = max(base_radius + 2.0, box_width * 0.46)
+            count = max(
+                7,
+                int(
+                    round(
+                        30
+                        * (0.5 + 0.7 * intensity)
+                        * (0.5 + min(1.0, box_width / max(1.0, width * 0.25)))
+                    )
+                ),
+            )
+            spread = 0.10
+            base_alpha = 0.16
+            color = np.asarray(STEAM_COLOR, dtype=np.float32)
 
         mask = Image.new("L", (width, height), 0)
         draw = ImageDraw.Draw(mask)
-        half_bottom = max(3.0, box_width * 0.28)
-        half_top = max(5.0, box_width * 0.55)
+        half_bottom = max(3.0, box_width * (0.42 if smoke else 0.28))
+        half_top = max(5.0, box_width * (0.55 if smoke else 0.55))
+        bottom_offset = 0.08 if smoke else 0.12
         draw.polygon(
             [
-                (cx - half_bottom, cy + box_height * 0.12),
-                (cx + half_bottom, cy + box_height * 0.12),
+                (cx - half_bottom, min(height, cy + box_height * bottom_offset)),
+                (cx + half_bottom, min(height, cy + box_height * bottom_offset)),
                 (cx + half_top, cy - rise),
                 (cx - half_top, cy - rise),
             ],
             fill=255,
         )
-        blur = max(1.5, box_width * 0.09)
+        blur = max(1.5, box_width * (0.10 if smoke else 0.09))
         stem = np.asarray(mask.filter(ImageFilter.GaussianBlur(blur)), dtype=np.float32) / 255.0
+        if smoke:
+            stem *= occluder
+            if prevent is not None:
+                stem *= prevent
+        if smoke and not fire_only and base_array is not None:
+            # A smoke bounding box can include bright sky behind the plume.
+            # Weight the emitter by local darkness so the new motion follows
+            # the painted smoke instead of washing out the whole rectangle.
+            image_height, image_width = base_array.shape[:2]
+            left = max(0, min(image_width - 1, int(math.floor(x1))))
+            right = max(left + 1, min(image_width, int(math.ceil(x2))))
+            top = max(0, min(image_height - 1, int(math.floor(y1))))
+            bottom = max(top + 1, min(image_height, int(math.ceil(y2))))
+            region = base_array[top:bottom, left:right]
+            luminance = (
+                region[:, :, 0] * 0.2126
+                + region[:, :, 1] * 0.7152
+                + region[:, :, 2] * 0.0722
+            ) / 255.0
+            # Only dark smoke pixels may move. Bright wood, flames and sky are
+            # excluded completely instead of keeping a 18% warp floor.
+            weight = np.clip((0.62 - luminance) / 0.42, 0.0, 1.0)
+            content = np.asarray(
+                Image.fromarray(
+                    np.clip(weight * 255.0, 0.0, 255.0).astype(np.uint8), "L"
+                ).filter(ImageFilter.GaussianBlur(max(1.0, box_width * 0.04))),
+                dtype=np.float32,
+            ) / 255.0
+            stem[top:bottom, left:right] *= content
+
+        warp = None
+        if smoke and not fire_only:
+            rows = np.where(stem.max(axis=1) > 0.02)[0]
+            columns = np.where(stem.max(axis=0) > 0.02)[0]
+            if rows.size and columns.size:
+                warp_top = max(0, int(rows[0]))
+                warp_bottom = min(height, int(rows[-1]) + 1)
+                warp_left = max(0, int(columns[0]))
+                warp_right = min(width, int(columns[-1]) + 1)
+                if warp_bottom - warp_top >= 3 and warp_right - warp_left >= 3:
+                    warp = {
+                        "left": warp_left,
+                        "top": warp_top,
+                        "right": warp_right,
+                        "bottom": warp_bottom,
+                        "mask": stem[warp_top:warp_bottom, warp_left:warp_right].copy(),
+                        "amplitude": max(
+                            1.0,
+                            min(
+                                6.0 * (height / HEIGHT),
+                                min(box_width, box_height) * 0.03,
+                            ),
+                        ),
+                        "cycles": max(1, int(round(seconds / 6.0))),
+                        "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+                    }
 
         phases = rng.uniform(0.0, 1.0, count).astype(np.float32)
         jitter = rng.uniform(-1.0, 1.0, count).astype(np.float32)
+        offsets = rng.uniform(-1.0, 1.0, count).astype(np.float32)
         curl_phase = rng.uniform(0.0, 2.0 * math.pi, count).astype(np.float32)
         curl_cycles = rng.integers(1, 3, count)
         strength = rng.uniform(0.55, 1.0, count).astype(np.float32)
@@ -1012,53 +1299,150 @@ def _steam_sources(
                 "cycles": cycles,
                 "phases": phases,
                 "jitter": jitter,
+                "offsets": offsets,
+                "spread": spread,
                 "curl_phase": curl_phase,
                 "curl_cycles": curl_cycles,
                 "strength": strength,
+                "base_alpha": base_alpha,
+                "smoke": smoke,
+                "color": color,
                 "mask": stem,
+                "warp": warp,
             }
         )
+
+    has_smoke = any(_smoke_candidate(entry) for entry in objects)
+    smoke_boxes = [entry["box"] for entry in objects if _smoke_candidate(entry)]
+
+    def fire_covered_by_smoke(entry: dict) -> bool:
+        x1, y1, x2, y2 = entry["box"]
+        fire_area = max(1e-9, (x2 - x1) * (y2 - y1))
+        for smoke_x1, smoke_y1, smoke_x2, smoke_y2 in smoke_boxes:
+            width = max(0.0, min(x2, smoke_x2) - max(x1, smoke_x1))
+            height = max(0.0, min(y2, smoke_y2) - max(y1, smoke_y1))
+            if width * height / fire_area >= 0.25:
+                return True
+        return False
+
+    for entry in objects:
+        if targets:
+            if entry["id"] in targets:
+                add_source(entry)
+            continue
+        if _smoke_candidate(entry) or _steam_candidate(entry):
+            add_source(entry)
+        elif _fire_smoke_candidate(entry) and (
+            not has_smoke or not fire_covered_by_smoke(entry)
+        ):
+            # Use a fire as an emitter when no smoke object covers it; otherwise
+            # the same plume would be drawn twice.
+            add_source(entry)
     if not sources:
-        log("Bỏ qua steam: không có object có opening/container khớp target.")
+        log("Bỏ qua khói/hơi: không có object opening/container/smoke/fire khớp target.")
     return sources
 
 
-def _steam_frame(sources: list[dict], u: float, sprite_cache: dict) -> np.ndarray | None:
+def _steam_frame(
+    sources: list[dict], u: float, sprite_cache: dict
+) -> tuple[np.ndarray, np.ndarray] | None:
     if not sources:
         return None
     shape = sources[0]["mask"].shape
     layer = np.zeros((shape[0], shape[1], 3), dtype=np.float32)
+    alpha_layer = np.zeros((shape[0], shape[1]), dtype=np.float32)
     for source in sources:
         progress = np.mod(source["phases"] + source["cycles"] * u, 1.0).astype(np.float32)
         envelope = np.sin(math.pi * progress) ** 0.8
         alpha = (
-            0.17
+            source["base_alpha"]
             * (0.55 + 0.75 * source["intensity"])
             * source["strength"]
             * envelope
         ).astype(np.float32)
-        curl_amplitude = max(2.0, source["box_width"] * 0.20)
+        curl_amplitude = max(2.0, source["box_width"] * (0.26 if source["smoke"] else 0.20))
         curl = (
             curl_amplitude
             * np.sin(2.0 * math.pi * (source["curl_cycles"] * progress + source["curl_phase"]))
             * envelope
         )
-        drift = source["jitter"] * source["box_width"] * 0.10 * (0.35 + 0.65 * progress)
-        xs = source["cx"] + drift + curl
+        drift = source["jitter"] * source["box_width"] * (0.18 if source["smoke"] else 0.10) * (
+            0.35 + 0.65 * progress
+        )
+        span = source["offsets"] * source["box_width"] * source["spread"] * (
+            0.45 + 0.55 * progress
+        )
+        xs = source["cx"] + drift + curl + span
         ys = source["cy"] - progress * source["rise"]
         radii = source["base_radius"] + (source["max_radius"] - source["base_radius"]) * progress
-        # Keep each plume inside its own stem mask before adding it to the
-        # shared layer; multiplying the accumulated layer would erase earlier
-        # sources wherever this source's mask is zero.
+        # Keep each plume inside its own stem mask before compositing it over
+        # the shared layer; multiplying the accumulated layer would erase
+        # earlier sources wherever this source's mask is zero.
         plume = np.zeros_like(layer)
+        plume_alpha = np.zeros_like(alpha_layer)
         for x, y, radius, alpha_value in zip(xs, ys, radii, alpha):
             if alpha_value <= 0.002 or y < -radius or y > shape[0] + radius:
                 continue
             sprite = _soft_sprite(int(round(float(radius))), sprite_cache)
-            _add_sprite(plume, sprite, float(x), float(y), float(alpha_value))
+            _add_alpha_sprite(
+                plume,
+                plume_alpha,
+                sprite,
+                float(x),
+                float(y),
+                float(alpha_value),
+                source["color"],
+            )
         plume *= source["mask"][:, :, None]
-        layer += plume
-    return layer
+        plume_alpha *= source["mask"]
+        layer = plume + layer * (1.0 - plume_alpha[:, :, None])
+        alpha_layer = plume_alpha + alpha_layer * (1.0 - plume_alpha)
+    return layer, alpha_layer
+
+
+def _warp_smoke_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
+    """Billow the painted smoke itself, preserving its colour and texture."""
+    height, width = crop.shape[:2]
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    grid_x = grid_x.astype(np.float32)
+    grid_y = grid_y.astype(np.float32)
+    local_x = grid_x / max(1.0, float(width - 1))
+    local_y = grid_y / max(1.0, float(height - 1))
+    phase = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
+    lift = 0.55 + 0.45 * np.sin(
+        2.0 * math.pi * (local_x * 1.8 + local_y * 1.1) + phase
+    )
+    lift += 0.12 * np.sin(2.0 * phase + local_y * 3.0)
+    curl = np.sin(2.0 * math.pi * (local_y * 2.4 - local_x * 0.9) + phase + 0.7)
+    sample_y = grid_y + spec["amplitude"] * lift
+    sample_x = grid_x + spec["amplitude"] * 0.45 * curl
+
+    sample_x = np.clip(sample_x, 0.0, width - 1.0)
+    sample_y = np.clip(sample_y, 0.0, height - 1.0)
+    x0 = np.floor(sample_x).astype(np.int32)
+    y0 = np.floor(sample_y).astype(np.int32)
+    x1 = np.minimum(x0 + 1, width - 1)
+    y1 = np.minimum(y0 + 1, height - 1)
+    wx = (sample_x - x0)[:, :, None]
+    wy = (sample_y - y0)[:, :, None]
+    top = crop[y0, x0] * (1.0 - wx) + crop[y0, x1] * wx
+    bottom = crop[y1, x0] * (1.0 - wx) + crop[y1, x1] * wx
+    return top * (1.0 - wy) + bottom * wy
+
+
+def _smoke_warp_frame(
+    frame: np.ndarray, specs: list[dict], u: float
+) -> np.ndarray:
+    for spec in specs:
+        top, bottom = spec["top"], spec["bottom"]
+        left, right = spec["left"], spec["right"]
+        crop = frame[top:bottom, left:right]
+        if crop.size == 0:
+            continue
+        warped = _warp_smoke_crop(crop, spec, u)
+        mask = spec["mask"][:, :, None]
+        frame[top:bottom, left:right] = crop * (1.0 - mask) + warped * mask
+    return frame
 
 
 # --- wind ------------------------------------------------------------------
@@ -1075,11 +1459,14 @@ def _warp_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
     )
     local_x = (grid_x + spec["left"] - spec["box"][0]) / max(1.0, spec["box"][2] - spec["box"][0])
     local_y = (grid_y + spec["top"] - spec["box"][1]) / max(1.0, spec["box"][3] - spec["box"][1])
-    pinned = np.clip(local_y, 0.0, 1.0)
+    pivot_x, pivot_y = spec["pivot_local"]
+    distance = np.hypot(grid_x - pivot_x, grid_y - pivot_y)
+    pin = np.clip(distance / max(1.0, spec["max_distance"]), 0.0, 1.0) ** 0.85
     phase = 2.0 * math.pi * (spec["cycles"] * u) + spec["phase"]
-    wave = np.sin(2.0 * math.pi * (local_y * 1.25) + phase + local_x * 2.0)
-    sample_x = grid_x + spec["amplitude"] * pinned * wave
-    sample_y = grid_y
+    wave = np.sin(2.0 * math.pi * (local_x * 0.85 + local_y * 1.15) + phase)
+    flutter = np.cos(2.0 * math.pi * (local_x * 1.6 - local_y * 0.6) + phase + 0.9)
+    sample_x = grid_x + spec["amplitude"] * pin * wave
+    sample_y = grid_y + spec["amplitude"] * 0.35 * pin * flutter
 
     sample_x = np.clip(sample_x, 0.0, width - 1.0)
     sample_y = np.clip(sample_y, 0.0, height - 1.0)
@@ -1113,7 +1500,7 @@ def _wind_specs(
         return []
     targets = _target_ids(items)
     intensity = _items_intensity(items, DEFAULT_INTENSITY)
-    cycles = max(1, int(round(seconds / 4.0)))
+    cycles = max(1, int(round(seconds / 3.0)))
     rng = np.random.default_rng(seed ^ 0x51D)
     size_scale = height / HEIGHT
     specs: list[dict] = []
@@ -1143,8 +1530,17 @@ def _wind_specs(
         else:
             draw.ellipse(local, fill=255)
         feather = max(2.0, min(box_width, box_height) * 0.06)
-        mask = np.asarray(mask_image.filter(ImageFilter.GaussianBlur(feather)), dtype=np.float32) / 255.0
-        mask *= prevent[top:bottom, left:right]
+        base_mask = np.asarray(
+            mask_image.filter(ImageFilter.GaussianBlur(feather)), dtype=np.float32
+        ) / 255.0
+        mask = base_mask * prevent[top:bottom, left:right]
+        base_total = float(base_mask.sum())
+        coverage = float(mask.sum()) / base_total if base_total > 0.0 else 0.0
+        rigid = cloth and coverage <= 0.35
+        if rigid:
+            # A protected flag/banner (text or calligraphy) must still be able
+            # to sway; move it rigidly so the lettering is not warped.
+            mask = base_mask
 
         pivot = entry["anchors"].get("pivot")
         if pivot is not None:
@@ -1153,6 +1549,18 @@ def _wind_specs(
             pivot_x, pivot_y = (x1 + x2) / 2.0, y1
         pivot_x = min(max(pivot_x - left, 0.0), float(max(0, right - left - 1)))
         pivot_y = min(max(pivot_y - top, 0.0), float(max(0, bottom - top - 1)))
+        crop_width = right - left
+        crop_height = bottom - top
+        max_distance = math.hypot(
+            max(pivot_x, crop_width - 1 - pivot_x),
+            max(pivot_y, crop_height - 1 - pivot_y),
+        )
+        # Cloth amplitude follows the object size; pinning it to the attachment
+        # point makes flags/sails billow away from the mast instead of sliding.
+        amplitude = max(
+            1.5,
+            min(24.0 * size_scale, min(box_width, box_height) * 0.12),
+        ) * (0.65 + 0.55 * intensity)
 
         specs.append(
             {
@@ -1163,11 +1571,13 @@ def _wind_specs(
                 "box": (x1, y1, x2, y2),
                 "mask": mask,
                 "cloth": cloth,
-                "center": (pivot_x, pivot_y),
+                "rigid": rigid,
+                "pivot_local": (pivot_x, pivot_y),
+                "max_distance": max(1.0, max_distance),
                 "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "cycles": cycles,
-                "angle": 2.0 * intensity,
-                "amplitude": max(1.0, min(10.0 * size_scale, box_width * 0.05)) * intensity,
+                "angle": 1.5 + 3.0 * intensity,
+                "amplitude": amplitude,
             }
         )
     if not specs:
@@ -1180,7 +1590,7 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
         crop_box = (spec["left"], spec["top"], spec["right"], spec["bottom"])
         crop = image.crop(crop_box)
         original = np.asarray(crop, dtype=np.float32)
-        if spec["cloth"]:
+        if spec["cloth"] and not spec["rigid"]:
             warped = _warp_crop(original, spec, u)
         else:
             angle = spec["angle"] * math.sin(2.0 * math.pi * spec["cycles"] * u + spec["phase"])
@@ -1188,7 +1598,7 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
             rotated = crop.rotate(
                 angle,
                 resample=Image.Resampling.BICUBIC,
-                center=spec["center"],
+                center=spec["pivot_local"],
                 fillcolor=fill,
             )
             warped = np.asarray(rotated, dtype=np.float32)
@@ -1246,9 +1656,10 @@ def _water_shapes(plan: dict, targets: set[str]) -> list[list[tuple[float, float
     """Polygons/boxes that describe a liquid surface.
 
     Regions match on id/label/kind/type substrings (liquid, water, sea, river,
-    ...). Objects only qualify through a water/liquid affordance, as the plan
-    contract specifies. ``targets`` narrows the selection when the item names
-    explicit ids.
+    ...). Objects only qualify through a water/liquid affordance or label, as the
+    plan contract specifies. ``targets`` narrows object selection when the item
+    names explicit object ids; matching liquid regions are always kept because
+    they describe the surface itself, not an optional object.
     """
     shapes: list[list[tuple[float, float]]] = []
     regions = plan.get("regions") if isinstance(plan, dict) else None
@@ -1261,19 +1672,45 @@ def _water_shapes(plan: dict, targets: set[str]) -> list[list[tuple[float, float
             ).casefold()
             if not any(hint in identity for hint in WATER_REGION_HINTS):
                 continue
-            if targets and str(entry.get("id") or "") not in targets:
-                continue
             points = _shape_points(entry)
             if points:
                 shapes.append(points)
+    if shapes:
+        # A liquid region is more precise than a water object's full bounding
+        # box, which often includes hulls or stakes sitting in the water.
+        return shapes
 
     for entry in _plan_objects(plan):
         if targets and entry["id"] not in targets:
             continue
-        if not _matches_hints(entry, WATER_AFFORDANCES, ()):
+        if not _matches_hints(entry, WATER_AFFORDANCES, WATER_LABELS):
             continue
         x1, y1, x2, y2 = entry["box"]
         shapes.append([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+    return shapes
+
+
+def _water_occluder_shapes(plan: dict) -> list[list[tuple[float, float]]]:
+    """Boxes of non-water objects that sit in the liquid surface.
+
+    Water shimmer is a pixel warp; without these cutouts it visibly bends
+    hulls, rigging, stakes, and people standing in the water.
+    """
+    shapes: list[list[tuple[float, float]]] = []
+    for entry in _plan_objects(plan, selected_only=False):
+        if _matches_hints(entry, WATER_AFFORDANCES, WATER_LABELS):
+            continue
+        x1, y1, x2, y2 = entry["box"]
+        inset_x = (x2 - x1) * 0.02
+        inset_y = (y2 - y1) * 0.02
+        shapes.append(
+            [
+                (x1 + inset_x, y1 + inset_y),
+                (x2 - inset_x, y1 + inset_y),
+                (x2 - inset_x, y2 - inset_y),
+                (x1 + inset_x, y2 - inset_y),
+            ]
+        )
     return shapes
 
 
@@ -1298,6 +1735,9 @@ def _build_water_mask(
     for points in shapes:
         mapped = [_map_point(point, transform, big_width, big_height) for point in points]
         draw.polygon(mapped, fill=255)
+    for points in _water_occluder_shapes(plan):
+        mapped = [_map_point(point, transform, big_width, big_height) for point in points]
+        draw.polygon(mapped, fill=0)
     mask = mask.resize((width, height), Image.Resampling.BOX)
     feather = max(1.0, 3.0 * height / HEIGHT)
     mask = mask.filter(ImageFilter.GaussianBlur(feather))
@@ -1343,10 +1783,17 @@ def _water_spec(
     intensity = _items_intensity(items, DEFAULT_WATER_INTENSITY)
     size_scale = height / HEIGHT
     local_height = bottom - top
+    local_width = right - left
     local_rows = np.arange(local_height, dtype=np.float32)
+    local_columns = np.arange(local_width, dtype=np.float32)
     # Integer cycles over the loop keep both waves seamless.
     displacement_cycles = max(1, int(round(seconds / 3.0)))
     specular_cycles = max(1, int(round(seconds / 2.0)))
+    amplitude = (
+        0.0
+        if intensity <= 1e-3
+        else max(1.5, (3.0 + 6.0 * intensity) * size_scale)
+    )
     return {
         "top": top,
         "bottom": bottom,
@@ -1355,34 +1802,58 @@ def _water_spec(
         "mask": mask[top:bottom, left:right].astype(np.float32)[:, :, None],
         "displacement_cycles": displacement_cycles,
         "specular_cycles": specular_cycles,
-        "amplitude": (
-            0.0 if intensity <= 1e-3 else max(1.0, (2.0 + 3.0 * intensity) * size_scale)
-        ),
-        "specular": 0.0 if intensity <= 1e-3 else 2.0 + 3.5 * intensity,
+        "amplitude": amplitude,
+        "vertical_amplitude": amplitude * 0.75,
+        "specular": 0.0 if intensity <= 1e-3 else 3.0 + 5.0 * intensity,
         "row_phase": (2.0 * math.pi * 5.0 * local_rows / local_height).astype(np.float32),
         "row_phase_specular": (
             2.0 * math.pi * 9.0 * local_rows / local_height + 0.7
         ).astype(np.float32),
+        "column_phase": (
+            2.0 * math.pi * 4.0 * local_columns / local_width
+        ).astype(np.float32),
+        "column_phase2": (
+            2.0 * math.pi * 7.0 * local_columns / local_width + 1.3
+        ).astype(np.float32),
+        "column_phase_specular": (
+            2.0 * math.pi * 5.0 * local_columns / local_width + 0.4
+        ).astype(np.float32),
     }
 
 
-def _shift_rows(crop: np.ndarray, dx: np.ndarray) -> np.ndarray:
-    """Shift every row horizontally by its own ``dx`` (bilinear, clamped)."""
+def _warp_water(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
+    """Bilinear warp with a horizontal wave per row and a vertical bob per column."""
     height, width = crop.shape[:2]
-    grid_x = np.arange(width, dtype=np.float32)[None, :]
+    grid_y, grid_x = np.mgrid[0:height, 0:width]
+    grid_x = grid_x.astype(np.float32)
+    grid_y = grid_y.astype(np.float32)
+
+    phase = 2.0 * math.pi * spec["displacement_cycles"] * u
+    amplitude = spec["amplitude"]
+    dx = amplitude * np.sin(phase + spec["row_phase"])
+    dx += 0.35 * amplitude * np.sin(2.0 * phase + spec["row_phase"] * 1.7 + 1.1)
+    dy = spec["vertical_amplitude"] * np.sin(phase + spec["column_phase"])
+    dy += 0.25 * spec["vertical_amplitude"] * np.sin(
+        2.0 * phase + spec["column_phase2"]
+    )
+
     sample_x = grid_x - dx[:, None]
+    sample_y = grid_y - dy[None, :]
     np.clip(sample_x, 0.0, float(width - 1), out=sample_x)
+    np.clip(sample_y, 0.0, float(height - 1), out=sample_y)
     x0 = np.floor(sample_x).astype(np.int32)
+    y0 = np.floor(sample_y).astype(np.int32)
     x1 = np.minimum(x0 + 1, width - 1)
-    weight = (sample_x - x0)[:, :, None]
-    rows = np.arange(height)[:, None]
-    left = crop[rows, x0]
-    right = crop[rows, x1]
-    return left * (1.0 - weight) + right * weight
+    y1 = np.minimum(y0 + 1, height - 1)
+    wx = (sample_x - x0)[:, :, None]
+    wy = (sample_y - y0)[:, :, None]
+    top = crop[y0, x0] * (1.0 - wx) + crop[y0, x1] * wx
+    bottom = crop[y1, x0] * (1.0 - wx) + crop[y1, x1] * wx
+    return top * (1.0 - wy) + bottom * wy
 
 
 def _apply_water(frame: np.ndarray, spec: dict | None, u: float) -> np.ndarray:
-    """Apply a subtle per-row sine shimmer + soft specular inside the water mask."""
+    """Apply a subtle per-row/per-column wave shimmer + soft specular highlights."""
     if spec is None:
         return frame
     top, bottom = spec["top"], spec["bottom"]
@@ -1391,14 +1862,7 @@ def _apply_water(frame: np.ndarray, spec: dict | None, u: float) -> np.ndarray:
     if crop.shape[0] < 1 or crop.shape[1] < 1:
         return frame
 
-    displacement_phase = 2.0 * math.pi * spec["displacement_cycles"] * u
-    dx = spec["amplitude"] * np.sin(displacement_phase + spec["row_phase"])
-    dx += (
-        0.35
-        * spec["amplitude"]
-        * np.sin(2.0 * displacement_phase + spec["row_phase"] * 1.7 + 1.1)
-    )
-    warped = _shift_rows(crop, dx)
+    warped = _warp_water(crop, spec, u)
     mask = spec["mask"]
     blended = crop * (1.0 - mask) + warped * mask
 
@@ -1408,9 +1872,23 @@ def _apply_water(frame: np.ndarray, spec: dict | None, u: float) -> np.ndarray:
         + blended[:, :, 2] * 0.0722
     ) / 255.0
     specular_phase = 2.0 * math.pi * spec["specular_cycles"] * u
-    modulation = spec["specular"] * np.sin(specular_phase + spec["row_phase_specular"])
-    modulation = modulation[:, None] * (
-        0.30 + 0.70 * np.clip(luminance, 0.0, 1.0) ** 1.2
+    light = 0.32 + 0.68 * np.clip(luminance, 0.0, 1.0) ** 1.1
+    row_mod = spec["specular"] * np.sin(
+        specular_phase + spec["row_phase_specular"]
+    )
+    modulation = row_mod[:, None] * light
+    # Moving glints keep dark foreground water alive; they are strongest on the
+    # already-bright wave crests instead of painting a uniform screen-wide band.
+    glint = np.maximum(
+        np.sin(
+            specular_phase
+            + spec["row_phase_specular"][:, None] * 1.15
+            + spec["column_phase_specular"][None, :] * 0.9
+        ),
+        0.0,
+    ) ** 3
+    modulation = modulation + (
+        spec["specular"] * 0.55 * (glint - 0.12) * (0.35 + 0.65 * luminance)
     )
     blended += modulation[:, :, None] * mask
     frame[top:bottom, left:right] = blended
@@ -1829,6 +2307,7 @@ def _render_loop(
     # Fit straight into the output frame; resizing a landscape contain-letterbox
     # into 9:16 would distort the source.
     base = fit_image(source, (out_width, out_height), mode=mode)
+    base_array = np.asarray(base, dtype=np.float32)
 
     transform = _fit_transform(plan, source_size, (out_width, out_height), mode)
     seed = int(hashlib.sha256(f"{image_hash}|{plan_hash}".encode("utf-8")).hexdigest()[:16], 16)
@@ -1859,10 +2338,21 @@ def _render_loop(
     prevent3 = prevent[:, :, None] if prevent is not None else None
 
     steam_sources = (
-        _steam_sources(plan, transform, out_width, out_height, seconds, seed, log)
+        _steam_sources(
+            plan,
+            transform,
+            out_width,
+            out_height,
+            seconds,
+            seed,
+            base_array,
+            log,
+            prevent=prevent,
+        )
         if "steam" in effects
         else []
     )
+    smoke_warps = [source["warp"] for source in steam_sources if source.get("warp")]
     wind_specs = (
         _wind_specs(plan, transform, out_width, out_height, seconds, seed, prevent, log)
         if "wind" in effects
@@ -1885,12 +2375,27 @@ def _render_loop(
     )
     if effects == {"water"} and water_spec is None:
         # Nothing resolvable: let the caller fall back to a static slide.
-        return None
+        log("Bỏ qua nước: không có vùng nước resolve được.")
     if effects == {"fire"} and fire_spec is None:
         # No fire object/region: skip gracefully and let the caller stay static.
-        return None
-    base_array = np.asarray(base, dtype=np.float32)
+        log("Bỏ qua lửa: không có object/vùng lửa resolve được.")
     light_spec = _light_spec(plan, base_array, prevent, seconds) if "light" in effects else None
+    resolved = False
+    if effects.intersection({"rain", "snow"}) and weather_mask is not None:
+        resolved = float(weather_mask.max()) > 1e-4
+    if water_spec is not None and water_spec["amplitude"] > 0.0:
+        resolved = True
+    if steam_sources or wind_specs:
+        resolved = True
+    if fire_spec is not None and fire_spec["amplitude"] > 0.0:
+        resolved = True
+    if fog_spec is not None and fog_spec["alpha"] > 0.0:
+        resolved = True
+    if light_spec is not None and light_spec["amplitude"] > 0.0:
+        resolved = True
+    if not resolved:
+        log("Bỏ qua vòng: không có hiệu ứng nào resolve được.")
+        return None
     sprite_cache: dict = {}
     frame_count = max(1, int(round(seconds * rate)))
 
@@ -1900,11 +2405,20 @@ def _render_loop(
             u = (index / rate) / seconds
             frame = base_array.copy()
 
+            # Animate the painted smoke itself before any foreground weather.
+            if smoke_warps:
+                frame = _smoke_warp_frame(frame, smoke_warps, u)
+
+            # Water is a background surface: animate it before rain/snow so
+            # falling streaks stay straight instead of being warped with it.
+            if water_spec is not None:
+                frame = _apply_water(frame, water_spec, u)
+
             if weather_mask is not None and rain_layers:
                 overlay = np.zeros((out_height, out_width, 3), dtype=np.float32)
                 for layer in rain_layers:
                     canvas = Image.new("RGB", (out_width, out_height), (0, 0, 0))
-                    _draw_layer(ImageDraw.Draw(canvas), layer, t, out_height)
+                    _draw_layer(ImageDraw.Draw(canvas), layer, t, u, out_height)
                     if layer["blur"] >= 0.3:
                         canvas = canvas.filter(ImageFilter.GaussianBlur(layer["blur"]))
                     overlay += np.asarray(canvas, dtype=np.float32)
@@ -1926,14 +2440,16 @@ def _render_loop(
                     overlay *= snow_intensity
                 frame += overlay
 
-            if water_spec is not None:
-                frame = _apply_water(frame, water_spec, u)
-
             if steam_sources:
-                steam_layer = _steam_frame(steam_sources, u, sprite_cache)
-                if steam_layer is not None:
-                    steam_layer *= prevent3
-                    frame += steam_layer
+                plume = _steam_frame(steam_sources, u, sprite_cache)
+                if plume is not None:
+                    steam_rgb, steam_alpha = plume
+                    steam_rgb *= prevent3
+                    steam_alpha *= prevent
+                    frame = (
+                        frame * (1.0 - steam_alpha[:, :, None])
+                        + steam_rgb
+                    )
 
             if wind_specs:
                 frame_u8 = np.clip(frame, 0.0, 255.0).astype(np.uint8)
@@ -1977,11 +2493,12 @@ def render_motion_loop(
     """Render all supported motion items in one loop/encode pass.
 
     Supports rain, snow, water (W1 shimmer), steam, wind, fire, fog, and light.
-    Returns ``None`` when the plan has no supported motion item, and also when a
-    water-only plan has no resolvable liquid region or a fire-only plan has no
-    fire object/region. Steam/wind items whose targets cannot be resolved from
-    ``plan["objects"]`` are skipped with a log entry; the remaining recipes
-    still render.
+    Returns ``None`` when the plan has no supported motion item, and also when
+    no item resolves to a visible recipe (for example a water-only plan with no
+    liquid region, a fire-only plan with no fire object/region, or steam/wind
+    targets that no longer exist). Steam/wind items whose targets cannot be
+    resolved from ``plan["objects"]`` are skipped with a log entry; the remaining
+    recipes still render.
     """
     if log is None:
         log = lambda _message: None  # noqa: E731 - tiny no-op logger

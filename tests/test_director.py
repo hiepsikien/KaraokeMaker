@@ -355,5 +355,35 @@ class DirectorEndpointTests(unittest.TestCase):
         self.assertIsNone(kwargs["model"])
 
 
+class TargetResolutionTests(unittest.TestCase):
+    def test_vietnamese_flag_and_sail_labels_resolve_to_their_objects(self):
+        objects = [
+            {"id": "flag-1", "label": "flag"},
+            {"id": "sail-1", "label": "sail"},
+            {"id": "pot-1", "label": "pot"},
+        ]
+        plan = director.build_effect_plan(
+            "sha256:" + "e" * 64,
+            {
+                "effects": [
+                    {
+                        "type": "wind",
+                        "target_labels": ["cờ", "buồm"],
+                        "intensity": 0.35,
+                        "audio": False,
+                    }
+                ]
+            },
+            objects,
+            [],
+            [],
+            640,
+            360,
+        )
+        self.assertEqual(
+            set(plan["items"][0]["target_ids"]), {"flag-1", "sail-1"}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

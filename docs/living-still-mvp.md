@@ -307,7 +307,7 @@ speed * T = k * span
 
 ## 9. Kết quả P0 (2026-11-21)
 
-- Unit tests: **80/80 pass** (`tests.test_karaoke`, `test_director`,
+- Unit tests: **88/88 pass** (`tests.test_karaoke`, `test_director`,
   `test_project_effects`, `test_living`).
 - TypeScript: `npx tsc --noEmit` pass; `npm run build` pass.
 - API thật: consent=false → 400; cached analyze → 200.
@@ -364,6 +364,9 @@ speed * T = k * span
 - **Studio preview 640 px**: 4 s/5 effect trước mất 38,9 s ở 1080p (proxy timeout →
   “Internal Server Error”); nay render 640×360 trong ~2,6 s. Export Karaoke vẫn full
   profile. Temp file có UUID + lock tuần tự cho preview; traceback in ra terminal.
+- **Smoke không warp thuyền**: mask occluder cắt tất cả object rắn (ship/sail/flag/
+  fire/pot); chỉ pixel tối của khói được warp; giảm biên độ (≤6 px ở 1080p), tốc độ,
+  alpha và số hạt. Cache motion bump để không dùng loop cũ.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -371,7 +374,31 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - Intent: rain, fire, water, wind.
 - Inventory: 2 ships, 2 sails, fire, smoke, flag, boats.
 - Wind target_ids: `sail_right`, `sail_left_mid`.
-- Preview: mưa, lửa, nước sát foreground, buồm rung; 80 tests pass.
+- Preview: mưa, lửa, nước sát foreground, buồm rung; 88 tests pass.
+
+## 10.2 Sửa vòng 2 theo feedback ảnh hải chiến
+
+- **Nước**: mask không còn bị mất khi `items.water.target_ids` trỏ vào object
+  (`sea_surface`); vùng `liquid` luôn được giữ và ưu tiên hơn box object. Thêm
+  dao động dọc theo cột + glint theo hàng, nên nước foreground tối cũng chuyển
+  động, không chỉ dải giữa. Box của mọi object không phải nước (tàu, thuyền, cọc,
+  người) bị trừ khỏi mask nước để sóng không làm biến dạng vật thể.
+- **Gió/cờ**: thêm synonym `cờ`/`lá cờ` → flag/banner/pennant/ensign; `sail` và
+  `buồm` được xem là cloth. Cloth warp được ghim tại `pivot` (cột buồm) và biên
+  độ theo kích thước object, thay vì xoay 0,7° gần như không thấy.
+- **Khói**: smoke box được dùng làm emitter (không cần `opening`), lấy màu từ
+  vùng khói trong ảnh, mask theo độ tối để không phủ bạt cả bầu trời; mỗi smoke
+  box là một nguồn, fire chỉ thêm nguồn khi không bị smoke box che. Ngoài hạt
+  khói, chính texture khói đã vẽ được warp nhẹ (billow) nên hiệu ứng thấy rõ mà
+  vẫn khớp pattern; box tàu/cột buồm/sky/water bị loại khỏi mask warp. Inventory
+  v4 yêu cầu liệt kê từng cột khói/đám lửa riêng.
+- **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
+  và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
+  không giống vết xước.
+- **Cache**: `MOTION_CACHE_VERSION=6`, `PREVIEW_VERSION=preview_v3`; inventory
+  `v4` để lần phân tích sau lấy đủ các cột khói.
+- **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
+  theo sóng.
 
 ## 11. Bộ ảnh eval
 
