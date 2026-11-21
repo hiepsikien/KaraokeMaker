@@ -209,7 +209,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 29
+MOTION_CACHE_VERSION = 30
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -2291,7 +2291,10 @@ def _embers_spec(
 
     speed = _items_speed(items)
     density = math.sqrt((width * height) / (WIDTH * HEIGHT)) * density_multiplier
-    count = max(0, int(round(150 * density * (0.5 + 0.9 * intensity))))
+    # 0.30 is the reference level: the default ember density is ~30% of the
+    # old baseline, while the slider can still raise it toward the old max.
+    level = max(0.0, min(3.5, intensity / 0.30))
+    count = max(0, int(round(35 * density * level)))
     if count == 0:
         return None
     total_area = sum(emitter["area"] for emitter in emitters)
@@ -2339,6 +2342,7 @@ def _embers_spec(
     return {
         "particles": particles,
         "intensity": intensity,
+        "alpha_scale": 0.30,
         "prevent": prevent,
     }
 
@@ -2359,7 +2363,12 @@ def _apply_embers(
     for particle in spec["particles"]:
         progress = (particle["phase"] + particle["cycles"] * u) % 1.0
         envelope = math.sin(math.pi * progress) ** 1.4
-        alpha = particle["alpha"] * intensity * envelope
+        alpha = (
+            particle["alpha"]
+            * intensity
+            * spec.get("alpha_scale", 1.0)
+            * envelope
+        )
         if alpha <= 0.01:
             continue
         x = (
