@@ -550,6 +550,41 @@ class EmbersTests(unittest.TestCase):
         self.assertGreater(float(np.abs(second - first).max()), 0.0)
 
 
+class EffectParamTests(unittest.TestCase):
+    def _bird_spec(self, intensity: float):
+        plan = effect_plan(
+            [
+                {
+                    "effect": "birds",
+                    "target_ids": [],
+                    "params": {"intensity": intensity, "speed": 1.0},
+                }
+            ],
+            objects=[object_entry("flock-1", "bird flock", (0.35, 0.2, 0.65, 0.4))],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        specs = living._birds_spec(
+            plan, transform, 100, 100, 16.0, None, 1234, lambda _m: None
+        )
+        return specs[0]
+
+    def test_bird_intensity_uses_a_30_percent_reference_level(self):
+        base = self._bird_spec(0.30)
+        full = self._bird_spec(1.0)
+        self.assertAlmostEqual(full["amp_x"] / base["amp_x"], 1.0 / 0.30, delta=0.25)
+        # Base motion stays sub-pixel at 640x360.
+        self.assertLess(base["amp_x"], 0.6)
+        self.assertLess(base["amp_y"], 0.4)
+
+    def test_rain_density_changes_particle_count(self):
+        low = living._make_layers(640, 360, 4.0, 1234, density_multiplier=0.4)
+        high = living._make_layers(640, 360, 4.0, 1234, density_multiplier=1.4)
+        self.assertLess(
+            sum(len(layer["xs"]) for layer in low),
+            sum(len(layer["xs"]) for layer in high),
+        )
+
+
 class BirdsTests(unittest.TestCase):
     def test_birds_are_gated_by_the_prompt_effect_item(self):
         plan = effect_plan(

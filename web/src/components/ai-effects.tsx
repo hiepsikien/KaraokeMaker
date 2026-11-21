@@ -36,6 +36,26 @@ const EFFECT_NAMES: Record<string, string> = {
   light: "Nhịp sáng",
 };
 
+const EFFECT_PARAMS: Record<string, string[]> = {
+  rain: ["intensity", "density", "speed"],
+  snow: ["intensity", "density", "speed"],
+  water: ["intensity", "speed"],
+  steam: ["intensity", "density", "speed"],
+  wind: ["intensity", "speed"],
+  birds: ["intensity", "speed"],
+  fire: ["intensity", "speed"],
+  embers: ["intensity", "density", "speed"],
+  sunrays: ["intensity", "speed"],
+  fog: ["intensity", "speed"],
+  light: ["intensity", "speed"],
+};
+
+const PARAM_META: Record<string, { label: string; min: number; max: number; step: number; default: number }> = {
+  intensity: { label: "Cường độ", min: 0, max: 100, step: 5, default: 55 },
+  density: { label: "Mật độ", min: 0, max: 150, step: 5, default: 100 },
+  speed: { label: "Tốc độ", min: 20, max: 200, step: 5, default: 100 },
+};
+
 function effectLabel(effect: string) {
   return EFFECT_NAMES[effect] || effect;
 }
@@ -394,14 +414,14 @@ export function AiEffects({
     }
   }
 
-  function updateIntensity(index: number, percent: number) {
+  function updateParam(index: number, key: string, percent: number) {
     setAnalysis((current) => {
       if (!current) return current;
       const items = current.effect_plan.items.map((item, itemIndex) =>
         itemIndex === index
           ? {
               ...item,
-              params: { ...(item.params || {}), intensity: percent / 100 },
+              params: { ...(item.params || {}), [key]: percent / 100 },
             }
           : item,
       );
@@ -583,34 +603,46 @@ export function AiEffects({
       )}
 
       {analysis && (analysis.effect_plan.items || []).length > 0 && (
-        <div className="space-y-2 rounded-xl border border-[var(--line)] bg-black/20 p-3">
+        <div className="space-y-3 rounded-xl border border-[var(--line)] bg-black/20 p-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-sm">Cường độ hiệu ứng</span>
+            <span className="text-sm">Cường độ / mật độ / tốc độ</span>
             <span className="text-[11px] text-[var(--muted)]">chỉnh trước khi Áp dụng</span>
           </div>
           {analysis.effect_plan.items.map((item, index) => {
-            const raw = item.params?.intensity;
-            const value = typeof raw === "number" ? Math.round(raw * 100) : 55;
+            const keys = EFFECT_PARAMS[item.effect] || ["intensity"];
             return (
-              <label key={`${item.effect}-${index}`} className="block">
-                <span className="flex items-center justify-between text-xs">
-                  <span>{effectLabel(item.effect)}</span>
-                  <span className="text-[var(--muted)]">{value}%</span>
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={value}
-                  onChange={(event) => updateIntensity(index, Number(event.target.value))}
-                  className="mt-1 w-full accent-[var(--gold)]"
-                />
-              </label>
+              <div key={`${item.effect}-${index}`} className="space-y-1">
+                <p className="text-xs font-medium">{effectLabel(item.effect)}</p>
+                {keys.map((key) => {
+                  const meta = PARAM_META[key];
+                  const raw = item.params?.[key];
+                  const value = typeof raw === "number" ? Math.round(raw * 100) : meta.default;
+                  return (
+                    <label key={key} className="block">
+                      <span className="flex items-center justify-between text-[11px] text-[var(--muted)]">
+                        <span>{meta.label}</span>
+                        <span>{value}%</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={meta.min}
+                        max={meta.max}
+                        step={meta.step}
+                        value={value}
+                        onChange={(event) =>
+                          updateParam(index, key, Number(event.target.value))
+                        }
+                        className="mt-0.5 w-full accent-[var(--gold)]"
+                      />
+                    </label>
+                  );
+                })}
+              </div>
             );
           })}
           <p className="text-[11px] leading-4 text-[var(--muted)]">
-            Thanh trượt chỉ đổi kế hoạch cục bộ, không gọi lại Gemini. Bấm Áp dụng để lưu.
+            Chỉ đổi kế hoạch cục bộ, không gọi lại Gemini. Bấm Áp dụng để lưu. Mật độ chỉ
+            hiện với mưa/tuyết/khói/tàn lửa.
           </p>
         </div>
       )}

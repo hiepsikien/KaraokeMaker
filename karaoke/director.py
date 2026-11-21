@@ -938,6 +938,9 @@ def build_effect_plan(
                 "target_ids": _target_ids(_clean_list(effect.get("target_labels")), objects),
                 "params": {
                     "intensity": _intensity(effect.get("intensity")),
+                    # Second-axis controls; renderers treat 1.0 as the default.
+                    "density": 1.0,
+                    "speed": 1.0,
                     "loop_duration": LOOP_DURATION,
                     "audio": bool(effect.get("audio")),
                 },

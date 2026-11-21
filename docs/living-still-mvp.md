@@ -386,7 +386,7 @@ speed * T = k * span
   sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
   thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
   `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
-- 108 tests pass.
+- 111 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=25`, `PREVIEW_VERSION=preview_v21`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=26`, `PREVIEW_VERSION=preview_v22`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -434,9 +434,9 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   lời, text/bar vẽ sau vẫn đảm bảo đọc được.
 - **Nước gần đáy**: sửa regression do `strip_rect=None`; mask nước giờ phủ tới
   foreground và vẫn giữ occluder cho thuyền/người/cọc.
-- **Chim nhẹ hơn**: patch bám sát flock, feather nhỏ, drift ~1,8 px và bob ~0,9 px
-  ở 640×360 (scale theo output); cycle 8 s để bản chuẩn 16 s thấy đàn trượt chậm
-  mà không vô lí.
+- **Chim nhẹ hơn**: intensity 0.30 là mốc chuẩn; ở mức đó drift ~0,4 px và bob
+  ~0,2 px ở 640×360. Slider 100% cho ~3,3× mốc này, nên vẫn có dư địa tăng mà
+  mặc định rất nhẹ. Cycle 8–12 s tùy speed.
 - **Tia nắng rõ hơn trong 4 s**: ray pattern có trọng số ngẫu nhiên từng tia,
   screen blend + shadow nhẹ giữa các tia, breathing luôn ở mức thấy được; anchor
   theo object sun hoặc vùng sáng ấm nhất.
@@ -450,11 +450,12 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
   profile (1920×1080, 1080×1920, 1080×1080, 1080×1350). Render chạy job nền +
   polling + % tiến độ nên không bị timeout proxy. 4 s/1080p nhiều effect mất
   ~35 s, nên 16 s thường ~2–2,5 phút. Preview nhanh 4 s / 640 px vẫn giữ.
-- **Thanh trượt cường độ**: sau khi phân tích, panel AI hiện slider 0–100% cho
-  từng effect. Slider chỉ sửa `effect_plan.items[].params.intensity` cục bộ,
-  không gọi lại Gemini; bấm Áp dụng để lưu. Renderer dùng intensity cho biên độ
-  (chim, gió, nước), alpha (nắng, sương), mật độ (mưa, tàn lửa), glow (lửa).
-  Mức 0% tắt riêng effect đó (chim/nắng có guard rõ ràng).
+- **Thanh trượt nhiều tham số**: sau khi phân tích, panel AI hiện slider cho từng
+  effect: `intensity` (0–100%), `density` (0–150%, chỉ mưa/tuyết/khói/tàn lửa) và
+  `speed` (20–200%). Slider chỉ sửa `effect_plan.items[].params` cục bộ, không gọi
+  lại Gemini; bấm Áp dụng để lưu. `intensity` điều khiển biên độ/alpha/glow,
+  `density` điều khiển số hạt, `speed` điều khiển chu kỳ (vẫn quantize nguyên để
+  loop khít). Mức 0% tắt riêng effect đó (chim/nắng có guard rõ ràng).
 - **Hash ảnh**: renderer so `plan.image_hash` với file thật; ảnh bị thay nội dung
   sẽ bỏ qua effect và yêu cầu phân tích lại thay vì áp box cũ.
 - **Inspect ảnh**: `fits_frame`/note tính theo `output_profile`; thêm 4:5. Preview

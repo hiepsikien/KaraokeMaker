@@ -208,7 +208,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 25
+MOTION_CACHE_VERSION = 26
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -703,16 +703,26 @@ def _build_protect_mask(
     return array
 
 
-def _make_layers(width: int, height: int, duration: float, seed: int) -> list[dict]:
+def _make_layers(
+    width: int,
+    height: int,
+    duration: float,
+    seed: int,
+    density_multiplier: float = 1.0,
+    speed_multiplier: float = 1.0,
+) -> list[dict]:
     size_scale = height / HEIGHT
     span = height + 200.0 * size_scale
     density = max(0.25, min(1.0, math.sqrt((width * height) / (WIDTH * HEIGHT))))
     rng = np.random.default_rng(seed)
     layers: list[dict] = []
     for count, speed, length, alpha, blur in RAIN_LAYERS:
-        particles = max(1, int(round(count * density)))
+        particles = max(1, int(round(count * density * density_multiplier)))
         # Quantize so each particle travels a whole number of spans in the loop.
-        cycles = max(1, int(round(speed * size_scale * duration / span)))
+        cycles = max(
+            1,
+            int(round(speed * size_scale * duration / span * speed_multiplier)),
+        )
         quantized = cycles * span / duration
         xs = rng.uniform(-0.06 * width, 1.06 * width, particles).astype(np.float32)
         ys = rng.uniform(0.0, span, particles).astype(np.float32)
@@ -770,7 +780,14 @@ def _draw_layer(
 # --- snow ------------------------------------------------------------------
 
 
-def _make_snow_layers(width: int, height: int, duration: float, seed: int) -> list[dict]:
+def _make_snow_layers(
+    width: int,
+    height: int,
+    duration: float,
+    seed: int,
+    density_multiplier: float = 1.0,
+    speed_multiplier: float = 1.0,
+) -> list[dict]:
     """Build slow flake layers whose fall and drift both loop seamlessly."""
     size_scale = height / HEIGHT
     span = height + 200.0 * size_scale
@@ -780,9 +797,12 @@ def _make_snow_layers(width: int, height: int, duration: float, seed: int) -> li
     base_sway = max(1, int(round(duration / 4.0)))
     layers: list[dict] = []
     for count, speed, radius, alpha, blur in SNOW_LAYERS:
-        particles = max(1, int(round(count * density)))
+        particles = max(1, int(round(count * density * density_multiplier)))
         # Quantize so every flake travels a whole number of spans in the loop.
-        cycles = max(1, int(round(speed * size_scale * duration / span)))
+        cycles = max(
+            1,
+            int(round(speed * size_scale * duration / span * speed_multiplier)),
+        )
         quantized = cycles * span / duration
         xs = rng.uniform(-0.05 * width, 1.05 * width, particles).astype(np.float32)
         ys = rng.uniform(0.0, span, particles).astype(np.float32)
@@ -973,20 +993,36 @@ def _target_ids(items: list[dict]) -> set[str]:
     return ids
 
 
-def _items_intensity(items: list[dict], default: float) -> float:
+def _items_param(
+    items: list[dict], name: str, default: float, low: float, high: float
+) -> float:
     values: list[float] = []
     for item in items:
         params = item.get("params")
         if not isinstance(params, dict):
             continue
-        raw = params.get("intensity")
+        raw = params.get(name)
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
         number = float(raw)
         if math.isfinite(number):
             values.append(number)
     value = max(values) if values else default
-    return min(1.0, max(0.0, value))
+    return min(high, max(low, value))
+
+
+def _items_intensity(items: list[dict], default: float) -> float:
+    return _items_param(items, "intensity", default, 0.0, 1.0)
+
+
+def _items_speed(items: list[dict], default: float = 1.0) -> float:
+    """Speed multiplier; 1.0 = the original loop timing."""
+    return _items_param(items, "speed", default, 0.2, 2.0)
+
+
+def _items_density(items: list[dict], default: float = 1.0) -> float:
+    """Particle-count multiplier for rain, snow, steam, embers."""
+    return _items_param(items, "density", default, 0.0, 1.5)
 
 
 def _object_box_px(
@@ -1117,7 +1153,9 @@ def _steam_sources(
         return []
     targets = _target_ids(items)
     intensity = _items_intensity(items, DEFAULT_INTENSITY)
-    cycles = max(1, int(round(seconds / 3.5)))
+    speed = _items_speed(items)
+    density = _items_density(items)
+    cycles = max(1, int(round(seconds / 3.5 * speed)))
     rng = np.random.default_rng(seed ^ 0x5EA)
     sources: list[dict] = []
 
@@ -1202,6 +1240,9 @@ def _steam_sources(
             spread = 0.10
             base_alpha = 0.16
             color = np.asarray(STEAM_COLOR, dtype=np.float32)
+
+        if density != 1.0:
+            count = max(4, int(round(count * density)))
 
         if smoke:
             # Rising smoke is drawn as free-floating wisps. Clipping them with
@@ -1404,7 +1445,8 @@ def _wind_specs(
         return []
     targets = _target_ids(items)
     intensity = _items_intensity(items, DEFAULT_INTENSITY)
-    cycles = max(1, int(round(seconds / 3.0)))
+    speed = _items_speed(items)
+    cycles = max(1, int(round(seconds / 3.0 * speed)))
     rng = np.random.default_rng(seed ^ 0x51D)
     size_scale = height / HEIGHT
     specs: list[dict] = []
@@ -1566,6 +1608,10 @@ def _birds_spec(
         return []
 
     intensity = _items_intensity(items, 0.3)
+    speed = _items_speed(items)
+    # The prompt's "nhẹ" default is ~0.30-0.35. Treat 0.30 as the reference
+    # so the default motion is very soft and the slider has real headroom.
+    level = max(0.0, min(3.5, intensity / 0.30))
     rng = np.random.default_rng(seed ^ 0xB19D)
     specs: list[dict] = []
     for entry in entries:
@@ -1601,7 +1647,6 @@ def _birds_spec(
         )
         if prevent is not None:
             mask *= prevent[top:bottom, left:right]
-        gain = 0.65 + 0.55 * intensity
         specs.append(
             {
                 "left": left,
@@ -1609,18 +1654,20 @@ def _birds_spec(
                 "right": right,
                 "bottom": bottom,
                 "mask": mask,
-                # ~5 px drift / 2.5 px bob at 640x360; scales with output size.
+                "intensity": intensity,
+                # Reference level 0.30: ~0.4 px drift / 0.2 px bob at 640x360.
+                # 100% gives about 3.3x that, so the slider has real headroom.
                 "amp_x": max(
-                    1.4, min(height * 0.016, (right - left) * 0.08)
+                    0.4, min(height * 0.0012, (right - left) * 0.02)
                 )
-                * gain,
+                * level,
                 "amp_y": max(
-                    0.8, min(height * 0.008, (bottom - top) * 0.06)
+                    0.25, min(height * 0.0006, (bottom - top) * 0.012)
                 )
-                * gain,
+                * level,
                 # Integer cycles keep the drift seamless at the loop point.
-                "cycles": max(1, int(round(seconds / 5.0))),
-                "bob_cycles": max(2, int(round(seconds / 3.0))),
+                "cycles": max(1, int(round(seconds / 12.0 * speed))),
+                "bob_cycles": max(1, int(round(seconds / 8.0 * speed))),
                 "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "bob_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
             }
@@ -1660,8 +1707,9 @@ def _light_spec(
     if not items:
         return None
     intensity = _items_intensity(items, DEFAULT_LIGHT_INTENSITY)
+    speed = _items_speed(items)
     # Integer cycles over the loop keep the pulse seamless.
-    cycles = max(1, int(round(seconds / 4.0)))
+    cycles = max(1, int(round(seconds / 4.0 * speed)))
     amplitude = (
         0.0
         if intensity <= 1e-3
@@ -1855,14 +1903,15 @@ def _water_spec(
         return None
 
     intensity = _items_intensity(items, DEFAULT_WATER_INTENSITY)
+    speed = _items_speed(items)
     size_scale = height / HEIGHT
     local_height = bottom - top
     local_width = right - left
     local_rows = np.arange(local_height, dtype=np.float32)
     local_columns = np.arange(local_width, dtype=np.float32)
     # Integer cycles over the loop keep both waves seamless.
-    displacement_cycles = max(1, int(round(seconds / 3.0)))
-    specular_cycles = max(1, int(round(seconds / 2.0)))
+    displacement_cycles = max(1, int(round(seconds / 3.0 * speed)))
+    specular_cycles = max(1, int(round(seconds / 2.0 * speed)))
     amplitude = (
         0.0
         if intensity <= 1e-3
@@ -2060,8 +2109,9 @@ def _fire_spec(
         log("Bỏ qua lửa: không có object/vùng lửa khớp target.")
         return None
     intensity = _items_intensity(items, DEFAULT_FIRE_INTENSITY)
+    speed = _items_speed(items)
     # Low-frequency flicker: ~0.4 Hz at the default 8 s loop, integer cycles.
-    cycles = max(1, int(round(seconds / 2.5)))
+    cycles = max(1, int(round(seconds / 2.5 * speed)))
     amplitude = 0.0 if intensity <= 1e-3 else 12.0 + 30.0 * intensity
     rng = np.random.default_rng(seed ^ 0xF12E)
     return {
@@ -2133,8 +2183,9 @@ def _embers_spec(
         return None
 
     intensity = _items_intensity(items, 0.5)
-    density = math.sqrt((width * height) / (WIDTH * HEIGHT))
-    count = max(14, int(round(95 * density * (0.5 + 0.9 * intensity))))
+    speed = _items_speed(items)
+    density = math.sqrt((width * height) / (WIDTH * HEIGHT)) * _items_density(items)
+    count = max(4, int(round(95 * density * (0.5 + 0.9 * intensity))))
     total_area = sum(emitter["area"] for emitter in emitters)
     rng = np.random.default_rng(seed ^ 0xE0B5)
     particles: list[dict] = []
@@ -2157,7 +2208,7 @@ def _embers_spec(
                 "drift": float(rng.uniform(-0.035, 0.035) * width),
                 "sway": float(max(1.0, rng.uniform(2.0, 8.0) * height / HEIGHT)),
                 "phase": float(rng.uniform(0.0, 1.0)),
-                "cycles": int(rng.integers(2, 5)),
+                "cycles": max(1, int(round(int(rng.integers(2, 5)) * speed))),
                 "size": float(max(1.0, rng.uniform(1.4, 3.2) * height / HEIGHT)),
                 "alpha": float(rng.uniform(0.55, 1.0)),
                 "color": np.asarray(
@@ -2290,6 +2341,7 @@ def _sunrays_spec(
         return None
     targets = _target_ids(items)
     intensity = _items_intensity(items, 0.35)
+    speed = _items_speed(items)
     if intensity <= 0.0:
         return None
     cx, cy = _sun_center(plan, base_array, transform, width, height, targets)
@@ -2336,7 +2388,7 @@ def _sunrays_spec(
         "glow_alpha": 0.14 + 0.08 * intensity,
         "shadow": 0.02 + 0.025 * intensity,
         # A shorter cycle still reads in a 4 s preview while staying slow.
-        "cycles": max(1, int(round(seconds / 5.0))),
+        "cycles": max(1, int(round(seconds / 5.0 * speed))),
         "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
         "color": np.asarray((255.0, 208.0, 150.0), dtype=np.float32),
     }
@@ -2478,6 +2530,7 @@ def _fog_spec(
         log("Bỏ qua sương mù: vùng sương rỗng sau khi trừ protect/strip.")
         return None
     intensity = _items_intensity(items, DEFAULT_FOG_INTENSITY)
+    speed = _items_speed(items)
     size_scale = max(0.35, height / HEIGHT)
     # Two slow integer-cycle drifts keep the noise seamless at the loop seam.
     coarse = _fog_texture(width, height, seed ^ 0xF06C, max(6.0, height / 12.0))
@@ -2489,8 +2542,8 @@ def _fog_spec(
         "fine": fine,
         "drift": max(1.5, 12.0 * size_scale),
         "fine_drift": max(1.0, 6.0 * size_scale),
-        "cycles": max(1, int(round(seconds / 5.0))),
-        "fine_cycles": max(1, int(round(seconds / 4.0))),
+        "cycles": max(1, int(round(seconds / 5.0 * speed))),
+        "fine_cycles": max(1, int(round(seconds / 4.0 * speed))),
         "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
         "phase2": float(rng.uniform(0.0, 2.0 * math.pi)),
         "alpha": 0.0 if intensity <= 1e-3 else min(0.26, 0.08 + 0.22 * intensity),
@@ -2706,16 +2759,30 @@ def _render_loop(
     rain_layers: list[dict] = []
     rain_intensity = 1.0
     if "rain" in effects:
-        rain_item = _rain_item(plan) or {}
-        params = rain_item.get("params") if isinstance(rain_item.get("params"), dict) else {}
-        rain_intensity = min(1.0, max(0.0, _finite(params.get("intensity"), DEFAULT_INTENSITY)))
-        rain_layers = _make_layers(out_width, out_height, seconds, seed)
+        rain_items = _effect_items(plan, "rain")
+        rain_intensity = _items_intensity(rain_items, DEFAULT_INTENSITY)
+        rain_layers = _make_layers(
+            out_width,
+            out_height,
+            seconds,
+            seed,
+            density_multiplier=_items_density(rain_items),
+            speed_multiplier=_items_speed(rain_items),
+        )
 
     snow_layers: list[dict] = []
     snow_intensity = 1.0
     if "snow" in effects:
-        snow_intensity = _items_intensity(_effect_items(plan, "snow"), DEFAULT_INTENSITY)
-        snow_layers = _make_snow_layers(out_width, out_height, seconds, seed)
+        snow_items = _effect_items(plan, "snow")
+        snow_intensity = _items_intensity(snow_items, DEFAULT_INTENSITY)
+        snow_layers = _make_snow_layers(
+            out_width,
+            out_height,
+            seconds,
+            seed,
+            density_multiplier=_items_density(snow_items),
+            speed_multiplier=_items_speed(snow_items),
+        )
 
     prevent = None
     if effects.intersection(

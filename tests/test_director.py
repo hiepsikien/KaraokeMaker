@@ -450,6 +450,23 @@ class TargetResolutionTests(unittest.TestCase):
         )
 
 
+class EffectParamPlanTests(unittest.TestCase):
+    def test_plan_items_include_density_and_speed_defaults(self):
+        plan = director.build_effect_plan(
+            "sha256:" + "a" * 64,
+            {"effects": [{"type": "rain", "intensity": 0.5, "audio": False}]},
+            [],
+            [],
+            [],
+            640,
+            360,
+        )
+        params = plan["items"][0]["params"]
+        self.assertEqual(params["intensity"], 0.5)
+        self.assertEqual(params["density"], 1.0)
+        self.assertEqual(params["speed"], 1.0)
+
+
 class EnvLoadingTests(unittest.TestCase):
     def test_non_empty_environment_wins_and_blank_values_are_filled(self):
         from karaoke.server import _load_env
