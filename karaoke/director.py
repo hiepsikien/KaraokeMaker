@@ -37,8 +37,8 @@ LOOP_DURATION = 8
 MAX_VISION_SIDE = 1024
 PREPROCESSING = "exif_rgb_jpeg1024_q85_inventory_v6"
 
-EFFECT_TYPES = ("rain", "snow", "water", "steam", "wind", "fire", "fog", "light")
-INTENT_VERSION = "intent_v4"
+EFFECT_TYPES = ("rain", "snow", "water", "steam", "wind", "fire", "embers", "fog", "light")
+INTENT_VERSION = "intent_v5"
 
 _BLOCK_REASONS = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
 _AUDIO_PHRASES = ("tiếng mưa", "tiếng sóng", "âm thanh")
@@ -693,6 +693,12 @@ def _effect_type(value: Any) -> str | None:
         "sóng": "water",
         "snow": "snow",
         "tuyết": "snow",
+        "embers": "embers",
+        "ember": "embers",
+        "sparks": "embers",
+        "spark": "embers",
+        "tàn lửa": "embers",
+        "tia lửa": "embers",
         "fire": "fire",
         "flame": "fire",
         "lửa": "fire",
@@ -768,6 +774,8 @@ def keyword_intent(prompt: str) -> dict:
         found.append("water")
     if "tuyết" in text or "snow" in text:
         found.append("snow")
+    if "tàn lửa" in text or "tia lửa" in text or "embers" in text or "sparks" in text:
+        found.append("embers")
     if "lửa" in text or "cháy" in text or "fire" in text or "flame" in text:
         found.append("fire")
     if "sương mù" in text or "fog" in text or "mist" in text:

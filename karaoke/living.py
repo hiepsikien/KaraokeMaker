@@ -156,7 +156,17 @@ FOG_REGION_TOKENS = ("ground", "low", "lower", "bottom", "floor", "nền", "đ�
 
 # Every renderer recipe supported by this module. Order is the compositing
 # order (base -> rain -> snow -> water -> steam -> wind -> fire -> fog -> light).
-SUPPORTED_EFFECTS = ("rain", "snow", "water", "steam", "wind", "fire", "fog", "light")
+SUPPORTED_EFFECTS = (
+    "rain",
+    "snow",
+    "water",
+    "steam",
+    "wind",
+    "fire",
+    "embers",
+    "fog",
+    "light",
+)
 EFFECT_LABELS = {
     "rain": "mưa",
     "snow": "tuyết",
@@ -164,6 +174,7 @@ EFFECT_LABELS = {
     "steam": "khói",
     "wind": "gió",
     "fire": "lửa",
+    "embers": "tàn lửa",
     "fog": "sương mù",
     "light": "sáng",
 }
@@ -173,7 +184,7 @@ EFFECT_LABELS = {
 # v5: first AI Studio / inventory-v3 pass.
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks + painted-smoke billow warp.
-MOTION_CACHE_VERSION = 12
+MOTION_CACHE_VERSION = 13
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1162,7 +1173,7 @@ def _steam_sources(
                 plume_scale = max(4.0, min(box_width, box_height * 1.35))
                 base_radius = max(3.0, plume_scale * 0.12)
                 max_radius = max(base_radius + 3.0, plume_scale * 0.52)
-                spread = 0.14
+                spread = 0.38
                 sample_box = (
                     x1 + box_width * 0.22,
                     y1 + box_height * 0.42,
@@ -1170,10 +1181,10 @@ def _steam_sources(
                     y2,
                 )
             count = max(
-                22,
+                12,
                 int(
                     round(
-                        64
+                        30
                         * (0.5 + 0.7 * intensity)
                         * (0.55 + min(1.0, box_width / max(1.0, width * 0.24)))
                     )
@@ -1216,15 +1227,25 @@ def _steam_sources(
         half_bottom = max(3.0, box_width * (0.42 if smoke else 0.28))
         half_top = max(5.0, box_width * (0.55 if smoke else 0.55))
         bottom_offset = 0.08 if smoke else 0.12
-        draw.polygon(
-            [
-                (cx - half_bottom, min(height, cy + box_height * bottom_offset)),
-                (cx + half_bottom, min(height, cy + box_height * bottom_offset)),
-                (cx + half_top, cy - rise),
-                (cx - half_top, cy - rise),
-            ],
-            fill=255,
-        )
+        if smoke and not fire_only:
+            # Do not bake a trapezoid/rectangle into the smoke plume. A soft
+            # ellipse is then shaped by the actual dark-smoke pixels below.
+            pad_x = box_width * 0.10
+            pad_y = box_height * 0.06
+            draw.ellipse(
+                [x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y],
+                fill=255,
+            )
+        else:
+            draw.polygon(
+                [
+                    (cx - half_bottom, min(height, cy + box_height * bottom_offset)),
+                    (cx + half_bottom, min(height, cy + box_height * bottom_offset)),
+                    (cx + half_top, cy - rise),
+                    (cx - half_top, cy - rise),
+                ],
+                fill=255,
+            )
         blur = max(1.5, box_width * (0.10 if smoke else 0.09))
         stem = np.asarray(mask.filter(ImageFilter.GaussianBlur(blur)), dtype=np.float32) / 255.0
         if smoke:
@@ -2047,6 +2068,141 @@ def _apply_fire(frame: np.ndarray, spec: dict | None, u: float) -> np.ndarray:
     return frame
 
 
+# --- embers ----------------------------------------------------------------
+
+
+def _embers_spec(
+    plan: dict,
+    transform: dict,
+    width: int,
+    height: int,
+    seconds: float,
+    prevent: np.ndarray,
+    seed: int,
+    log,
+) -> dict | None:
+    """Sparse rising sparks from fire objects/regions."""
+    items = _effect_items(plan, "embers")
+    if not items:
+        return None
+    shapes = _fire_shapes(plan, _target_ids(items))
+    if not shapes:
+        log("Bỏ qua tàn lửa: không có object/vùng lửa khớp target.")
+        return None
+
+    emitters: list[dict] = []
+    for points in shapes:
+        mapped = [_map_point(point, transform, width, height) for point in points]
+        if not mapped:
+            continue
+        xs = [point[0] for point in mapped]
+        ys = [point[1] for point in mapped]
+        x1, x2 = max(0.0, min(xs)), min(float(width), max(xs))
+        y1, y2 = max(0.0, min(ys)), min(float(height), max(ys))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            continue
+        emitters.append(
+            {
+                "x1": x1,
+                "x2": x2,
+                # Start in the lower/central part of the flame, not its top.
+                "y1": y1 + (y2 - y1) * 0.25,
+                "y2": y2,
+                "area": max(1.0, (x2 - x1) * (y2 - y1)),
+            }
+        )
+    if not emitters:
+        log("Bỏ qua tàn lửa: vùng lửa quá nhỏ.")
+        return None
+
+    intensity = _items_intensity(items, 0.5)
+    density = math.sqrt((width * height) / (WIDTH * HEIGHT))
+    count = max(14, int(round(95 * density * (0.5 + 0.9 * intensity))))
+    total_area = sum(emitter["area"] for emitter in emitters)
+    rng = np.random.default_rng(seed ^ 0xE0B5)
+    particles: list[dict] = []
+    for _ in range(count):
+        pick = rng.uniform(0.0, total_area)
+        cursor = 0.0
+        emitter = emitters[0]
+        for candidate in emitters:
+            cursor += candidate["area"]
+            if pick <= cursor:
+                emitter = candidate
+                break
+        span_x = max(1.0, emitter["x2"] - emitter["x1"])
+        span_y = max(1.0, emitter["y2"] - emitter["y1"])
+        particles.append(
+            {
+                "x": float(rng.uniform(emitter["x1"], emitter["x2"])),
+                "y": float(rng.uniform(emitter["y1"], emitter["y2"])),
+                "rise": float(rng.uniform(0.22, 0.55) * height),
+                "drift": float(rng.uniform(-0.035, 0.035) * width),
+                "sway": float(max(1.0, rng.uniform(2.0, 8.0) * height / HEIGHT)),
+                "phase": float(rng.uniform(0.0, 1.0)),
+                "cycles": int(rng.integers(2, 5)),
+                "size": float(max(1.0, rng.uniform(1.4, 3.2) * height / HEIGHT)),
+                "alpha": float(rng.uniform(0.55, 1.0)),
+                "color": np.asarray(
+                    (
+                        rng.uniform(235.0, 255.0),
+                        rng.uniform(120.0, 175.0),
+                        rng.uniform(35.0, 80.0),
+                    ),
+                    dtype=np.float32,
+                ),
+            }
+        )
+    return {
+        "particles": particles,
+        "intensity": intensity,
+        "prevent": prevent,
+    }
+
+
+def _apply_embers(
+    frame: np.ndarray,
+    spec: dict | None,
+    u: float,
+    sprite_cache: dict,
+) -> np.ndarray:
+    if spec is None:
+        return frame
+    height, width = frame.shape[:2]
+    layer = np.zeros_like(frame, dtype=np.float32)
+    alpha_layer = np.zeros((height, width), dtype=np.float32)
+    prevent = spec["prevent"]
+    intensity = spec["intensity"]
+    for particle in spec["particles"]:
+        progress = (particle["phase"] + particle["cycles"] * u) % 1.0
+        envelope = math.sin(math.pi * progress) ** 1.4
+        alpha = particle["alpha"] * intensity * envelope
+        if alpha <= 0.01:
+            continue
+        x = (
+            particle["x"]
+            + particle["drift"] * progress
+            + particle["sway"] * math.sin(2.0 * math.pi * progress * 2.0 + particle["phase"])
+        )
+        y = particle["y"] - particle["rise"] * progress
+        if x < 0 or x >= width or y < 0 or y >= height:
+            continue
+        if prevent[int(y), int(x)] <= 0.01:
+            continue
+        radius = max(2, int(round(particle["size"] * 2.5)))
+        sprite = _soft_sprite(radius, sprite_cache)
+        _add_alpha_sprite(
+            layer,
+            alpha_layer,
+            sprite,
+            x,
+            y,
+            alpha,
+            particle["color"],
+        )
+    return np.clip(frame + layer, 0.0, 255.0).astype(np.float32)
+
+
 # --- fog (P2b) -------------------------------------------------------------
 
 
@@ -2369,7 +2525,7 @@ def _render_loop(
         snow_layers = _make_snow_layers(out_width, out_height, seconds, seed)
 
     prevent = None
-    if effects.intersection({"steam", "wind", "light", "water", "fire", "fog"}):
+    if effects.intersection({"steam", "wind", "light", "water", "fire", "embers", "fog"}):
         prevent = _build_protect_mask(plan, transform, out_width, out_height, strip_rect)
     prevent3 = prevent[:, :, None] if prevent is not None else None
 
@@ -2413,6 +2569,20 @@ def _render_loop(
         if "fire" in effects
         else None
     )
+    embers_spec = (
+        _embers_spec(
+            plan,
+            transform,
+            out_width,
+            out_height,
+            seconds,
+            prevent,
+            seed,
+            log,
+        )
+        if "embers" in effects
+        else None
+    )
     fog_spec = (
         _fog_spec(plan, transform, out_width, out_height, seconds, prevent, seed, log)
         if "fog" in effects
@@ -2433,6 +2603,8 @@ def _render_loop(
     if steam_sources or wind_specs:
         resolved = True
     if fire_spec is not None and fire_spec["amplitude"] > 0.0:
+        resolved = True
+    if embers_spec is not None and embers_spec["particles"]:
         resolved = True
     if fog_spec is not None and fog_spec["alpha"] > 0.0:
         resolved = True
@@ -2502,6 +2674,7 @@ def _render_loop(
                 frame = np.asarray(warped, dtype=np.float32)
 
             frame = _apply_fire(frame, fire_spec, u)
+            frame = _apply_embers(frame, embers_spec, u, sprite_cache)
             frame = _apply_fog(frame, fog_spec, u)
             frame = _apply_light(frame, light_spec, u)
             np.clip(frame, 0.0, 255.0, out=frame)

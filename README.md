@@ -49,7 +49,7 @@ Sau khi sửa code Python, tắt server bằng Ctrl+C rồi chạy lại `.venv-
 
 Trong bước **Khai báo** có mục **Hiệu ứng nền (AI)**. Ứng dụng gửi ảnh nền đang chọn
 lên Google Gemini để nhận diện object/vùng, rồi lưu một `effect_plan` vào dự án.
-Hiện đã render **mưa, tuyết, nước (W1 shimmer), khói, gió/sway, lửa, sương mù và nhịp sáng**.
+Hiện đã render **mưa, tuyết, nước (W1 shimmer), khói, gió/sway, lửa, tàn lửa, sương mù và nhịp sáng**.
 
 Bật bằng cách tạo file `.env` ở thư mục gốc (đã có trong `.gitignore`):
 

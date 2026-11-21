@@ -480,5 +480,37 @@ class WindFlagTests(unittest.TestCase):
         self.assertGreater(float(np.abs(second - first).max()), 0.0)
 
 
+class EmbersTests(unittest.TestCase):
+    def test_embers_use_fire_object_and_rise(self):
+        plan = effect_plan(
+            [
+                {
+                    "effect": "embers",
+                    "target_ids": [],
+                    "params": {"intensity": 0.6, "loop_duration": 4, "audio": False},
+                }
+            ],
+            objects=[
+                object_entry(
+                    "fire-1",
+                    "fire",
+                    (0.4, 0.5, 0.6, 0.8),
+                    affordances=["burn"],
+                )
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        spec = living._embers_spec(
+            plan, transform, 100, 100, 4.0, prevent, 1234, lambda _m: None
+        )
+        self.assertIsNotNone(spec)
+        self.assertGreater(len(spec["particles"]), 0)
+        first = living._apply_embers(np.zeros((100, 100, 3), np.float32), spec, 0.1, {})
+        second = living._apply_embers(np.zeros((100, 100, 3), np.float32), spec, 0.6, {})
+        self.assertGreater(float(first.max()), 0.0)
+        self.assertGreater(float(np.abs(second - first).max()), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

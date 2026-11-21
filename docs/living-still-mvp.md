@@ -370,6 +370,11 @@ speed * T = k * span
 - **Nước không warp người/wooden stakes**: inventory v6 thêm người đứng/wading dưới
   nước và stakes; water mask cắt object + edge-protect heuristic cho cấu trúc đứng
   mà inventory có thể bỏ sót. Preview/export dùng mask mới.
+- **Smoke sparse, không khung chữ nhật**: emitter dùng ellipse mềm + pixel tối thật
+  của khói (không dùng trapezoid/box), giảm còn ~30 hạt, spread rộng/ngẫu nhiên.
+- **Tàn lửa (`embers`)**: particle nhỏ màu cam vàng bốc lên từ fire object/region,
+  loop-quantized, có protect/strip. Prompt `tàn lửa`, `tia lửa`, `embers`, `sparks`
+  được map sang `embers`; đã có test riêng. 92 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
