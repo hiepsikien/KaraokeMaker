@@ -48,7 +48,7 @@ export function ProjectSetup({
   hasLines,
   onBrowse,
   onContinue,
-  onAlign,
+  onRestore,
   onResumeEdit,
   onBackHome,
   onNewProject,
@@ -61,19 +61,21 @@ export function ProjectSetup({
   hasLines: boolean;
   onBrowse: (kind: BrowseKind) => void;
   onContinue: (event: FormEvent) => void;
-  onAlign: () => void;
+  onRestore: () => void;
   onResumeEdit: () => void;
   onBackHome: () => void;
   onNewProject?: () => void;
 }) {
   const lines = useMemo(() => sungCount(fields.lyrics), [fields.lyrics]);
+  const stemsReady = Boolean(fields.vocal_audio && fields.instrumental_audio);
+  const primaryAligns = !hasLines && stemsReady;
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
       <form onSubmit={onContinue} className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Khai báo</p>
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Chuẩn bị</p>
             <h2 className="mt-1 text-xl font-semibold">Thông tin và file của dự án</h2>
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -332,17 +334,24 @@ export function ProjectSetup({
               disabled={aligning}
               className="w-full rounded-2xl bg-[var(--gold)] px-4 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
             >
-              Tiếp tục tách và trộn
+              {primaryAligns ? "Vào ghép chữ" : "Tiếp tục tách và trộn"}
             </button>
-            {fields.vocal_audio && fields.instrumental_audio && (
-              <button
-                type="button"
-                disabled={aligning}
-                onClick={() => onAlign()}
-                className="w-full rounded-2xl border border-[var(--gold)] px-4 py-3 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
-              >
-                Bỏ qua, căn lời với file đã có
-              </button>
+            {primaryAligns ? (
+              <p className="text-xs leading-5 text-[var(--muted)]">
+                Đã có vocal và instrumental nên bước tách/trộn được bỏ qua.{" "}
+                <button
+                  type="button"
+                  disabled={aligning}
+                  onClick={onRestore}
+                  className="text-[var(--gold)] hover:text-white disabled:opacity-60"
+                >
+                  Vẫn muốn tách và trộn lại?
+                </button>
+              </p>
+            ) : (
+              <p className="text-xs leading-5 text-[var(--muted)]">
+                Đã có sẵn cặp vocal/instrumental? Chọn ở mục Audio để vào thẳng bước ghép chữ, không cần tách lại.
+              </p>
             )}
           </div>
         )}
@@ -352,13 +361,13 @@ export function ProjectSetup({
         <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5">
           <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Luồng</h2>
           <ol className="mt-4 space-y-2 text-sm leading-6 text-[var(--muted)]">
-            <li>1. Khai báo audio, lời, ảnh</li>
-            <li>2. Hiệu ứng AI (tuỳ chọn)</li>
-            <li>3. Tách Kim Vocal 2 và trộn nhạc nền</li>
-            <li>4. Căn / ghép chữ</li>
-            <li>5. Biên tập timing</li>
-            <li>6. Xuất hai video</li>
+            <li>1. Chuẩn bị — audio, lời, ảnh</li>
+            <li>2. Biên tập — timing từng chữ</li>
+            <li>3. Xuất — hai video</li>
           </ol>
+          <p className="mt-3 text-xs leading-5 text-[var(--muted)]">
+            Đã có vocal và instrumental thì bước tách/trộn được bỏ qua; vào thẳng ghép chữ.
+          </p>
         </section>
       </aside>
     </div>

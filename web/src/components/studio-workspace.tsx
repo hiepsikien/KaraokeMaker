@@ -25,7 +25,6 @@ const PROFILE_OPTIONS = [
 ];
 
 const PREVIEW_DURATION = 4;
-const STANDARD_DURATION = 16;
 const PROFILE_SIZE: Record<string, string> = {
   landscape_1080p: "1920×1080",
   portrait_1080x1920: "1080×1920",
@@ -64,6 +63,7 @@ export function StudioWorkspace() {
   const [images, setImages] = useState<string[]>([]);
   const [effects, setEffects] = useState<BackgroundEffect[]>([]);
   const [profile, setProfile] = useState("landscape_1080p");
+  const [standardDuration, setStandardDuration] = useState(8);
   const [busyBrowse, setBusyBrowse] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -123,6 +123,14 @@ export function StudioWorkspace() {
     setError("");
   }
 
+  function changeStandardDuration(value: number) {
+    if (renderingPath) return;
+    setStandardDuration(value);
+    // A saved preview is tied to its duration; drop stale videos.
+    setPreviews({});
+    setError("");
+  }
+
   async function renderPreview(effect: BackgroundEffect) {
     if (renderingPath) return;
     setRenderingPath(effect.image_path);
@@ -150,7 +158,7 @@ export function StudioWorkspace() {
       const data = (await response.json()) as PreviewResult;
       setPreviews((current) => {
         const existing = current[effect.image_path];
-        if (existing && existing.duration >= STANDARD_DURATION && data.duration < STANDARD_DURATION) {
+        if (existing && existing.duration >= standardDuration && data.duration < standardDuration) {
           return current;
         }
         return { ...current, [effect.image_path]: data };
@@ -171,7 +179,7 @@ export function StudioWorkspace() {
     setRenderingPath(effect.image_path);
     setRenderingMode("standard");
     setRenderHint(
-      `Đang render bản chuẩn ${STANDARD_DURATION}s ở ${PROFILE_SIZE[profile] || profile}; có thể mất 1–2 phút.`,
+      `Đang render bản chuẩn ${standardDuration}s ở ${PROFILE_SIZE[profile] || profile}; có thể mất 1–2 phút.`,
     );
     setError("");
     const controller = new AbortController();
@@ -183,7 +191,7 @@ export function StudioWorkspace() {
         body: JSON.stringify({
           image_path: effect.image_path,
           effect_plan: effect.effect_plan,
-          duration: STANDARD_DURATION,
+          duration: standardDuration,
           output_profile: profile,
           full_resolution: true,
         }),
@@ -203,7 +211,7 @@ export function StudioWorkspace() {
             signal: controller.signal,
           });
           if (statusResponse.status === 404) {
-            setError("Không thấy job render (server có thể đã restart). Bấm lại nút Bản chuẩn 16s.");
+            setError(`Không thấy job render (server có thể đã restart). Bấm lại nút Bản chuẩn ${standardDuration}s.`);
             return;
           }
           if (!statusResponse.ok) {
@@ -218,7 +226,7 @@ export function StudioWorkspace() {
           };
           if (typeof status.percent === "number" && status.percent > 0) {
             setRenderHint(
-              `Đang render bản chuẩn ${STANDARD_DURATION}s ở ${PROFILE_SIZE[profile] || profile}: ${status.percent}%`,
+              `Đang render bản chuẩn ${standardDuration}s ở ${PROFILE_SIZE[profile] || profile}: ${status.percent}%`,
             );
           }
           if (status.status === "done" && status.result) {
@@ -331,6 +339,19 @@ export function StudioWorkspace() {
           </select>
         </label>
 
+        <label className="block">
+          <span className="mb-1.5 block text-sm text-[var(--muted)]">Thời lượng bản chuẩn</span>
+          <select
+            className={fieldClass}
+            value={standardDuration}
+            disabled={Boolean(renderingPath)}
+            onChange={(event) => changeStandardDuration(Number(event.target.value))}
+          >
+            <option value={8}>8 giây</option>
+            <option value={16}>16 giây</option>
+          </select>
+        </label>
+
         {notice && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{notice}</p>}
 
         <div className="space-y-3 border-t border-[var(--line)] pt-5">
@@ -339,7 +360,7 @@ export function StudioWorkspace() {
             images={images}
             effects={effects}
             outputProfile={profile}
-            imageDuration={String(STANDARD_DURATION)}
+            imageDuration={String(standardDuration)}
             onEffectsChange={(updater) => {
               setEffects((current) => updater(current));
               // The old preview belongs to the previous plan; never show it
@@ -392,7 +413,7 @@ export function StudioWorkspace() {
                       >
                         {rendering && renderingMode === "standard"
                           ? "Đang render…"
-                          : `Bản chuẩn ${STANDARD_DURATION}s`}
+                          : `Bản chuẩn ${standardDuration}s`}
                       </button>
                     </div>
                     {preview && (
@@ -413,13 +434,13 @@ export function StudioWorkspace() {
                         <button
                           type="button"
                           onClick={() => saveAsset(effect)}
-                          disabled={Boolean(savingPath) || preview.duration < STANDARD_DURATION}
+                          disabled={Boolean(savingPath) || preview.duration < standardDuration}
                           className="w-full rounded-xl border border-[var(--gold)] px-3 py-2 text-sm font-semibold text-[var(--gold)] transition hover:bg-black/25 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {savingPath === effect.image_path
                             ? "Đang lưu asset…"
-                            : preview.duration < STANDARD_DURATION
-                              ? `Render bản chuẩn ${STANDARD_DURATION}s để lưu asset`
+                            : preview.duration < standardDuration
+                              ? `Render bản chuẩn ${standardDuration}s để lưu asset`
                               : "Lưu thành asset"}
                         </button>
                       </div>

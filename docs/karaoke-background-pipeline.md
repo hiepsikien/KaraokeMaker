@@ -449,7 +449,7 @@ Thêm metadata nền. Đây là **derived cache**, không phải nguồn sự th
 ```json
 "background_render": {
   "schema_version": 1,
-  "builder_version": 1,
+  "builder_version": 2,
   "hash": "sha256:<hex>",
   "profile_id": "landscape_1080p",
   "profile_fingerprint": "<hex>",
@@ -516,7 +516,7 @@ Quy tắc:
   "fps": 30,
   "fit_mode": "contain",
   "strip_rect": [0, 0, 0, 0],
-  "renderer_version": 31,
+  "renderer_version": 32,
   "loop_duration": 16.0,
   "asset_frames": 480,
   "clip_file": "loop.mp4",

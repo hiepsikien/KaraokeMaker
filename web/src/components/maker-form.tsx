@@ -225,8 +225,8 @@ export function MakerForm() {
     return true;
   }
 
-  async function continueRestore(event: FormEvent) {
-    event.preventDefault();
+  async function continueRestore(event?: FormEvent) {
+    event?.preventDefault();
     setNotice("");
     if (!setupReady(false)) return;
     try {
@@ -253,6 +253,21 @@ export function MakerForm() {
     if (back !== "edit" && !setupReady(true)) return;
     setAlignReturn(back);
     setPhase("align");
+  }
+
+  // Setup primary action: when the project already has both stems, skip the
+  // separate restore phase and go straight to aligning the lyrics.
+  function submitSetup(event: FormEvent) {
+    event.preventDefault();
+    if (hasLines) {
+      void resumeEdit();
+      return;
+    }
+    if (fields.vocal_audio && fields.instrumental_audio) {
+      openAlign("setup");
+      return;
+    }
+    void continueRestore(event);
   }
 
   async function startAlign() {
@@ -446,8 +461,8 @@ export function MakerForm() {
           aligning={aligning}
           hasLines={hasLines}
           onBrowse={browseSetup}
-          onContinue={continueRestore}
-          onAlign={() => openAlign("setup")}
+          onContinue={submitSetup}
+          onRestore={() => void continueRestore()}
           onResumeEdit={resumeEdit}
           onBackHome={() => {
             setJob(null);
