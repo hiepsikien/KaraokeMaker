@@ -16,7 +16,6 @@ import hashlib
 import json
 import math
 import re
-import threading
 from pathlib import Path
 
 from karaoke.cache import cache_root, prune
@@ -31,9 +30,6 @@ MAX_DURATION = 30.0
 # 640 px keeps a 4 s multi-effect preview well under the proxy timeout.
 PREVIEW_MAX_SIDE = 640
 PREVIEW_VERSION = f"preview_v27_m{MOTION_CACHE_VERSION}"
-# Serialize preview renders in this process. Two simultaneous 1080p renders
-# otherwise fight over CPU and can race on cache materialization.
-_PREVIEW_LOCK = threading.Lock()
 
 
 class StudioError(Exception):
@@ -172,21 +168,23 @@ def render_preview(
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     destination = CACHE_ROOT / f"{preview_id}.mp4"
 
-    with _PREVIEW_LOCK:
-        result = render_motion_loop(
-            source,
-            plan,
-            destination,
-            duration=seconds,
-            width=preview_width,
-            height=preview_height,
-            fps=profile.fps,
-            fit_mode=profile.fit_mode,
-            # Studio preview has no lyric strip. A zero-height strip explicitly
-            # disables masking; None would fall back to the legacy bottom mask.
-            strip_rect=(0, 0, 0, 0),
-            progress=progress,
-        )
+    # No global preview lock: living._render_loop single-flights per cache key,
+    # so identical previews share one encode while different previews render in
+    # parallel. Prune has its own lock.
+    result = render_motion_loop(
+        source,
+        plan,
+        destination,
+        duration=seconds,
+        width=preview_width,
+        height=preview_height,
+        fps=profile.fps,
+        fit_mode=profile.fit_mode,
+        # Studio preview has no lyric strip. A zero-height strip explicitly
+        # disables masking; None would fall back to the legacy bottom mask.
+        strip_rect=(0, 0, 0, 0),
+        progress=progress,
+    )
     if result is None:
         raise StudioError(
             "Kế hoạch chưa có hiệu ứng nào render được "

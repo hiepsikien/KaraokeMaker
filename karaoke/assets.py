@@ -14,10 +14,12 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISREG
 
 try:
     import fcntl
@@ -40,6 +42,11 @@ ASSET_ID_PATTERN = re.compile(r"^bg_[0-9a-f]{32}$")
 ASSET_STRIP_RECT = (0, 0, 0, 0)
 CLIP_FILE = "loop.mp4"
 META_FILE = "meta.json"
+# Auto-save must stay bounded: without a quota every Studio save would grow the
+# stable store forever. These defaults keep roughly 100 clips / ~2 GB.
+ASSET_MAX_FILES = 100
+ASSET_MAX_BYTES = 2_000_000_000
+ASSET_MIN_AGE_DAYS = 7.0
 _LOCK = threading.Lock()
 _SHA_CACHE: dict[tuple[str, int, int], str] = {}
 
@@ -342,6 +349,153 @@ def list_assets() -> list[dict]:
             assets.append(meta)
     assets.sort(key=lambda item: str(item.get("created") or ""), reverse=True)
     return assets
+
+
+def _folder_size(folder: Path) -> int | None:
+    """Sum regular files below ``folder`` without following symlinks."""
+    total = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not os.path.islink(os.path.join(dirpath, name))
+            ]
+            for name in filenames:
+                path = Path(dirpath) / name
+                try:
+                    if path.is_symlink():
+                        continue
+                    info = path.stat()
+                except OSError:
+                    return None
+                if S_ISREG(info.st_mode):
+                    total += info.st_size
+    except OSError:
+        return None
+    return total
+
+
+def _asset_usage_entry(folder: Path) -> dict | None:
+    """Return ``{id, folder, bytes, mtime}`` or ``None`` when unsafe to inspect."""
+    try:
+        if folder.is_symlink() or not folder.is_dir():
+            return None
+        meta_path = folder / META_FILE
+        if meta_path.is_symlink():
+            return None
+        bytes_used: int | None = None
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                meta = None
+            if isinstance(meta, dict):
+                name = str(meta.get("clip_file") or CLIP_FILE)
+                if Path(name).name != name:
+                    return None
+                clip = folder / name
+                if clip.is_symlink():
+                    return None
+                try:
+                    info = clip.stat()
+                except OSError:
+                    return None
+                if not S_ISREG(info.st_mode):
+                    return None
+                bytes_used = info.st_size
+        if bytes_used is None:
+            # Missing/corrupt metadata: fall back to the whole directory.
+            bytes_used = _folder_size(folder)
+            if bytes_used is None:
+                return None
+        info = meta_path.stat() if meta_path.is_file() else folder.stat()
+        return {
+            "id": folder.name,
+            "folder": folder,
+            "bytes": int(bytes_used),
+            "mtime": info.st_mtime,
+        }
+    except OSError:
+        return None
+
+
+def _iter_asset_entries(root: Path) -> list[dict]:
+    try:
+        folders = list(root.iterdir())
+    except OSError:
+        return []
+    entries: list[dict] = []
+    for folder in folders:
+        if not ASSET_ID_PATTERN.fullmatch(folder.name):
+            continue
+        entry = _asset_usage_entry(folder)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def assets_usage() -> dict:
+    """Return ``{"count": int, "bytes": int}`` for readable asset folders."""
+    root = assets_root()
+    if not root.is_dir():
+        return {"count": 0, "bytes": 0}
+    entries = _iter_asset_entries(root)
+    return {
+        "count": len(entries),
+        "bytes": sum(entry["bytes"] for entry in entries),
+    }
+
+
+def cleanup_assets(
+    *,
+    keep_ids: set[str] | None = None,
+    max_files: int = ASSET_MAX_FILES,
+    max_bytes: int = ASSET_MAX_BYTES,
+    min_age_days: float = ASSET_MIN_AGE_DAYS,
+) -> dict:
+    """Delete the oldest unreferenced assets until the quota is satisfied.
+
+    Assets in ``keep_ids``, anything newer than ``min_age_days`` and anything
+    that cannot be inspected safely are never removed.
+    """
+    root = assets_root()
+    if not root.is_dir():
+        return {"deleted": [], "freed_bytes": 0, "count": 0, "bytes": 0}
+    keep = {str(value) for value in (keep_ids or set())}
+    cutoff = time.time() - max(0.0, float(min_age_days)) * 86400
+    with _file_lock(root / ".assets.lock"):
+        entries = _iter_asset_entries(root)
+        count = len(entries)
+        total_bytes = sum(entry["bytes"] for entry in entries)
+        candidates = [
+            entry
+            for entry in entries
+            if entry["id"] not in keep and entry["mtime"] <= cutoff
+        ]
+        candidates.sort(key=lambda entry: (entry["mtime"], entry["id"]))
+        deleted: list[str] = []
+        freed_bytes = 0
+        for entry in candidates:
+            if count <= max_files and total_bytes <= max_bytes:
+                break
+            folder = entry["folder"]
+            try:
+                if folder.is_symlink() or not folder.is_dir():
+                    continue
+                shutil.rmtree(folder)
+            except OSError:
+                continue
+            deleted.append(entry["id"])
+            freed_bytes += entry["bytes"]
+            count -= 1
+            total_bytes -= entry["bytes"]
+        return {
+            "deleted": deleted,
+            "freed_bytes": freed_bytes,
+            "count": count,
+            "bytes": total_bytes,
+        }
 
 
 def validate_asset(
