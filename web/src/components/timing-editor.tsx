@@ -640,48 +640,56 @@ export function TimingEditor({
                 {backgroundLabel}
               </span>
             </div>
-            {background.reason && background.state !== "ready" && (
-              <p className="text-xs leading-5 text-[var(--muted)]">{background.reason}</p>
-            )}
-            {typeof background.total_frames === "number" && background.total_frames > 0 && (
-              <p className="text-xs text-[var(--muted)]">
-                {background.total_frames} frame
-                {background.fps ? ` · ${(background.total_frames / background.fps).toFixed(1)}s` : ""}
-                {background.profile_id ? ` · ${background.profile_id}` : ""}
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                disabled={locked || backgroundBuilding || exportGaps.length > 0}
-                onClick={() => onBuildBackground?.(backgroundReady || background?.state === "stale")}
-                className="rounded-xl border border-[var(--gold)] px-3 py-2 text-xs font-semibold text-[var(--gold)] disabled:opacity-50"
-              >
-                {backgroundBuilding ? "Đang dựng…" : backgroundReady ? "Dựng lại nền" : "Dựng nền"}
-              </button>
-              {background.path && (
-                <button
-                  type="button"
-                  onClick={() => onReveal(background.path!.replace(/[\\/][^\\/]+$/, ""))}
-                  className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)]"
-                >
-                  Mở thư mục nền
-                </button>
-              )}
-              {onCleanupBackground && (
-                <button
-                  type="button"
-                  disabled={locked || backgroundBuilding}
-                  onClick={onCleanupBackground}
-                  className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)] disabled:opacity-50"
-                >
-                  Dọn bản nền cũ
-                </button>
-              )}
-            </div>
-            <p className="text-[11px] leading-4 text-[var(--muted)]">
-              Xuất video vẫn tự dựng nền nếu chưa có. Dựng trước giúp kiểm tra nền và tách khỏi bước ghép lời.
-            </p>
+            <details className="group">
+              <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-[var(--muted)] hover:text-white">
+                <span className="transition group-open:rotate-90">▸</span>
+                Nâng cao
+              </summary>
+              <div className="mt-2 space-y-2">
+                {background.reason && background.state !== "ready" && (
+                  <p className="text-xs leading-5 text-[var(--muted)]">{background.reason}</p>
+                )}
+                {typeof background.total_frames === "number" && background.total_frames > 0 && (
+                  <p className="text-xs text-[var(--muted)]">
+                    {background.total_frames} frame
+                    {background.fps ? ` · ${(background.total_frames / background.fps).toFixed(1)}s` : ""}
+                    {background.profile_id ? ` · ${background.profile_id}` : ""}
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={locked || backgroundBuilding || exportGaps.length > 0}
+                    onClick={() => onBuildBackground?.(backgroundReady || background?.state === "stale")}
+                    className="rounded-xl border border-[var(--gold)] px-3 py-2 text-xs font-semibold text-[var(--gold)] disabled:opacity-50"
+                  >
+                    {backgroundBuilding ? "Đang dựng…" : backgroundReady ? "Dựng lại nền" : "Dựng nền"}
+                  </button>
+                  {background.path && (
+                    <button
+                      type="button"
+                      onClick={() => onReveal(background.path!.replace(/[\\/][^\\/]+$/, ""))}
+                      className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)]"
+                    >
+                      Mở thư mục nền
+                    </button>
+                  )}
+                  {onCleanupBackground && (
+                    <button
+                      type="button"
+                      disabled={locked || backgroundBuilding}
+                      onClick={onCleanupBackground}
+                      className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)] disabled:opacity-50"
+                    >
+                      Dọn bản nền cũ
+                    </button>
+                  )}
+                </div>
+                <p className="text-[11px] leading-4 text-[var(--muted)]">
+                  Xuất video vẫn tự dựng nền nếu chưa có. Dựng trước giúp kiểm tra nền và tách khỏi bước ghép lời.
+                </p>
+              </div>
+            </details>
           </div>
         )}
         <div className="flex flex-wrap items-center gap-3">

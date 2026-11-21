@@ -18,9 +18,15 @@ from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
 from karaoke.assets import (
+    ASSET_MAX_BYTES,
+    ASSET_MAX_FILES,
     AssetError,
+    assets_usage,
+    cleanup_assets,
     delete_asset,
+    known_project_paths,
     list_assets,
+    register_project_path,
     save_asset_from_preview,
 )
 from karaoke.background import (
@@ -28,6 +34,7 @@ from karaoke.background import (
     background_status,
     build_background,
     cleanup_backgrounds,
+    cleanup_pictures,
 )
 from karaoke.director import DirectorError, analyze_scene
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
@@ -100,6 +107,9 @@ _studio_jobs: dict[str, dict] = {}
 _STUDIO_JOB_LIMIT = 20
 _STUDIO_JOB_TTL_SECONDS = 30 * 60
 _STUDIO_JOB_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+# Full-resolution renders are CPU-heavy. Auto-render after Apply can enqueue
+# several in a row, so cap how many FFmpeg encodes run at once.
+_STUDIO_RENDER_SEMAPHORE = threading.Semaphore(2)
 
 
 class BrowseRequest(BaseModel):
@@ -564,14 +574,15 @@ def _run_studio_job(
                 record["percent"] = round(100.0 * done / max(1, total))
 
     try:
-        result = render_preview(
-            path,
-            body.effect_plan,
-            duration=body.duration,
-            output_profile=body.output_profile,
-            full_resolution=True,
-            progress=progress,
-        )
+        with _STUDIO_RENDER_SEMAPHORE:
+            result = render_preview(
+                path,
+                body.effect_plan,
+                duration=body.duration,
+                output_profile=body.output_profile,
+                full_resolution=True,
+                progress=progress,
+            )
         payload = _preview_payload(result)
         with _lock:
             record = _studio_jobs.get(job_id)
@@ -689,6 +700,76 @@ def _image_hash(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _remember_project(path: Path) -> None:
+    try:
+        register_project_path(Path(path))
+    except Exception:
+        # The project file is the source of truth; the registry is only a GC hint.
+        pass
+
+
+def _referenced_asset_ids() -> set[str] | None:
+    """Collect asset ids referenced by open jobs and project files.
+
+    ``None`` means the scan was incomplete (an unreadable project file); the
+    caller must skip cleanup rather than risk deleting a referenced asset.
+    """
+    ids: set[str] = set()
+    with _lock:
+        records = list(_jobs.values())
+    project_paths: set[Path] = set()
+    for record in records:
+        prepared = record.get("prepared") or {}
+        for effect in prepared.get("background_effects") or []:
+            if not isinstance(effect, dict):
+                continue
+            asset_id = str(effect.get("asset_id") or "").strip()
+            if asset_id:
+                ids.add(asset_id)
+        project = record.get("project")
+        if isinstance(project, dict):
+            for effect in project.get("background_effects") or []:
+                if not isinstance(effect, dict):
+                    continue
+                asset_id = str(effect.get("asset_id") or "").strip()
+                if asset_id:
+                    ids.add(asset_id)
+        output_text = str(prepared.get("output_dir") or "").strip()
+        if output_text:
+            try:
+                output = Path(output_text).expanduser()
+                if output.is_dir():
+                    for project_file in output.glob("*.karaoke.json"):
+                        project_paths.add(project_file)
+            except OSError:
+                return None
+    try:
+        project_paths.update(known_project_paths())
+    except Exception:
+        return None
+    # Also scan the default project root so assets referenced by projects that
+    # are not currently open are not garbage-collected.
+    try:
+        default_root = audio_root() / "Karaoke"
+        if default_root.is_dir():
+            for project_file in default_root.rglob("*.karaoke.json"):
+                project_paths.add(project_file)
+    except OSError:
+        return None
+    for project_path in project_paths:
+        try:
+            data = json.loads(project_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        for effect in (data.get("background_effects") or []) if isinstance(data, dict) else []:
+            if not isinstance(effect, dict):
+                continue
+            asset_id = str(effect.get("asset_id") or "").strip()
+            if asset_id:
+                ids.add(asset_id)
+    return ids
+
+
 @app.post("/api/studio/assets")
 def studio_asset_create(body: StudioAssetRequest):
     text = str(body.image_path or "").strip()
@@ -715,12 +796,42 @@ def studio_asset_create(body: StudioAssetRequest):
     except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Không lưu được asset. Xem terminal Python.")
+    try:
+        usage = assets_usage()
+        if usage["count"] > ASSET_MAX_FILES or usage["bytes"] > ASSET_MAX_BYTES:
+            referenced = _referenced_asset_ids()
+            if referenced is not None:
+                cleanup_assets(
+                    keep_ids=referenced | {str(meta.get("id") or "")},
+                    min_age_days=30.0,
+                )
+    except Exception:
+        traceback.print_exc()
     return {"asset": meta}
 
 
 @app.get("/api/studio/assets")
 def studio_assets():
     return {"assets": list_assets()}
+
+
+@app.get("/api/studio/assets/usage")
+def studio_asset_usage():
+    return assets_usage()
+
+
+@app.post("/api/studio/assets/cleanup")
+def studio_asset_cleanup():
+    try:
+        referenced = _referenced_asset_ids()
+        if referenced is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Không quét được toàn bộ dự án; giữ nguyên asset để an toàn.",
+            )
+        return cleanup_assets(keep_ids=referenced)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.get("/api/studio/assets/{asset_id}/clip")
@@ -750,14 +861,32 @@ def studio_asset_delete(asset_id: str):
     return {"deleted": True}
 
 
+def _invalidate_background(record: dict) -> None:
+    record["background"] = None
+    record["_background_cache"] = None
+
+
+def _background_for_record(record: dict) -> dict | None:
+    prepared = record.get("prepared") or {}
+    if not prepared:
+        return None
+    cached = record.get("_background_cache")
+    now = time.time()
+    if cached is not None and now - float(cached[0]) < 2.0:
+        return cached[1]
+    try:
+        background = background_status(prepared, prepared.get("output_dir"))
+    except Exception:
+        background = None
+    record["_background_cache"] = (now, background)
+    return background
+
+
 def _public_job(record: dict) -> dict:
     prepared = record.get("prepared") or {}
     background = record.get("background")
     if background is None and prepared:
-        try:
-            background = background_status(prepared, prepared.get("output_dir"))
-        except Exception:
-            background = None
+        background = _background_for_record(record)
     return {
         "id": record["id"],
         "status": record["status"],
@@ -840,6 +969,8 @@ def project_session(body: ProjectFieldsRequest):
         raise HTTPException(status_code=400, detail="Thiếu đường dẫn dự án.")
     try:
         prepared, lines, existing = open_project_file(path_text)
+        if prepared.get("project_path"):
+            _remember_project(Path(prepared["project_path"]))
         for key in (
             "title",
             "artist",
@@ -879,7 +1010,10 @@ def project_session(body: ProjectFieldsRequest):
             status=None,
             outputs=existing.get("outputs"),
         )
+        _remember_project(saved)
         prepared, lines, project = open_project_file(str(saved))
+        if prepared.get("project_path"):
+            _remember_project(Path(prepared["project_path"]))
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -983,9 +1117,11 @@ def create_job(body: CreateJobRequest):
             if payload.get("project_path"):
                 prepared["project_path"] = payload["project_path"]
             project_path = sync_project_file(prepared, status="draft")
+            _remember_project(project_path)
             log(f"Đã lưu dự án {Path(project_path).name}.")
             lines = align_job(prepared, log)
             project_path = sync_project_file(prepared, lines=lines, status="aligned")
+            _remember_project(project_path)
             with _lock:
                 record["prepared"] = prepared
                 record["lines"] = lines
@@ -1016,6 +1152,7 @@ def open_job(body: OpenSavedRequest):
     try:
         prepared, lines = open_saved(body.model_dump())
         project_path = sync_project_file(prepared, lines=lines, status="aligned")
+        _remember_project(project_path)
         prepared["project_path"] = str(project_path)
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1108,6 +1245,7 @@ def build_job_background(job_id: str, body: BackgroundRequest):
             prepared["background_render"] = build.to_project()
             lines = record.get("lines")
             project_path = sync_project_file(prepared, lines=lines, status=None)
+            _remember_project(project_path)
             saved_project, saved_path = load_project(Path(project_path))
             status = background_status(prepared, output)
             with _lock:
@@ -1149,7 +1287,11 @@ def cleanup_job_backgrounds(job_id: str):
         keep_hashes=keep,
         project_paths=[Path(project_path)] if project_path else [],
     )
-    return {"deleted": deleted}
+    try:
+        pictures_deleted = cleanup_pictures(output)
+    except Exception:
+        pictures_deleted = []
+    return {"deleted": deleted, "pictures_deleted": pictures_deleted}
 
 
 @app.get("/api/jobs/{job_id}/audio")
@@ -1196,10 +1338,12 @@ def realign_job(job_id: str, body: AlignRequest):
         try:
             lines = align_job(prepared, log)
             project_path = sync_project_file(prepared, lines=lines, status="aligned")
+            _remember_project(project_path)
             prepared["project_path"] = str(project_path)
             saved_project, saved_path = load_project(Path(project_path))
             with _lock:
                 record["prepared"] = prepared
+                _invalidate_background(record)
                 record["lines"] = lines
                 record["duration"] = prepared.get("vocal_duration") or record.get("duration") or 0
                 record["project"] = public_project(saved_project, saved_path)
@@ -1254,6 +1398,7 @@ def save_job_timing(job_id: str, body: RenderRequest):
         path = save_timing_file(timing_path_for(prepared), lines)
         prepared["timing_path"] = str(path)
         project_path = sync_project_file(prepared, lines=lines, status="aligned")
+        _remember_project(project_path)
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     with _lock:
@@ -1479,11 +1624,13 @@ def restore_separate(job_id: str):
             prepared["vocal_audio"] = paths["vocal"]
             prepared["restore"] = restore
             project_path = sync_project_file(prepared, status=None)
+            _remember_project(project_path)
             prepared["project_path"] = str(project_path)
             saved_project, saved_path = load_project(Path(project_path))
             with _lock:
                 record["restore"] = restore
                 record["prepared"] = prepared
+                _invalidate_background(record)
                 record["project"] = public_project(saved_project, saved_path)
                 record["log"].append("Đã tách vocal và instrumental. Chỉnh dải tần rồi nghe thử.")
                 record["status"] = "ready"
@@ -1520,6 +1667,7 @@ def restore_preview(job_id: str, body: MixRequest):
     prepared["restore"] = restore
     try:
         project_path = sync_project_file(prepared, status=None)
+        _remember_project(project_path)
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     with _lock:
@@ -1567,6 +1715,7 @@ def restore_export(job_id: str, body: MixRequest):
         if vocal_text:
             prepared["vocal_audio"] = str(_reject_closed(Path(vocal_text)))
         project_path = sync_project_file(prepared, status=None)
+        _remember_project(project_path)
         saved_project, saved_path = load_project(Path(project_path))
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1575,6 +1724,7 @@ def restore_export(job_id: str, body: MixRequest):
         if _jobs.get(job_id) is record:
             record["restore"] = restore
             record["prepared"] = prepared
+            _invalidate_background(record)
             record["project"] = project
             record["status"] = "ready"
             record["log"].append(f"Đã xuất {destination.name}.")

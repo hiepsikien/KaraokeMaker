@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -11,9 +12,13 @@ from PIL import Image
 
 from karaoke.assets import (
     AssetError,
+    assets_usage,
+    cleanup_assets,
     delete_asset,
+    known_project_paths,
     list_assets,
     load_asset,
+    register_project_path,
     save_asset_from_preview,
     validate_asset,
 )
@@ -51,6 +56,169 @@ def make_audio(path: Path, seconds: float = 1.0) -> Path:
         handle.setframerate(8000)
         handle.writeframes(b"".join(struct.pack("<h", 0) for _ in range(int(seconds * 8000))))
     return path
+
+
+def make_asset(
+    data_root: Path,
+    hex_id: str,
+    *,
+    size: int = 100,
+    age_days: float = 10.0,
+    clip_name: str = "loop.mp4",
+    write_meta: bool = True,
+) -> Path:
+    """Create a fake asset folder with controlled size and mtime."""
+    folder = data_root / "assets" / f"bg_{hex_id}"
+    folder.mkdir(parents=True, exist_ok=True)
+    clip = folder / clip_name
+    clip.write_bytes(b"x" * size)
+    stamp = time.time() - age_days * 86400
+    if write_meta:
+        meta_path = folder / "meta.json"
+        meta_path.write_text(
+            json.dumps({"id": folder.name, "clip_file": clip_name}),
+            encoding="utf-8",
+        )
+        os.utime(meta_path, (stamp, stamp))
+    os.utime(clip, (stamp, stamp))
+    os.utime(folder, (stamp, stamp))
+    return folder
+
+
+class AssetQuotaTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.folder.name) / "data"
+        self.assets_root = self.data_root / "assets"
+        self.assets_root.mkdir(parents=True)
+        self.env = patch.dict(os.environ, {"KARAOKE_DATA_DIR": str(self.data_root)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.folder.cleanup()
+
+    def asset_id(self, hex_id: str) -> str:
+        return f"bg_{hex_id}"
+
+    def test_cleanup_keeps_referenced_and_newest(self):
+        oldest = make_asset(self.data_root, "1" * 32, age_days=40)
+        referenced = make_asset(self.data_root, "2" * 32, age_days=30)
+        middle = make_asset(self.data_root, "3" * 32, age_days=20)
+        newest = make_asset(self.data_root, "4" * 32, age_days=10)
+
+        result = cleanup_assets(
+            keep_ids={referenced.name},
+            max_files=2,
+            max_bytes=10**9,
+            min_age_days=0,
+        )
+
+        self.assertEqual(
+            result["deleted"],
+            [self.asset_id("1" * 32), self.asset_id("3" * 32)],
+        )
+        self.assertFalse(oldest.exists())
+        self.assertFalse(middle.exists())
+        self.assertTrue(referenced.exists())
+        self.assertTrue(newest.exists())
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["bytes"], 200)
+        self.assertEqual(result["freed_bytes"], 200)
+
+    def test_cleanup_enforces_byte_quota_oldest_first(self):
+        oldest = make_asset(self.data_root, "a" * 32, size=200, age_days=50)
+        older = make_asset(self.data_root, "b" * 32, size=200, age_days=40)
+        newest = make_asset(self.data_root, "c" * 32, size=200, age_days=30)
+
+        result = cleanup_assets(
+            max_files=100,
+            max_bytes=250,
+            min_age_days=0,
+        )
+
+        self.assertEqual(
+            result["deleted"],
+            [self.asset_id("a" * 32), self.asset_id("b" * 32)],
+        )
+        self.assertFalse(oldest.exists())
+        self.assertFalse(older.exists())
+        self.assertTrue(newest.exists())
+        self.assertEqual(result["freed_bytes"], 400)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["bytes"], 200)
+
+    def test_cleanup_never_deletes_assets_newer_than_min_age(self):
+        old = make_asset(self.data_root, "d" * 32, age_days=10)
+        fresh = make_asset(self.data_root, "e" * 32, age_days=0)
+        also_fresh = make_asset(self.data_root, "f" * 32, age_days=1)
+
+        result = cleanup_assets(max_files=0, max_bytes=0, min_age_days=7)
+
+        self.assertEqual(result["deleted"], [self.asset_id("d" * 32)])
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(also_fresh.exists())
+
+    def test_cleanup_does_not_delete_symlinked_assets(self):
+        real = make_asset(self.data_root, "a" * 32, age_days=30)
+        external = self.data_root / "external"
+        external.mkdir()
+        (external / "loop.mp4").write_bytes(b"y" * 500)
+        link = self.assets_root / self.asset_id("b" * 32)
+        try:
+            link.symlink_to(external, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not supported on this system")
+
+        result = cleanup_assets(max_files=0, max_bytes=0, min_age_days=0)
+
+        self.assertEqual(result["deleted"], [self.asset_id("a" * 32)])
+        self.assertFalse(real.exists())
+        self.assertTrue(link.is_symlink())
+        self.assertTrue((external / "loop.mp4").is_file())
+
+    def test_assets_usage_counts_clips_and_falls_back_to_directory_size(self):
+        make_asset(self.data_root, "a" * 32, size=100, age_days=1)
+        make_asset(
+            self.data_root,
+            "b" * 32,
+            size=250,
+            age_days=1,
+            clip_name="custom.mp4",
+        )
+        no_meta = make_asset(
+            self.data_root,
+            "c" * 32,
+            size=50,
+            age_days=1,
+            write_meta=False,
+        )
+        (no_meta / "extra.bin").write_bytes(b"z" * 25)
+        (self.assets_root / "notes").mkdir()
+
+        external = self.data_root / "external"
+        external.mkdir()
+        (external / "loop.mp4").write_bytes(b"y" * 1000)
+        try:
+            (self.assets_root / self.asset_id("d" * 32)).symlink_to(
+                external, target_is_directory=True
+            )
+        except (OSError, NotImplementedError):
+            pass
+
+        usage = assets_usage()
+
+        self.assertEqual(usage["count"], 3)
+        self.assertEqual(usage["bytes"], 100 + 250 + 75)
+
+
+    def test_project_registry_round_trips_existing_paths(self):
+        project = self.data_root / "song.karaoke.json"
+        project.write_text("{}", encoding="utf-8")
+        register_project_path(project)
+        register_project_path(project)
+        self.assertEqual(known_project_paths(), [project.resolve()])
 
 
 class AssetStoreTests(unittest.TestCase):

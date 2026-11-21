@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   BackgroundEffect,
@@ -20,6 +20,21 @@ type InspectFact = {
   note: string;
   thumbnail: string;
   preview?: string;
+};
+
+type PreviewResult = {
+  id: string;
+  url: string;
+  width: number;
+  height: number;
+  duration: number;
+};
+
+type RenderState = {
+  status: "rendering" | "done" | "error";
+  percent?: number;
+  preview?: PreviewResult;
+  error?: string;
 };
 
 const QUICK_PROMPTS = ["mưa nhẹ", "khói bát mỳ", "gió đèn lồng", "sóng biển"];
@@ -328,6 +343,15 @@ export function AiEffects({
   const [inspectError, setInspectError] = useState("");
   const [assets, setAssets] = useState<StudioAsset[]>([]);
   const [assetsError, setAssetsError] = useState("");
+  const [renderStates, setRenderStates] = useState<Record<string, RenderState>>({});
+  const renderAbortRef = useRef<AbortController | null>(null);
+  const renderTargetRef = useRef("");
+
+  useEffect(() => {
+    return () => {
+      renderAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const current = imageSignature.split("\n").filter(Boolean);
@@ -335,6 +359,12 @@ export function AiEffects({
   }, [imageSignature]);
 
   useEffect(() => {
+    // Leaving an image cancels its in-flight clip render.
+    const target = renderTargetRef.current;
+    renderAbortRef.current?.abort();
+    renderAbortRef.current = null;
+    renderTargetRef.current = "";
+    if (target) setImageRender(target, null);
     setAnalysis(null);
     setSelectedObjectIds([]);
     setError("");
@@ -465,6 +495,178 @@ export function AiEffects({
     });
   }
 
+  function setImageRender(imagePath: string, state: RenderState | null) {
+    setRenderStates((current) => {
+      const next = { ...current };
+      if (state) next[imagePath] = state;
+      else delete next[imagePath];
+      return next;
+    });
+  }
+
+  // Renders the full-resolution clip for one applied effect, then saves it as a
+  // Studio asset so export can reuse it instead of rendering inline.
+  async function startRender(effect: BackgroundEffect, force = false) {
+    if (!effect.image_path) return;
+    if (!force && effect.asset_id) return;
+    const imagePath = effect.image_path;
+    const plan = effect.effect_plan;
+    const imageHash = effect.image_hash;
+    const parsed = Number(imageDuration);
+    const duration = Number.isFinite(parsed) && parsed > 0 ? parsed : 8;
+
+    if (!force) {
+      // Reuse an existing asset with the same image/plan duration instead of
+      // rendering and saving another copy.
+      const reusable = assets.find((asset) => {
+        if (asset.image_hash !== imageHash || asset.profile_id !== outputProfile) return false;
+        const seconds = asset.asset_frames && asset.fps ? asset.asset_frames / asset.fps : asset.loop_duration;
+        if (typeof seconds !== "number") return false;
+        return Math.abs(seconds - duration) <= 0.5 / Math.max(1, Number(asset.fps || 30));
+      });
+      if (reusable) {
+        onEffectsChange((current) =>
+          current.map((item) =>
+            item.image_path === imagePath ? { ...item, asset_id: reusable.id } : item,
+          ),
+        );
+        setImageRender(imagePath, { status: "done" });
+        return;
+      }
+    }
+
+    const previousTarget = renderTargetRef.current;
+    renderAbortRef.current?.abort();
+    if (previousTarget && previousTarget !== imagePath) setImageRender(previousTarget, null);
+    const controller = new AbortController();
+    renderAbortRef.current = controller;
+    renderTargetRef.current = imagePath;
+    setImageRender(imagePath, { status: "rendering", percent: 0 });
+
+    try {
+      const response = await fetch("/api/studio/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_path: imagePath,
+          effect_plan: plan,
+          duration,
+          output_profile: outputProfile,
+          full_resolution: true,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        setImageRender(imagePath, { status: "error", error: await readError(response) });
+        return;
+      }
+      let payload = (await response.json()) as PreviewResult | { job_id?: string };
+      if ("job_id" in payload && payload.job_id) {
+        const jobId = payload.job_id;
+        let result: PreviewResult | null = null;
+        // Full renders run in a background job; poll until done.
+        for (let attempt = 0; attempt < 480; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (controller.signal.aborted) return;
+          const statusResponse = await fetch(`/api/studio/render-job/${jobId}`, {
+            signal: controller.signal,
+          });
+          if (statusResponse.status === 404) {
+            setImageRender(imagePath, {
+              status: "error",
+              error: "Không thấy job render (server có thể đã restart).",
+            });
+            return;
+          }
+          if (!statusResponse.ok) {
+            setImageRender(imagePath, { status: "error", error: await readError(statusResponse) });
+            return;
+          }
+          const status = (await statusResponse.json()) as {
+            status: string;
+            result?: PreviewResult;
+            error?: string;
+            percent?: number;
+          };
+          if (typeof status.percent === "number" && status.percent > 0) {
+            setImageRender(imagePath, { status: "rendering", percent: status.percent });
+          }
+          if (status.status === "done" && status.result) {
+            result = status.result;
+            break;
+          }
+          if (status.status === "error") {
+            setImageRender(imagePath, {
+              status: "error",
+              error: status.error || "Render clip thất bại.",
+            });
+            return;
+          }
+        }
+        if (!result) {
+          setImageRender(imagePath, {
+            status: "error",
+            error: "Render clip quá lâu. Xem terminal Python để kiểm tra.",
+          });
+          return;
+        }
+        payload = result;
+      }
+
+      const preview = payload as PreviewResult;
+      if (!preview?.id) {
+        setImageRender(imagePath, { status: "error", error: "Render không trả về clip." });
+        return;
+      }
+
+      const assetResponse = await fetch("/api/studio/assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preview_id: preview.id,
+          name: fileName(imagePath).replace(/\.[^.]+$/, ""),
+          image_path: imagePath,
+          image_hash: imageHash,
+          effect_plan: plan,
+          duration: preview.duration,
+          output_profile: outputProfile,
+        }),
+        signal: controller.signal,
+      });
+      if (!assetResponse.ok) {
+        setImageRender(imagePath, {
+          status: "error",
+          error: `Đã render clip nhưng chưa lưu được asset: ${await readError(assetResponse)}`,
+        });
+        return;
+      }
+      const assetData = (await assetResponse.json()) as { asset?: { id?: string } };
+      const assetId = assetData.asset?.id;
+      if (!assetId) {
+        setImageRender(imagePath, { status: "error", error: "Không nhận được asset từ server." });
+        return;
+      }
+      onEffectsChange((current) =>
+        current.map((item) =>
+          item.image_path === imagePath ? { ...item, asset_id: assetId } : item,
+        ),
+      );
+      setImageRender(imagePath, { status: "done", preview });
+      void refreshAssets();
+    } catch {
+      if (controller.signal.aborted) return;
+      setImageRender(imagePath, {
+        status: "error",
+        error: "Không kết nối được server render. Kiểm tra server Python đang chạy rồi thử lại.",
+      });
+    } finally {
+      if (renderAbortRef.current === controller) {
+        renderAbortRef.current = null;
+        renderTargetRef.current = "";
+      }
+    }
+  }
+
   function applyEffect() {
     if (!analysis || !selectedImage) return;
     const effect: BackgroundEffect = {
@@ -490,6 +692,8 @@ export function AiEffects({
       ...current.filter((item) => item.image_path !== selectedImage),
       effect,
     ]);
+    // State first, then create the clip in the background (never blocks Apply).
+    void startRender(effect);
   }
 
   function removeEffect() {
@@ -504,6 +708,7 @@ export function AiEffects({
       Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
   );
   const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
+  const currentRenderState = selectedImage ? renderStates[selectedImage] : undefined;
   const assetSeconds = selectedAsset?.asset_frames && selectedAsset?.fps
     ? selectedAsset.asset_frames / selectedAsset.fps
     : selectedAsset?.loop_duration;
@@ -767,6 +972,31 @@ export function AiEffects({
               Xóa
             </button>
           </div>
+          {currentRenderState?.status === "rendering" && (
+            <p className="text-xs leading-5 text-[var(--muted)]">
+              Đang tạo clip…
+              {typeof currentRenderState.percent === "number" && currentRenderState.percent > 0
+                ? ` ${currentRenderState.percent}%`
+                : ""}
+            </p>
+          )}
+          {currentRenderState?.status === "error" && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-red-200">{currentRenderState.error}</span>
+              <button
+                type="button"
+                onClick={() => void startRender(existingEffect, true)}
+                className="text-[var(--gold)] hover:text-white"
+              >
+                Thử lại
+              </button>
+            </div>
+          )}
+          {existingEffect.asset_id &&
+            currentRenderState?.status !== "rendering" &&
+            currentRenderState?.status !== "error" && (
+              <p className="text-xs leading-5 text-emerald-200">Đã tạo clip</p>
+            )}
           <label className="block">
             <span className="mb-1 block text-[11px] text-[var(--muted)]">Clip đã render (Studio)</span>
             <div className="flex gap-2">
@@ -791,6 +1021,15 @@ export function AiEffects({
               </button>
             </div>
           </label>
+          {currentRenderState?.status !== "rendering" && currentRenderState?.status !== "error" && (
+            <button
+              type="button"
+              onClick={() => void startRender(existingEffect, true)}
+              className="text-xs text-[var(--gold)] hover:text-white"
+            >
+              {existingEffect.asset_id ? "Tạo lại clip" : "Tạo clip"}
+            </button>
+          )}
           {assetsError && <p className="text-[11px] text-red-200">{assetsError}</p>}
           {assetProfileMismatch && (
             <p className="text-[11px] leading-4 text-amber-200">
@@ -916,7 +1155,7 @@ export function AiEffects({
             {existingEffect ? "Áp dụng lại" : "Áp dụng"}
           </button>
           <p className="mt-1 text-center text-[11px] leading-4 text-[var(--muted)]">
-            Sau khi chọn object, bấm Áp dụng rồi Render preview (Studio) hoặc Xuất video (Karaoke).
+            Bấm Áp dụng sau khi chọn object — clip chuẩn tự tạo ở nền. Xuất video vẫn dựng trực tiếp nếu clip chưa xong.
           </p>
         </div>
       )}

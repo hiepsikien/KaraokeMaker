@@ -1,7 +1,9 @@
 import json
+import os
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,7 @@ from karaoke.background import (
     _motion_identity,
     background_status,
     build_background,
+    cleanup_pictures,
     profile_fingerprint,
     render_videos,
 )
@@ -118,7 +121,7 @@ class FrameAndIdentityTests(unittest.TestCase):
 
         wider = replace(profile, width=640, height=360)
         self.assertNotEqual(first, _motion_identity(plan, "a" * 64, 80, wider))
-        self.assertEqual(MOTION_CACHE_VERSION, 31)
+        self.assertEqual(MOTION_CACHE_VERSION, 32)
 
     def test_profile_fingerprint_includes_cover_typography(self):
         profile = small_profile()
@@ -181,6 +184,207 @@ class BackgroundBuildTests(unittest.TestCase):
         )
         self.assertEqual(first.path, second.path)
         self.assertEqual(first.hash, second.hash)
+
+    def test_static_background_uses_concat_copy_and_pins_segments(self):
+        segments_root = self.root / "segments"
+        logs: list[str] = []
+        with patch("karaoke.background.SEGMENT_CACHE_ROOT", segments_root), patch(
+            "karaoke.background._assemble_background_filter"
+        ) as fallback:
+            build = build_background(
+                self.prepared,
+                output_dir=self.root,
+                profile=self.profile,
+                log=logs.append,
+            )
+        fallback.assert_not_called()
+        self.assertTrue(any(line.startswith("Hiệu ứng:") for line in logs), logs)
+        self.assertEqual(build.total_frames, 12)
+        segment_files = list(segments_root.glob("static-*.mp4"))
+        self.assertTrue(segment_files)
+        for path in segment_files:
+            self.assertTrue(path.with_name(f".{path.name}.pin").is_file())
+
+    def test_motion_segments_concat_without_reencode(self):
+        import hashlib
+
+        image_hash = "sha256:" + hashlib.sha256(self.image.read_bytes()).hexdigest()
+        plan = {
+            "version": 1,
+            "image_hash": image_hash,
+            "profile_id": "landscape_1080p",
+            "fit_transform": {
+                "mode": "contain",
+                "source_width": 320,
+                "source_height": 180,
+                "frame_width": 320,
+                "frame_height": 180,
+                "scale": 1.0,
+                "offset_x": 0.0,
+                "offset_y": 0.0,
+            },
+            "regions": [
+                {
+                    "id": "outdoor",
+                    "polygon": [
+                        {"x": 0.0, "y": 0.0},
+                        {"x": 1.0, "y": 0.0},
+                        {"x": 1.0, "y": 1.0},
+                        {"x": 0.0, "y": 1.0},
+                    ],
+                }
+            ],
+            "items": [
+                {
+                    "effect": "rain",
+                    "target_ids": [],
+                    "params": {"intensity": 0.5, "audio": False},
+                }
+            ],
+        }
+        prepared = dict(self.prepared)
+        prepared["image_duration"] = 0.5
+        prepared["background_effects"] = [
+            {
+                "image_path": str(self.image),
+                "image_hash": image_hash,
+                "effect_plan": plan,
+            }
+        ]
+        with patch("karaoke.living.CACHE_ROOT", self.root / "living"), patch(
+            "karaoke.background.SEGMENT_CACHE_ROOT", self.root / "segments"
+        ), patch("karaoke.background._assemble_background_filter") as fallback:
+            build = build_background(
+                prepared,
+                output_dir=self.root,
+                profile=self.profile,
+                log=lambda _message: None,
+            )
+        fallback.assert_not_called()
+        self.assertEqual(build.segments[0]["kind"], "motion")
+        meta = probe(build.path)
+        video = next(stream for stream in meta["streams"] if stream["codec_type"] == "video")
+        self.assertEqual(video["nb_frames"], "12")
+
+    def test_picture_is_reused_for_unchanged_lines(self):
+        from karaoke import background as background_module
+
+        lines = [
+            {
+                "text": "xin chào",
+                "start": 0.1,
+                "end": 0.8,
+                "words": [
+                    {"text": "xin", "start": 0.1, "end": 0.4},
+                    {"text": "chào", "start": 0.4, "end": 0.8},
+                ],
+            }
+        ]
+        with patch(
+            "karaoke.background.render_picture",
+            wraps=background_module.render_picture,
+        ) as fake:
+            render_videos(
+                lines=lines,
+                title="Bài",
+                artist="Tác giả",
+                cover_line="Lời",
+                cover_photo=self.image,
+                background_images=[self.image],
+                original_audio=self.audio,
+                instrumental_audio=self.audio,
+                output_dir=self.root,
+                vocal_name="vocal-a.mp4",
+                instrumental_name="inst-a.mp4",
+                cover_duration=0.2,
+                image_duration=0.5,
+                background_effects=[],
+                output_profile="landscape_1080p",
+                log=lambda _message: None,
+            )
+            render_videos(
+                lines=lines,
+                title="Bài",
+                artist="Tác giả",
+                cover_line="Lời",
+                cover_photo=self.image,
+                background_images=[self.image],
+                original_audio=self.audio,
+                instrumental_audio=self.audio,
+                output_dir=self.root,
+                vocal_name="vocal-b.mp4",
+                instrumental_name="inst-b.mp4",
+                cover_duration=0.2,
+                image_duration=0.5,
+                background_effects=[],
+                output_profile="landscape_1080p",
+                log=lambda _message: None,
+            )
+        self.assertEqual(fake.call_count, 1)
+        self.assertEqual(
+            len(list((self.root / ".karaoke-media" / "pictures").glob("picture-*.mp4"))),
+            1,
+        )
+
+    def test_validate_background_result_is_cached(self):
+        build = build_background(
+            self.prepared,
+            output_dir=self.root,
+            profile=self.profile,
+            log=lambda _message: None,
+        )
+        from karaoke.background import _validate_background
+
+        valid, _reason = _validate_background(
+            build.path,
+            width=self.profile.width,
+            height=self.profile.height,
+            fps=self.profile.fps,
+            total_frames=build.total_frames,
+        )
+        self.assertTrue(valid)
+        with patch("karaoke.background._probe_video") as probe_mock:
+            valid, _reason = _validate_background(
+                build.path,
+                width=self.profile.width,
+                height=self.profile.height,
+                fps=self.profile.fps,
+                total_frames=build.total_frames,
+            )
+        self.assertTrue(valid)
+        probe_mock.assert_not_called()
+
+    def test_cleanup_pictures_keeps_current_and_recent(self):
+        root = self.root / ".karaoke-media" / "pictures"
+        root.mkdir(parents=True)
+        old = root / "picture-old.mp4"
+        current = root / "picture-current.mp4"
+        old.write_bytes(b"old")
+        current.write_bytes(b"new")
+        older = time.time() - 10 * 86400
+        os.utime(old, (older, older))
+        deleted = cleanup_pictures(self.root, keep=[current], max_files=1, min_age_days=0)
+        self.assertTrue(current.is_file())
+        self.assertFalse(old.is_file())
+        self.assertEqual(deleted, [old.name])
+
+    def test_invalid_clip_workers_env_falls_back(self):
+        second = make_image(self.root / "bg2.png", color=(200, 10, 10))
+        prepared = dict(self.prepared)
+        prepared["background_images"] = [str(self.image), str(second)]
+        prepared["image_duration"] = 0.5
+        logs: list[str] = []
+        with patch.dict(os.environ, {"KARAOKE_CLIP_WORKERS": "not-a-number"}), patch(
+            "karaoke.background.SEGMENT_CACHE_ROOT", self.root / "segments"
+        ):
+            build = build_background(
+                prepared,
+                output_dir=self.root,
+                profile=self.profile,
+                log=logs.append,
+            )
+        self.assertTrue(build.path.is_file())
+        self.assertTrue(any("không hợp lệ" in line for line in logs), logs)
 
     def test_force_rebuilds_and_changed_image_changes_hash(self):
         first = build_background(

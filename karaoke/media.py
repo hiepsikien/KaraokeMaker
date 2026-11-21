@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
 import unicodedata
 import wave
 from contextlib import contextmanager
@@ -31,6 +32,21 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 class MediaError(RuntimeError):
     pass
+
+
+# ffprobe is a subprocess, so cache by file identity. A status poll must not
+# spawn three probes per second for an unchanged file.
+_PROBE_CACHE: dict[tuple[str, int, int], float] = {}
+_CHANNEL_CACHE: dict[tuple[str, int, int], int] = {}
+_PROBE_LOCK = threading.Lock()
+
+
+def _probe_key(path: Path) -> tuple[str, int, int]:
+    try:
+        stat = Path(path).stat()
+    except OSError as error:
+        raise MediaError(f"Không đọc được file: {Path(path).name}") from error
+    return (str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns)
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
@@ -91,6 +107,11 @@ def pcm16_wav(path: Path):
 
 
 def probe_duration(path: Path) -> float:
+    key = _probe_key(path)
+    with _PROBE_LOCK:
+        cached = _PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
     result = subprocess.run(
         [
             "ffprobe",
@@ -109,12 +130,20 @@ def probe_duration(path: Path) -> float:
     if result.returncode != 0:
         raise MediaError(result.stderr.strip() or f"Không đọc được thời lượng của {path.name}.")
     try:
-        return float(result.stdout.strip())
+        value = float(result.stdout.strip())
     except ValueError as error:
         raise MediaError(f"Thời lượng không hợp lệ: {path.name}") from error
+    with _PROBE_LOCK:
+        _PROBE_CACHE[key] = value
+    return value
 
 
 def probe_channels(path: Path) -> int:
+    key = _probe_key(path)
+    with _PROBE_LOCK:
+        cached = _CHANNEL_CACHE.get(key)
+    if cached is not None:
+        return cached
     result = subprocess.run(
         [
             "ffprobe",
@@ -135,8 +164,11 @@ def probe_channels(path: Path) -> int:
     try:
         channels = int(result.stdout.strip())
     except ValueError:
-        return 2
-    return channels if channels > 0 else 2
+        channels = 2
+    value = channels if channels > 0 else 2
+    with _PROBE_LOCK:
+        _CHANNEL_CACHE[key] = value
+    return value
 
 
 def _open_rgb(source: Path) -> Image.Image:

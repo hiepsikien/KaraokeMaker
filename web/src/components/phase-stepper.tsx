@@ -1,17 +1,16 @@
 import type { Phase } from "@/lib/types";
 
-const STEPS: { id: Phase; label: string }[] = [
-  { id: "setup", label: "Khai báo" },
-  { id: "restore", label: "Tách và trộn" },
-  { id: "align", label: "Ghép chữ" },
-  { id: "edit", label: "Biên tập" },
-  { id: "export", label: "Xuất" },
+// Presentation only: several internal phases share one user-facing step.
+// The state machine (Phase) stays unchanged; "home" hides the stepper.
+const STEPS: { id: string; label: string; phases: Phase[] }[] = [
+  { id: "prepare", label: "Chuẩn bị", phases: ["setup", "restore", "align"] },
+  { id: "edit", label: "Biên tập", phases: ["edit"] },
+  { id: "export", label: "Xuất", phases: ["export"] },
 ];
 
 function stepIndex(phase: Phase) {
   if (phase === "home") return -1;
-  if (phase === "export") return STEPS.length - 1;
-  return STEPS.findIndex((step) => step.id === phase);
+  return STEPS.findIndex((step) => step.phases.includes(phase));
 }
 
 export function PhaseStepper({ phase }: { phase: Phase }) {
