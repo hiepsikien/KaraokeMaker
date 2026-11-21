@@ -204,6 +204,7 @@ class RenderRequest(BaseModel):
     lines: list[LineIn] = Field(default_factory=list)
     output_dir: str = ""
     format: str = "mp4"
+    rebuild_background: bool = False
 
 
 _AUDIO_TYPES = {
@@ -1058,7 +1059,11 @@ def start_render(job_id: str, body: RenderRequest):
         record["error"] = ""
         prepared = dict(record["prepared"])
         lines = [line.model_dump() for line in body.lines]
-        export_options = {"output_dir": body.output_dir, "format": body.format}
+        export_options = {
+            "output_dir": body.output_dir,
+            "format": body.format,
+            "rebuild_background": body.rebuild_background,
+        }
 
     def log(message: str) -> None:
         with _lock:

@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 import math
-import shutil
 import subprocess
 import threading
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from karaoke.ambient import MAX_DURATION as MAX_AMBIENT_DURATION
-from karaoke.ambient import synthesize as synthesize_ambience
-from karaoke.living import plan_has_motion, render_motion_loop
-from karaoke.media import (
-    MediaError,
-    load_font,
-    make_cover,
-    prepare_slide,
-    probe_channels,
-    probe_duration,
-)
+from karaoke.media import MediaError, load_font, probe_channels
 from karaoke.profiles import RenderProfile, get_profile
 
 TEXT_FPS = 12
@@ -42,8 +31,11 @@ def _run(command: list[str], log) -> None:
     )
     assert process.stdout is not None
     tail = ""
-    for line in process.stdout:
-        tail = line.strip() or tail
+    try:
+        for line in process.stdout:
+            tail = line.strip() or tail
+    finally:
+        process.stdout.close()
     code = process.wait()
     if code != 0:
         raise MediaError(tail or "FFmpeg dừng với lỗi.")
@@ -324,6 +316,9 @@ def _overlay_text(
     destination: Path,
     log,
     profile: RenderProfile | None = None,
+    *,
+    total_frames: int | None = None,
+    progress=None,
 ) -> None:
     """Stream lyric frames into FFmpeg. Nothing is written as a PNG sequence."""
     profile = profile or get_profile(None)
@@ -331,7 +326,10 @@ def _overlay_text(
     strip_top = profile.strip_rect[1]
     font_size = _fit_lyric_font_size(lines, profile)
     layouts = [_render_text_pair(line, profile, font_size) for line in lines]
-    frame_count = max(1, int(round(total_duration * TEXT_FPS)))
+    if total_frames is not None and total_frames > 0:
+        frame_count = max(1, int(math.ceil(total_frames * TEXT_FPS / max(1, profile.fps))))
+    else:
+        frame_count = max(1, int(round(total_duration * TEXT_FPS)))
     blank = Image.new("RGBA", (profile.width, strip_height), (0, 0, 0, 0))
     command = [
         "ffmpeg",
@@ -360,6 +358,10 @@ def _overlay_text(
         "-crf",
         "20",
         "-an",
+    ]
+    if total_frames is not None and total_frames > 0:
+        command += ["-frames:v", str(total_frames)]
+    command += [
         "-movflags",
         "+faststart",
         str(destination),
@@ -389,11 +391,17 @@ def _overlay_text(
             process.stdin.write(frame.tobytes())
             if index % 96 == 0:
                 log(f"Vẽ chữ karaoke {index + 1}/{frame_count}.")
+            if progress is not None and (index % 8 == 0 or index + 1 == frame_count):
+                try:
+                    progress(index + 1, frame_count)
+                except Exception:
+                    pass
     except BrokenPipeError:
         pass
     finally:
         process.stdin.close()
     reader.join()
+    process.stdout.close()
     code = process.wait()
     if code != 0:
         raise MediaError(tail[-1] if tail else "FFmpeg dừng với lỗi.")
@@ -515,170 +523,3 @@ def _ambient_kind(
                 if isinstance(params, dict) and _audio_requested(params.get("audio")):
                     return kind
     return None
-
-
-def render_videos(
-    *,
-    lines: list[dict],
-    title: str,
-    artist: str,
-    cover_line: str,
-    cover_photo: Path,
-    background_images: list[Path],
-    original_audio: Path,
-    instrumental_audio: Path,
-    output_dir: Path,
-    vocal_name: str,
-    instrumental_name: str,
-    cover_duration: float,
-    image_duration: float,
-    background_effects: list[dict] | None = None,
-    output_profile: str = "landscape_1080p",
-    log,
-) -> tuple[Path, Path]:
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        raise MediaError("Chưa có ffmpeg hoặc ffprobe trong PATH.")
-
-    profile = get_profile(output_profile)
-    work = output_dir / ".karaoke-work"
-    if work.exists():
-        shutil.rmtree(work)
-    slides = work / "slides"
-    slides.mkdir(parents=True)
-
-    try:
-        log("Đang dựng trang bìa.")
-        cover_card = slides / "cover.jpg"
-        make_cover(cover_photo, title, artist, cover_line, cover_card, profile=profile)
-
-        effect_by_path: dict[str, dict] = {}
-        for effect in background_effects or []:
-            if not isinstance(effect, dict):
-                continue
-            raw = str(effect.get("image_path") or "").strip()
-            if not raw:
-                continue
-            effect_by_path[_image_key(Path(raw))] = effect
-
-        prepared: list[tuple[Path, bool]] = []
-        for index, image in enumerate(background_images):
-            plan = _effect_plan(effect_by_path.get(_image_key(image)))
-            clip: Path | None = None
-            if plan is not None and plan_has_motion(plan):
-                try:
-                    clip = render_motion_loop(
-                        image,
-                        plan,
-                        slides / f"bg-{index:02d}.mp4",
-                        duration=image_duration,
-                        width=profile.width,
-                        height=profile.height,
-                        fps=profile.fps,
-                        fit_mode=profile.fit_mode,
-                        # Background effects render before the lyric overlay.
-                        # A zero-height strip explicitly means "do not mask the
-                        # bottom"; the semi-opaque text/bar drawn later keeps
-                        # lyrics readable. Passing None would enable the legacy
-                        # bottom-280px mask instead.
-                        strip_rect=(0, 0, 0, 0),
-                        log=log,
-                    )
-                except Exception as error:  # keep export usable if the effect fails
-                    log(f"Không tạo được hiệu ứng cho {image.name}: {error}")
-                    clip = None
-            if clip is not None and Path(clip).is_file():
-                prepared.append((Path(clip), True))
-            else:
-                destination = slides / f"bg-{index:02d}.jpg"
-                prepare_slide(image, destination, profile=profile)
-                prepared.append((destination, False))
-        if not prepared:
-            raise MediaError("Chưa có ảnh nền để dựng slideshow.")
-
-        song_length = max(probe_duration(original_audio), probe_duration(instrumental_audio))
-        # FFmpeg -t 0 does not produce a zero-length input; skip the cover clip.
-        cover_duration = max(0.0, float(cover_duration))
-        if cover_duration < 0.05:
-            cover_duration = 0.0
-        total = cover_duration + song_length
-
-        ambience: Path | None = None
-        loop_ambience = total > MAX_AMBIENT_DURATION
-        ambient_kind = _ambient_kind(background_effects, background_images)
-        if ambient_kind is not None:
-            try:
-                log(f"Đang tạo tiếng nền {ambient_kind} rất nhỏ.")
-                ambience = synthesize_ambience(ambient_kind, total, work / "ambience.wav")
-            except Exception as error:  # ambience is optional; keep the export usable
-                log(f"Không tạo được tiếng nền: {error}")
-                ambience = None
-
-        clips: list[tuple[Path, float, bool]] = []
-        if cover_duration > 0:
-            clips.append((cover_card, cover_duration, False))
-        remaining = song_length
-        index = 0
-        while remaining > 0.05:
-            duration = min(image_duration, remaining)
-            media, is_video = prepared[index % len(prepared)]
-            clips.append((media, duration, is_video))
-            remaining -= duration
-            index += 1
-        log("Đang dựng hình nền.")
-        slideshow = work / "slideshow.mp4"
-        slide_command = ["ffmpeg", "-y"]
-        for media, duration, is_video in clips:
-            if is_video:
-                slide_command += ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(media)]
-            else:
-                slide_command += ["-loop", "1", "-t", f"{duration:.3f}", "-i", str(media)]
-        filters = [
-            f"[{index}:v]fps={profile.fps},scale={profile.width}:{profile.height},setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v{index}]"
-            for index in range(len(clips))
-        ]
-        filters.append("".join(f"[v{index}]" for index in range(len(clips))) + f"concat=n={len(clips)}:v=1:a=0[v]")
-        slide_command += [
-            "-filter_complex",
-            ";".join(filters),
-            "-map",
-            "[v]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-an",
-            str(slideshow),
-        ]
-        _run(slide_command, log)
-
-        silent = work / "picture.mp4"
-        log("Đang vẽ chữ và ghép lên hình.")
-        _overlay_text(lines, total, cover_duration, slideshow, silent, log, profile=profile)
-
-        vocal_out = output_dir / vocal_name
-        instrumental_out = output_dir / instrumental_name
-        _mux(
-            silent,
-            original_audio,
-            vocal_out,
-            cover_duration,
-            log,
-            "có giọng",
-            ambience=ambience,
-            loop_ambience=loop_ambience,
-        )
-        _mux(
-            silent,
-            instrumental_audio,
-            instrumental_out,
-            cover_duration,
-            log,
-            "không lời",
-            ambience=ambience,
-            loop_ambience=loop_ambience,
-        )
-        return vocal_out, instrumental_out
-    finally:
-        shutil.rmtree(work, ignore_errors=True)

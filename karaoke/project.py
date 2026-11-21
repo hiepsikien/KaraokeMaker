@@ -105,6 +105,7 @@ def empty_project() -> dict:
         "cover_image": "",
         "background_images": [],
         "background_effects": [],
+        "background_render": None,
         "output_profile": "landscape_1080p",
         "output_dir": "",
         "cover_duration": 5.0,
@@ -151,6 +152,8 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     project["cover_image"] = str(payload.get("cover_image") or "").strip()
     project["background_images"] = _string_list(payload.get("background_images"))
     project["background_effects"] = _effects_list(payload.get("background_effects"))
+    raw_background = payload.get("background_render")
+    project["background_render"] = dict(raw_background) if isinstance(raw_background, dict) else None
     project["output_profile"] = normalize_profile_id(payload.get("output_profile"))
     project["output_dir"] = str(payload.get("output_dir") or "").strip()
     try:
@@ -191,6 +194,11 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "cover_image": project.get("cover_image") or "",
         "background_images": list(project.get("background_images") or []),
         "background_effects": _effects_list(project.get("background_effects")),
+        "background_render": (
+            dict(project["background_render"])
+            if isinstance(project.get("background_render"), dict)
+            else None
+        ),
         "output_profile": normalize_profile_id(project.get("output_profile")),
         "output_dir": project.get("output_dir") or "",
         "cover_duration": float(project.get("cover_duration") or 0),
@@ -308,6 +316,11 @@ def prepared_from_project(project: dict) -> dict:
         "instrumental_audio": str(project.get("instrumental_audio") or "").strip(),
         "background_images": list(project.get("background_images") or []),
         "background_effects": _effects_list(project.get("background_effects")),
+        "background_render": (
+            dict(project["background_render"])
+            if isinstance(project.get("background_render"), dict)
+            else None
+        ),
         "output_profile": normalize_profile_id(project.get("output_profile")),
         "cover_image": str(project.get("cover_image") or "").strip(),
         "output_dir": str(project.get("output_dir") or "").strip(),

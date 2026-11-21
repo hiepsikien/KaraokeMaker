@@ -19,6 +19,10 @@ from karaoke.profiles import RenderProfile, get_profile
 
 WIDTH = 1920
 HEIGHT = 1080
+# Bump when prepare_slide()/fit logic or cover card rendering changes so cached
+# background identity is invalidated.
+IMAGE_PREP_VERSION = 1
+COVER_RENDER_VERSION = 1
 STRIP_HEIGHT = 280
 FONT_PATH = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
 AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg"}

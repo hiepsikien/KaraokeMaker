@@ -140,7 +140,9 @@ karaoke/
   align.py       # căn lời vào vocal và kéo chữ về đoạn đang hát
   lyrics.py      # bỏ dòng ghi chú, so khớp tên bài
   media.py       # ảnh, thời lượng, chuyển vocal sang WAV
-  render.py      # dựng hình, đếm ngược, chữ và hai file MP4
+  living.py      # hiệu ứng nền động (mưa, khói, nước…)
+  background.py  # dựng nền có hiệu ứng trước, rồi overlay lời và ghép tiếng
+  render.py      # dựng chữ, đếm ngược, overlay và mux
 web/
   src/app        # trang Next.js
   src/components/maker-form.tsx      # điều phối các bước

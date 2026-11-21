@@ -146,6 +146,25 @@ export type DirectorAnalysis = {
   intent_fallback?: boolean;
 };
 
+export type BackgroundRender = {
+  schema_version?: number;
+  builder_version?: number;
+  hash: string;
+  profile_id?: string;
+  profile_fingerprint?: string;
+  source_output_dir?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  total_frames?: number;
+  cover_frames?: number;
+  song_frames?: number;
+  image_frames?: number;
+  degraded?: boolean;
+  created?: string;
+  segments?: unknown[];
+};
+
 export type Project = {
   version: number;
   status: "draft" | "aligned" | "exported";
@@ -159,6 +178,7 @@ export type Project = {
   cover_image: string;
   background_images: string[];
   background_effects: BackgroundEffect[];
+  background_render?: BackgroundRender | null;
   output_profile: string;
   output_dir: string;
   cover_duration: number;
