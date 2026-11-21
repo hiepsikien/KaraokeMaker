@@ -173,7 +173,7 @@ EFFECT_LABELS = {
 # v5: first AI Studio / inventory-v3 pass.
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks + painted-smoke billow warp.
-MOTION_CACHE_VERSION = 8
+MOTION_CACHE_VERSION = 12
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1157,12 +1157,12 @@ def _steam_sources(
                 # Keep the plume inside the painted smoke body; starting at
                 # the box bottom would draw over a burning ship below it.
                 cy = y1 + box_height * 0.72
-                rise = max(box_height * 1.0, height * 0.06)
-                rise = min(rise, height * 0.45)
+                rise = max(box_height * 1.8, height * 0.12)
+                rise = min(rise, height * 0.65)
                 plume_scale = max(4.0, min(box_width, box_height * 1.35))
                 base_radius = max(3.0, plume_scale * 0.12)
                 max_radius = max(base_radius + 3.0, plume_scale * 0.52)
-                spread = 0.32
+                spread = 0.14
                 sample_box = (
                     x1 + box_width * 0.22,
                     y1 + box_height * 0.42,
@@ -1170,21 +1170,24 @@ def _steam_sources(
                     y2,
                 )
             count = max(
-                12,
+                22,
                 int(
                     round(
-                        36
+                        64
                         * (0.5 + 0.7 * intensity)
                         * (0.55 + min(1.0, box_width / max(1.0, width * 0.24)))
                     )
                 ),
             )
-            base_alpha = 0.07 * max(
+            base_alpha = 0.18 * max(
                 0.45, min(1.0, (height * 0.16) / max(1.0, box_height))
             )
             color = _sample_smoke_color(
                 base_array, sample_box, np.asarray((78.0, 73.0, 68.0))
             )
+            # Dark painted smoke would hide the rising particles; keep the
+            # rising wisps visibly lighter than the plume behind them.
+            color = np.maximum(color, np.asarray((135.0, 128.0, 120.0)))
         else:
             if opening is not None:
                 cx, cy = _map_point(opening, transform, width, height)
@@ -1270,14 +1273,10 @@ def _steam_sources(
                         "right": warp_right,
                         "bottom": warp_bottom,
                         "mask": stem[warp_top:warp_bottom, warp_left:warp_right].copy(),
-                        "amplitude": max(
-                            1.0,
-                            min(
-                                6.0 * (height / HEIGHT),
-                                min(box_width, box_height) * 0.03,
-                            ),
-                        ),
-                        "cycles": max(1, int(round(seconds / 6.0))),
+                        # The painted smoke stays static; rising particles provide
+                        # the upward motion. A warp here reads as swirling in place.
+                        "amplitude": 0.0,
+                        "cycles": max(1, int(round(seconds / 8.0))),
                         "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                     }
 
@@ -1360,13 +1359,13 @@ def _steam_frame(
             * source["strength"]
             * envelope
         ).astype(np.float32)
-        curl_amplitude = max(2.0, source["box_width"] * (0.26 if source["smoke"] else 0.20))
+        curl_amplitude = max(1.0, source["box_width"] * (0.08 if source["smoke"] else 0.20))
         curl = (
             curl_amplitude
             * np.sin(2.0 * math.pi * (source["curl_cycles"] * progress + source["curl_phase"]))
             * envelope
         )
-        drift = source["jitter"] * source["box_width"] * (0.18 if source["smoke"] else 0.10) * (
+        drift = source["jitter"] * source["box_width"] * (0.05 if source["smoke"] else 0.10) * (
             0.35 + 0.65 * progress
         )
         span = source["offsets"] * source["box_width"] * source["spread"] * (
@@ -1409,13 +1408,15 @@ def _warp_smoke_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
     local_x = grid_x / max(1.0, float(width - 1))
     local_y = grid_y / max(1.0, float(height - 1))
     phase = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
-    lift = 0.55 + 0.45 * np.sin(
+    # Bias the sample downward (positive offset) so the painted plume appears
+    # to lift upward instead of oscillating around its rest position.
+    lift = 0.78 + 0.22 * np.sin(
         2.0 * math.pi * (local_x * 1.8 + local_y * 1.1) + phase
     )
-    lift += 0.12 * np.sin(2.0 * phase + local_y * 3.0)
+    lift += 0.05 * np.sin(2.0 * phase + local_y * 3.0)
     curl = np.sin(2.0 * math.pi * (local_y * 2.4 - local_x * 0.9) + phase + 0.7)
     sample_y = grid_y + spec["amplitude"] * lift
-    sample_x = grid_x + spec["amplitude"] * 0.45 * curl
+    sample_x = grid_x + spec["amplitude"] * 0.30 * curl
 
     sample_x = np.clip(sample_x, 0.0, width - 1.0)
     sample_y = np.clip(sample_y, 0.0, height - 1.0)
@@ -1714,12 +1715,43 @@ def _water_occluder_shapes(plan: dict) -> list[list[tuple[float, float]]]:
     return shapes
 
 
+def _water_detail_mask(
+    base_array: np.ndarray | None, width: int, height: int
+) -> np.ndarray | None:
+    """Protect vertical structures (people, stakes, masts) missed by inventory.
+
+    Water shimmer is a horizontal pixel warp; a strong horizontal gradient with
+    a weaker vertical gradient is a vertical edge. Dilate it so the whole small
+    figure is protected, not just its outline.
+    """
+    if base_array is None or base_array.size == 0:
+        return None
+    image = base_array
+    if image.dtype != np.uint8:
+        image = np.clip(image, 0, 255).astype(np.uint8)
+    gray = (
+        image[:, :, 0].astype(np.float32) * 0.2126
+        + image[:, :, 1].astype(np.float32) * 0.7152
+        + image[:, :, 2].astype(np.float32) * 0.0722
+    )
+    gx = np.zeros_like(gray)
+    gy = np.zeros_like(gray)
+    gx[:, 1:] = np.abs(np.diff(gray, axis=1))
+    gy[1:, :] = np.abs(np.diff(gray, axis=0))
+    score = np.clip((gx - 0.65 * gy - 8.0) / 30.0, 0.0, 1.0)
+    detail = Image.fromarray((score * 255.0).astype(np.uint8), "L")
+    detail = detail.filter(ImageFilter.MaxFilter(5))
+    detail = detail.filter(ImageFilter.GaussianBlur(max(1.0, 2.0 * height / HEIGHT)))
+    return np.asarray(detail, dtype=np.float32) / 255.0
+
+
 def _build_water_mask(
     plan: dict,
     transform: dict,
     width: int,
     height: int,
     prevent: np.ndarray,
+    base_array: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """Feathered 0..1 mask of the water surfaces, already protect/strip-safe."""
     items = _effect_items(plan, "water")
@@ -1743,6 +1775,9 @@ def _build_water_mask(
     mask = mask.filter(ImageFilter.GaussianBlur(feather))
     array = np.asarray(mask, dtype=np.float32) / 255.0
     array *= prevent
+    detail = _water_detail_mask(base_array, width, height)
+    if detail is not None:
+        array *= 1.0 - 0.85 * detail
     return array
 
 
@@ -1754,12 +1789,13 @@ def _water_spec(
     seconds: float,
     prevent: np.ndarray,
     log,
+    base_array: np.ndarray | None = None,
 ) -> dict | None:
     """Prepare the W1 shimmer, or return None when there is no liquid surface."""
     items = _effect_items(plan, "water")
     if not items:
         return None
-    mask = _build_water_mask(plan, transform, width, height, prevent)
+    mask = _build_water_mask(plan, transform, width, height, prevent, base_array=base_array)
     if mask is None or float(mask.max()) <= 1e-4:
         log("Bỏ qua nước: không có vùng/object nước (liquid/water/sea/river) khớp.")
         return None
@@ -2359,7 +2395,16 @@ def _render_loop(
         else []
     )
     water_spec = (
-        _water_spec(plan, transform, out_width, out_height, seconds, prevent, log)
+        _water_spec(
+            plan,
+            transform,
+            out_width,
+            out_height,
+            seconds,
+            prevent,
+            log,
+            base_array=base_array,
+        )
         if "water" in effects
         else None
     )

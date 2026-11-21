@@ -364,9 +364,12 @@ speed * T = k * span
 - **Studio preview 640 px**: 4 s/5 effect trước mất 38,9 s ở 1080p (proxy timeout →
   “Internal Server Error”); nay render 640×360 trong ~2,6 s. Export Karaoke vẫn full
   profile. Temp file có UUID + lock tuần tự cho preview; traceback in ra terminal.
-- **Smoke không warp thuyền**: mask occluder cắt tất cả object rắn (ship/sail/flag/
-  fire/pot); chỉ pixel tối của khói được warp; giảm biên độ (≤6 px ở 1080p), tốc độ,
-  alpha và số hạt. Cache motion bump để không dùng loop cũ.
+- **Smoke bốc lên, không warp thuyền**: tắt warp dao động của khói; particle rising
+  (rise 1.8× box, màu sáng hơn) tạo hướng bốc lên; mask occluder cắt tất cả object rắn
+  (ship/sail/flag/fire/pot). Cache motion bump để không dùng loop cũ.
+- **Nước không warp người/wooden stakes**: inventory v6 thêm người đứng/wading dưới
+  nước và stakes; water mask cắt object + edge-protect heuristic cho cấu trúc đứng
+  mà inventory có thể bỏ sót. Preview/export dùng mask mới.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
