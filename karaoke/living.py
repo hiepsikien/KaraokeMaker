@@ -208,7 +208,7 @@ EFFECT_LABELS = {
 # v6: full-surface water bob, smoke-aware plumes, cloth/flag sway, rain streaks.
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
-MOTION_CACHE_VERSION = 26
+MOTION_CACHE_VERSION = 27
 
 STEAM_COLOR = (238.0, 241.0, 244.0)
 STEAM_AFFORDANCES = (
@@ -1397,6 +1397,38 @@ def _wind_candidate(entry: dict) -> bool:
     return _matches_hints(entry, WIND_AFFORDANCES, WIND_LABELS)
 
 
+def _cloth_candidate(entry: dict) -> bool:
+    return _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS)
+
+
+def _object_pivot(entry: dict) -> tuple[float, float]:
+    pivot = entry["anchors"].get("pivot")
+    if pivot is not None:
+        return pivot
+    x1, y1, x2, y2 = entry["box"]
+    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def _same_support(first: dict, second: dict) -> bool:
+    """True when two cloth props hang from the same mast/attachment.
+
+    A flag above a sail shares the sail's pivot x; flags on other masts do not.
+    This lets a wind target on a sail include the flag on the same support
+    without hardcoding any object id or image.
+    """
+    first_x, first_y = _object_pivot(first)
+    second_x, second_y = _object_pivot(second)
+    first_box = first["box"]
+    second_box = second["box"]
+    first_height = abs(first_box[3] - first_box[1])
+    second_height = abs(second_box[3] - second_box[1])
+    return (
+        abs(first_x - second_x) <= 0.06
+        and abs(first_y - second_y)
+        <= max(first_height, second_height) * 1.5 + 0.02
+    )
+
+
 def _warp_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
     height, width = crop.shape[:2]
     grid_x, grid_y = np.meshgrid(
@@ -1450,11 +1482,19 @@ def _wind_specs(
     rng = np.random.default_rng(seed ^ 0x51D)
     size_scale = height / HEIGHT
     specs: list[dict] = []
-    for entry in objects:
-        if targets and entry["id"] not in targets:
-            continue
-        if not targets and not _wind_candidate(entry):
-            continue
+    if targets:
+        targeted = [entry for entry in objects if entry["id"] in targets]
+        wind_entries = list(targeted)
+        # A sail target should also move the flag on the same mast; generic
+        # pivot-proximity expansion avoids per-image object ids.
+        for candidate in objects:
+            if candidate["id"] in targets or not _cloth_candidate(candidate):
+                continue
+            if any(_same_support(candidate, target) for target in targeted):
+                wind_entries.append(candidate)
+    else:
+        wind_entries = [entry for entry in objects if _wind_candidate(entry)]
+    for entry in wind_entries:
         x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
         box_width, box_height = x2 - x1, y2 - y1
         if box_width < 4.0 or box_height < 4.0:
@@ -1510,6 +1550,7 @@ def _wind_specs(
 
         specs.append(
             {
+                "id": entry["id"],
                 "left": left,
                 "top": top,
                 "right": right,

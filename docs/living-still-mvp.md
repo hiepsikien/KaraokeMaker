@@ -386,7 +386,7 @@ speed * T = k * span
   sáng ấm nhất phía trên khung. God rays mềm + glow breathing quanh mặt trời, alpha
   thấp, chu kỳ 16 s. **Chỉ bật khi prompt yêu cầu** (`nắng`, `tia nắng`,
   `ánh sáng mặt trời`, `sunrays`, `god rays`); không tự bật vì ảnh có nắng.
-- 111 tests pass.
+- 112 tests pass.
 
 Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 `mưa nhẹ, ánh lửa cháy, sóng biển dập dềnh, gió làm rung nhẹ buồm`:
@@ -413,7 +413,7 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Mưa**: sửa hướng streak khớp với drift, thêm gió giật loop-quantized, độ dài
   và alpha ngẫu nhiên từng hạt, màu trung tính lạnh hơn, giảm độ dài để mưa nhẹ
   không giống vết xước.
-- **Cache**: `MOTION_CACHE_VERSION=26`, `PREVIEW_VERSION=preview_v22`; inventory
+- **Cache**: `MOTION_CACHE_VERSION=27`, `PREVIEW_VERSION=preview_v23`; inventory
   `v7`, intent `v6`.
 - **Thứ tự composite**: nước được áp trước mưa/tuyết để hạt mưa không bị warp
   theo sóng.
@@ -443,6 +443,10 @@ Kết quả trên ảnh `song_coc_bach_dang.png` + prompt:
 - **Cờ/buồm rung lại**: bỏ lớp ghim `prevent` lên rigid patch. Flag/banner xoay
   nguyên khối nên chữ không bị warp; cloth vẫn dùng `prevent` trong mask. Đây là
   regression từ lần sửa review trước.
+- **Cờ cùng cột buồm**: khi wind target một sail/flag, renderer tự gom các cloth
+  candidate có pivot gần cùng support (cùng cột/mast) — generic theo pivot, không
+  hardcode object id hay ảnh cụ thể. Nhờ vậy prompt “gió làm rung buồm” cũng làm
+  lá cờ trên đỉnh cột rung theo.
 - **Protect object**: ember sprite bị clip theo toàn bộ `prevent` (không chỉ tâm).
   Cloth wind vẫn dùng `prevent` trong mask; rigid flag/banner xoay nguyên khối nên
   chữ không bị warp và cờ vẫn rung.

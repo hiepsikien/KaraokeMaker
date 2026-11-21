@@ -456,6 +456,37 @@ class SelectedObjectFilterTests(unittest.TestCase):
 
 
 class WindFlagTests(unittest.TestCase):
+    def test_sail_target_also_moves_the_flag_on_the_same_mast(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["sail-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                object_entry(
+                    "sail-1",
+                    "sail",
+                    (0.6, 0.25, 0.75, 0.55),
+                    pivot=(0.68, 0.26),
+                ),
+                object_entry(
+                    "flag-1",
+                    "flag",
+                    (0.66, 0.05, 0.70, 0.15),
+                    pivot=(0.68, 0.06),
+                ),
+                object_entry(
+                    "flag-2",
+                    "flag",
+                    (0.05, 0.05, 0.09, 0.15),
+                    pivot=(0.07, 0.06),
+                ),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual([spec["id"] for spec in specs], ["sail-1", "flag-1"])
+
     def test_flag_is_treated_as_cloth_and_moves_around_its_pivot(self):
         plan = effect_plan(
             [{"effect": "wind", "target_ids": ["flag-1"], "params": {"intensity": 0.35}}],
