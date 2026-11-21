@@ -579,7 +579,8 @@ Asset Studio **không được trỏ vào cache** (`studio/` prune 100 file/1.5 
   Linux: `~/.local/share/karaokemaker`), không phải cache.
 - `id`: `bg_` + UUID4 hex hoặc ULID; validate bằng regex.
 - Khi “Lưu thành asset”: **copy** clip từ Studio cache sang `assets/<id>/loop.mp4`,
-  ghi `meta.json`.
+  ghi `meta.json`. Trước khi copy, recompute `preview_id` từ ảnh/plan/duration/profile
+  và `ffprobe` clip (width/height/fps/frames/pix_fmt, không audio).
 - Resolve clip từ `asset_id` (`assets/<id>/loop.mp4`), **không** lưu `clip_path`
   tuyệt đối và **không** gọi `ensure_allowed()` cho đường dẫn nội bộ này.
   `ensure_allowed()` chỉ dùng cho ảnh nguồn/clip do client gửi.
