@@ -76,6 +76,7 @@ export function StudioWorkspace() {
   const [assetsError, setAssetsError] = useState("");
   const [resumeAsset, setResumeAsset] = useState<{ asset: StudioAsset; token: number } | null>(null);
   const renderAbortRef = useRef<AbortController | null>(null);
+  const workRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -123,29 +124,45 @@ export function StudioWorkspace() {
     };
   }
 
-  function openAsset(asset: StudioAsset) {
-    const effect = effectFromAsset(asset);
+  async function openAsset(asset: StudioAsset) {
+    setNotice("");
+    let opened = asset;
+    try {
+      const response = await fetch(`/api/studio/assets/${asset.id}/open`, { method: "POST" });
+      if (!response.ok) {
+        setNotice(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { asset?: StudioAsset };
+      if (data.asset) opened = data.asset;
+    } catch {
+      setNotice("Không mở được asset. Kiểm tra server Python đang chạy.");
+      return;
+    }
+    const effect = effectFromAsset(opened);
     if (!effect) {
       setNotice("Asset này thiếu ảnh nguồn hoặc effect plan nên chưa mở chỉnh sửa được.");
       return;
     }
-    setNotice("");
     setImages((current) =>
-      current.includes(asset.source_image) ? current : [...current, asset.source_image],
+      current.includes(opened.source_image) ? current : [...current, opened.source_image],
     );
-    if (asset.profile_id && PROFILE_OPTIONS.some((option) => option.value === asset.profile_id)) {
-      setProfile(asset.profile_id);
+    if (opened.profile_id && PROFILE_OPTIONS.some((option) => option.value === opened.profile_id)) {
+      setProfile(opened.profile_id);
     }
-    if (asset.asset_frames && asset.fps) {
-      const seconds = asset.asset_frames / asset.fps;
+    if (opened.asset_frames && opened.fps) {
+      const seconds = opened.asset_frames / opened.fps;
       setStandardDuration(seconds >= 12 ? 16 : 8);
     }
     setEffects((current) => [
-      ...current.filter((item) => item.image_path !== asset.source_image),
+      ...current.filter((item) => item.image_path !== opened.source_image),
       effect,
     ]);
     setPreviews({});
-    setResumeAsset({ asset, token: Date.now() });
+    setResumeAsset({ asset: opened, token: Date.now() });
+    window.setTimeout(() => {
+      workRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
   }
 
   async function pickImages() {
@@ -365,7 +382,7 @@ export function StudioWorkspace() {
   return (
     <div className="space-y-6">
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]">
-      <section className="space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
+      <section ref={workRef} className="scroll-mt-4 space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Ảnh nền</p>
