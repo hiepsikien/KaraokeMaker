@@ -68,6 +68,13 @@ const PROFILE_LABELS: Record<string, string> = {
   portrait_4x5: "Dọc 4:5",
 };
 
+const PROFILE_DIMENSIONS: Record<string, [number, number]> = {
+  landscape_1080p: [1920, 1080],
+  portrait_1080x1920: [1080, 1920],
+  square_1080: [1080, 1080],
+  portrait_4x5: [1080, 1350],
+};
+
 function profileLabel(id: string) {
   return PROFILE_LABELS[id] || PROFILE_LABELS.landscape_1080p;
 }
@@ -520,6 +527,7 @@ export function AiEffects({
     if (!selectedImage) return;
     const asset = imageAssets.find((item) => item.id === assetId);
     if (!asset) return;
+    const [frameWidth, frameHeight] = PROFILE_DIMENSIONS[outputProfile] || PROFILE_DIMENSIONS.landscape_1080p;
     const plan =
       asset.effect_plan ||
       ({
@@ -528,10 +536,10 @@ export function AiEffects({
         profile_id: outputProfile,
         fit_transform: {
           mode: "contain",
-          source_width: asset.width || 1920,
-          source_height: asset.height || 1080,
-          frame_width: 1920,
-          frame_height: 1080,
+          source_width: asset.width || frameWidth,
+          source_height: asset.height || frameHeight,
+          frame_width: frameWidth,
+          frame_height: frameHeight,
           scale: 1,
           offset_x: 0,
           offset_y: 0,

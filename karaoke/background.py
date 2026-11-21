@@ -1074,6 +1074,7 @@ def render_videos(
     output_profile: str = "landscape_1080p",
     background: BackgroundRef | None = None,
     rebuild_background: bool = False,
+    progress=None,
     log,
 ) -> RenderResult:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -1095,23 +1096,40 @@ def render_videos(
         "output_profile": profile.id,
     }
     log("1/2 Đang dựng nền có hiệu ứng.")
+
+    def build_progress(done, total) -> None:
+        if progress is not None:
+            try:
+                progress(0.7 * float(done) / max(1.0, float(total)), 1.0)
+            except Exception:
+                pass
+
     build = build_background(
         prepared,
         output_dir=output_dir,
         profile=profile,
         background=background,
         force=rebuild_background,
+        progress=build_progress,
         log=log,
     )
 
     log("2/2 Đang ghép lời và tiếng.")
     work = Path(tempfile.mkdtemp(prefix=".karaoke-render-", dir=str(output_dir)))
     try:
+        def picture_progress(done, total) -> None:
+            if progress is not None:
+                try:
+                    progress(0.7 + 0.3 * float(done) / max(1.0, float(total)), 1.0)
+                except Exception:
+                    pass
+
         picture = render_picture(
             build,
             lines,
             profile=profile,
             destination=work / "picture.mp4",
+            progress=picture_progress,
             log=log,
         )
         total = build.total_frames / build.fps
@@ -1124,6 +1142,11 @@ def render_videos(
             except Exception as error:  # ambience is optional
                 log(f"Không tạo được tiếng nền: {error}")
                 ambience = None
+        if progress is not None:
+            try:
+                progress(0.95, 1.0)
+            except Exception:
+                pass
         vocal_out, instrumental_out = mux_outputs(
             picture,
             original_audio=original_audio,
@@ -1136,6 +1159,11 @@ def render_videos(
             loop_ambience=total > MAX_AMBIENT_DURATION,
             log=log,
         )
+        if progress is not None:
+            try:
+                progress(1.0, 1.0)
+            except Exception:
+                pass
         return RenderResult(vocal=vocal_out, instrumental=instrumental_out, background=build)
     finally:
         shutil.rmtree(work, ignore_errors=True)

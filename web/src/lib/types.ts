@@ -226,6 +226,7 @@ export type Job = {
   lines: TimedLine[] | null;
   duration: number;
   export_gaps?: string[];
+  render_percent?: number;
   project_path?: string;
   project?: Project | null;
   restore?: RestoreSettings | null;

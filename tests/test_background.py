@@ -222,6 +222,7 @@ class BackgroundBuildTests(unittest.TestCase):
             }
         ]
         with patch("karaoke.background.get_profile", return_value=self.profile):
+            events: list[float] = []
             result = render_videos(
                 lines=lines,
                 title="Bài",
@@ -238,8 +239,10 @@ class BackgroundBuildTests(unittest.TestCase):
                 image_duration=0.5,
                 background_effects=[],
                 output_profile="landscape_1080p",
+                progress=lambda done, total: events.append(float(done) / max(1.0, float(total))),
                 log=lambda _message: None,
             )
+        self.assertAlmostEqual(events[-1], 1.0)
         self.assertIsInstance(result, RenderResult)
         self.assertTrue(result.vocal.is_file())
         self.assertTrue(result.instrumental.is_file())
@@ -286,11 +289,10 @@ class BackgroundBuildTests(unittest.TestCase):
         self.assertEqual(status["state"], "ready", status)
 
     def test_output_dir_change_copies_valid_background(self):
-        from karaoke.access import clear_grants, grant
+        from karaoke.access import clear_grants, grant_project_paths
 
         old_dir = self.root / "old"
         new_dir = self.root / "new"
-        grant(self.root)
         prepared = dict(self.prepared)
         prepared["output_dir"] = str(old_dir)
         try:
@@ -300,6 +302,8 @@ class BackgroundBuildTests(unittest.TestCase):
                 profile=self.profile,
                 log=lambda _message: None,
             )
+            clear_grants()
+            grant_project_paths({"background_render": old.to_project()})
             ref = BackgroundRef.from_project(old.to_project(), new_dir)
             logs: list[str] = []
             copied = build_background(

@@ -470,7 +470,14 @@ def unique_export_names(
     raise JobError("Không tạo được tên file xuất mới. Thử lại sau một giây.")
 
 
-def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict | None = None) -> dict:
+def render_job(
+    prepared: dict,
+    lines: list[dict],
+    log,
+    *,
+    export_options: dict | None = None,
+    progress=None,
+) -> dict:
     from karaoke.project import sync_project_file
 
     options = export_options or {}
@@ -524,6 +531,7 @@ def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict |
             output_profile=profile_id,
             background=background_ref,
             rebuild_background=bool(options.get("rebuild_background")),
+            progress=progress,
             log=log,
         )
         if isinstance(result, tuple):

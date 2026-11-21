@@ -767,6 +767,7 @@ def _public_job(record: dict) -> dict:
         "lines": record["lines"],
         "duration": record["duration"],
         "export_gaps": export_gaps(prepared) if prepared else [],
+        "render_percent": record.get("render_percent", 0),
         "project_path": prepared.get("project_path") or "",
         "project": record.get("project"),
         "restore": record.get("restore"),
@@ -1282,6 +1283,7 @@ def start_render(job_id: str, body: RenderRequest):
             raise HTTPException(status_code=409, detail="Nền đang được dựng. Hãy đợi xong.")
         record["status"] = "rendering"
         record["error"] = ""
+        record["render_percent"] = 0
         prepared = dict(record["prepared"])
         lines = [line.model_dump() for line in body.lines]
         export_options = {
@@ -1294,9 +1296,21 @@ def start_render(job_id: str, body: RenderRequest):
         with _lock:
             record["log"].append(message)
 
+    def progress(done, total) -> None:
+        with _lock:
+            record["render_percent"] = round(100.0 * float(done) / max(1.0, float(total)))
+
     def worker() -> None:
         try:
-            outputs = render_job(prepared, lines, log, export_options=export_options)
+            outputs = render_job(
+                prepared,
+                lines,
+                log,
+                export_options=export_options,
+                progress=progress,
+            )
+            with _lock:
+                record["render_percent"] = 100
             _finish_render_record(record, prepared, lines, outputs)
         except JobError as error:
             with _lock:

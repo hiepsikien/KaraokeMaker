@@ -205,7 +205,8 @@ clip_identity = sha256(
   + image_hash
   + visual_plan_hash
   + image_frames
-  + width + height + fps + fit_mode + strip_rect
+  + width + height + fps + fit_mode
+  # effect luôn render với strip_rect = (0,0,0,0), nên không đưa strip vào
 )
 
 static_identity = sha256(
@@ -787,8 +788,10 @@ chỉ dựa vào job record. API đã triển khai theo job, nhưng trạng thá
 - `build_background(progress=...)` nhận callback `(done, total)`.
 - Truyền progress xuống `render_motion_loop(progress=...)` (đã hỗ trợ sẵn,
   `living.py:2819`).
-- Với concat FFmpeg, dùng `-progress pipe:1` hoặc progress thô theo số clip.
+- Với concat FFmpeg, progress thô theo số clip; assembly chiếm 70–100%.
 - `_overlay_text()` đã có callback progress theo frame.
+- `render_videos(progress=...)` nối background 0–70%, overlay lời 70–100%, mux
+  đặt 95–100%; `start_render` cập nhật `render_percent` và UI hiển thị.
 - Background build cập nhật `background.percent`; UI poll `GET /api/jobs/{id}` để hiển thị.
 
 ### 5.3. UI
@@ -813,6 +816,7 @@ chỉ dựa vào job record. API đã triển khai theo job, nhưng trạng thá
     - `1/2 Đang dựng nền có hiệu ứng…`
     - `2/2 Đang ghép lời và tiếng…`
   - Nếu chỉ sửa timing lời, ghi rõ “Dùng lại nền đã dựng”.
+  - Nút xuất hiển thị phần trăm khi `render_percent` có.
   - Nếu format là `mov`/`mkv`, vẫn ghi đúng “2 file theo format xuất”.
 
 ---

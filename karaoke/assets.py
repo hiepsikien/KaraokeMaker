@@ -15,8 +15,18 @@ import shutil
 import subprocess
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - macOS/Linux
+    msvcrt = None
 
 from karaoke.cache import data_root
 from karaoke.living import MOTION_CACHE_VERSION
@@ -32,6 +42,32 @@ CLIP_FILE = "loop.mp4"
 META_FILE = "meta.json"
 _LOCK = threading.Lock()
 _SHA_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+@contextmanager
+def _file_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            handle.seek(0)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - Windows
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            handle.close()
 
 
 class AssetError(Exception):
@@ -64,6 +100,32 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _parse_fps(value) -> float:
+    text = str(value or "").strip()
+    if not text or text in {"N/A", "0/0"}:
+        return 0.0
+    if "/" in text:
+        left, right = text.split("/", 1)
+        try:
+            return float(left) / max(1.0, float(right))
+        except ValueError:
+            return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _parse_duration(value) -> float:
+    text = str(value or "").strip()
+    if not text or text == "N/A":
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
 def _probe_clip(path: Path) -> dict:
     process = subprocess.run(
         [
@@ -91,25 +153,18 @@ def _probe_clip(path: Path) -> dict:
     if not videos or audios:
         raise AssetError("Clip asset phải có video và không có audio.")
     video = videos[0]
-    fps_text = str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")
-    try:
-        left, right = fps_text.split("/", 1)
-        fps = float(left) / max(1.0, float(right))
-    except ValueError:
-        fps = 0.0
+    fps = _parse_fps(video.get("avg_frame_rate") or video.get("r_frame_rate"))
     frames_text = str(video.get("nb_frames") or "").strip()
     frames = int(frames_text) if frames_text.isdigit() else 0
-    duration = video.get("duration") or (data.get("format") or {}).get("duration")
-    try:
-        seconds = float(duration)
-    except (TypeError, ValueError):
-        seconds = 0.0
+    duration = _parse_duration(video.get("duration"))
+    if duration <= 0:
+        duration = _parse_duration((data.get("format") or {}).get("duration"))
     return {
         "width": int(video.get("width") or 0),
         "height": int(video.get("height") or 0),
         "fps": fps,
         "frames": frames,
-        "duration": seconds,
+        "duration": duration,
         "pix_fmt": str(video.get("pix_fmt") or ""),
     }
 
@@ -157,7 +212,7 @@ def clip_path(meta: dict) -> Path:
     return root / name
 
 
-def save_asset_from_preview(
+def _save_asset_from_preview_impl(
     *,
     preview_id: str,
     name: str,
@@ -195,8 +250,10 @@ def save_asset_from_preview(
     if probe["pix_fmt"] != "yuv420p":
         raise AssetError("Clip preview không phải yuv420p.")
     frames = probe["frames"] or expected_frames
-    if abs(frames - expected_frames) > 1:
-        raise AssetError("Clip preview không đúng thời lượng đã khai.")
+    if frames < expected_frames:
+        raise AssetError("Clip preview ngắn hơn thời lượng đã khai.")
+    if frames - expected_frames > 1:
+        raise AssetError("Clip preview dài hơn thời lượng đã khai.")
     if probe["frames"] and abs(probe["duration"] - frames / profile.fps) > 1.5 / profile.fps:
         raise AssetError("Clip preview có duration không khớp số frame.")
 
@@ -242,6 +299,13 @@ def save_asset_from_preview(
         raise
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def save_asset_from_preview(*args, **kwargs) -> dict:
+    root = assets_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with _file_lock(root / ".assets.lock"):
+        return _save_asset_from_preview_impl(*args, **kwargs)
 
 
 def _write_meta(folder: Path, meta: dict) -> None:
@@ -324,10 +388,13 @@ def validate_asset(
 
 
 def delete_asset(asset_id: str) -> bool:
-    folder = asset_dir(asset_id)
-    if not folder.is_dir():
-        return False
-    if folder.is_symlink():
-        raise AssetError("Không xoá asset qua symlink.")
-    shutil.rmtree(folder)
-    return True
+    root = assets_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with _file_lock(root / ".assets.lock"):
+        folder = asset_dir(asset_id)
+        if not folder.is_dir():
+            return False
+        if folder.is_symlink():
+            raise AssetError("Không xoá asset qua symlink.")
+        shutil.rmtree(folder)
+        return True

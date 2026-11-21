@@ -596,6 +596,7 @@ export function MakerForm() {
           outputs={job.outputs}
           defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
           background={job.background}
+          renderPercent={job.render_percent ?? 0}
           onRender={renderVideos}
           onReveal={reveal}
           onBuildBackground={buildBackground}

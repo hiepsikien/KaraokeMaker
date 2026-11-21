@@ -59,6 +59,7 @@ export function TimingEditor({
   outputs,
   defaultOutputDir = "",
   background = null,
+  renderPercent = 0,
   onRender,
   onReveal,
   onBuildBackground,
@@ -79,6 +80,7 @@ export function TimingEditor({
   log: string[];
   outputs: { vocal: string; instrumental: string; directory: string } | null;
   defaultOutputDir?: string;
+  renderPercent?: number;
   background?: {
     state: "missing" | "stale" | "ready" | "building" | "error";
     percent?: number;
@@ -695,7 +697,11 @@ export function TimingEditor({
             onClick={startExport}
             className="rounded-2xl bg-[var(--gold)] px-5 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
           >
-            {locked ? "Đang xuất video…" : outputs ? "Xuất lại hai video" : "Xuất hai video"}
+            {locked
+              ? `Đang xuất video…${renderPercent ? ` ${renderPercent}%` : ""}`
+              : outputs
+                ? "Xuất lại hai video"
+                : "Xuất hai video"}
           </button>
         </div>
         {exportGaps.length > 0 && (
