@@ -509,6 +509,7 @@ def _segment_compatible(
     width: int,
     height: int,
     fps: int,
+    reference: tuple[str, int] | None = None,
 ) -> bool:
     try:
         meta = _probe_video(path)
@@ -526,6 +527,10 @@ def _segment_compatible(
         # Our encoder emits High profile. Normalise anything else rather than
         # risking concat-copy with mismatched SPS/PPS.
         return False
+    if reference is not None:
+        signature = (str(video.get("profile") or ""), int(video.get("level") or 0))
+        if signature != reference:
+            return False
     if int(video.get("width") or 0) != width or int(video.get("height") or 0) != height:
         return False
     if str(video.get("pix_fmt") or "") != "yuv420p":
@@ -1121,6 +1126,27 @@ def _build_background_impl(
             slots: list[tuple[Path, int]] = []
             if cover_path is not None and cover_frames > 0:
                 slots.append((cover_path, cover_frames))
+            reference: tuple[str, int] | None = None
+            for key in order:
+                candidate = rendered[key][0]
+                try:
+                    meta = _probe_video(candidate)
+                    video = next(
+                        (
+                            stream
+                            for stream in (meta.get("streams") or [])
+                            if stream.get("codec_type") == "video"
+                        ),
+                        None,
+                    )
+                    if video is not None and str(video.get("profile") or "") == "High":
+                        reference = (
+                            str(video.get("profile") or ""),
+                            int(video.get("level") or 0),
+                        )
+                        break
+                except MediaError:
+                    continue
             remaining = song_frames
             index = 0
             while remaining > 0:
@@ -1133,6 +1159,7 @@ def _build_background_impl(
                     width=profile.width,
                     height=profile.height,
                     fps=profile.fps,
+                    reference=reference,
                 ):
                     normalized = work / f"norm-{index:03d}.mp4"
                     encode_video(
