@@ -32,12 +32,20 @@ from karaoke.pipeline import (
     save_timing_file,
     unique_export_names,
 )
+from dataclasses import replace
+
+from karaoke.cache import prune
+from karaoke.media import _ratio_label, inspect_image
+from karaoke.profiles import get_profile
 from karaoke.project import load_project, project_from_fields, project_path_for, save_project, sync_project_file
 from karaoke.render import (
+    BAR_PADDING_Y,
     COUNTDOWN,
     LONG_GAP,
     LYRIC_FONT_SIZE,
     MAX_LYRIC_WIDTH,
+    _draw_strip,
+    _fit_lyric_font_size,
     _render_text_pair,
     _wrap_word_rows,
     cue_at,
@@ -988,6 +996,104 @@ class LyricLayoutTests(unittest.TestCase):
     def test_wrap_keeps_a_short_line_on_one_row(self):
         rows = _wrap_word_rows([40.0, 40.0, 40.0], 10.0, MAX_LYRIC_WIDTH)
         self.assertEqual(rows, [[0, 1, 2]])
+
+    def test_wrap_can_use_more_than_two_rows(self):
+        rows = _wrap_word_rows([60.0] * 9, 10.0, 130.0)
+        self.assertGreater(len(rows), 2)
+
+    def test_portrait_long_line_fits_the_safe_area_and_strip(self):
+        profile = get_profile("portrait_1080x1920")
+        words = [
+            {"text": f"chữ{index}", "start": index * 0.2, "end": index * 0.2 + 0.15}
+            for index in range(30)
+        ]
+        line = {
+            "text": " ".join(word["text"] for word in words),
+            "start": 0,
+            "end": 10,
+            "words": words,
+        }
+        size = _fit_lyric_font_size([line], profile)
+        layout = _render_text_pair(line, profile, size)
+        usable = profile.width - profile.safe_left - profile.safe_right
+        self.assertLessEqual(layout["white"].width, usable + 4)
+        self.assertLessEqual(
+            layout["white"].height + BAR_PADDING_Y,
+            profile.strip_rect[3],
+        )
+
+    def test_draw_strip_centers_text_inside_horizontal_safe_area(self):
+        profile = replace(get_profile("portrait_1080x1920"), safe_left=100, safe_right=120)
+        words = [
+            {"text": "một", "start": 0, "end": 0.5},
+            {"text": "hai", "start": 0.5, "end": 1.0},
+        ]
+        line = {"text": "một hai", "start": 0, "end": 1, "words": words}
+        layout = _render_text_pair(line, profile, profile.lyric_font_size)
+        strip = _draw_strip(layout, 0.2, profile)
+        box = strip.getbbox()
+        self.assertIsNotNone(box)
+        self.assertGreaterEqual(box[0], 99)
+        self.assertLessEqual(box[2], profile.width - 120 + 1)
+
+
+class ProfileSafeAreaTests(unittest.TestCase):
+    def test_every_profile_strip_fits_between_top_and_bottom_safe_areas(self):
+        from karaoke.profiles import PROFILES
+
+        for profile_id in PROFILES:
+            profile = get_profile(profile_id)
+            _x, top, _width, height = profile.strip_rect
+            self.assertGreaterEqual(top, profile.safe_top, profile_id)
+            self.assertLessEqual(top + height, profile.height - profile.safe_bottom, profile_id)
+
+
+class CachePruneTests(unittest.TestCase):
+    def test_prune_evicts_old_files_and_survives_vanished_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for index in range(3):
+                (root / f"{index}.mp4").write_bytes(b"x" * (index + 1))
+            # One file disappears between listing and stat; prune must not raise
+            # and still evicts among the entries it could stat.
+            with patch("karaoke.cache._stat_mtime", side_effect=[None, 1.0, 2.0]):
+                prune(root, max_files=1)
+            self.assertLessEqual(len(list(root.iterdir())), 2)
+
+    def test_prune_respects_max_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for index in range(4):
+                (root / f"{index}.mp4").write_bytes(b"x")
+            prune(root, max_files=2)
+            self.assertEqual(len(list(root.iterdir())), 2)
+
+
+class InspectImageTests(unittest.TestCase):
+    def test_ratio_label_recognizes_4x5(self):
+        self.assertEqual(_ratio_label(1080, 1350), "4:5")
+
+    def test_inspect_uses_profile_and_optional_preview(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "portrait.png"
+            from PIL import Image
+
+            Image.new("RGB", (1080, 1920), (30, 40, 50)).save(path)
+            portrait = inspect_image(
+                path, output_profile="portrait_1080x1920", with_preview=False
+            )
+            self.assertTrue(portrait["fits_frame"])
+            self.assertEqual(portrait["preview"], "")
+            self.assertTrue(portrait["thumbnail"].startswith("data:image/jpeg;base64,"))
+
+            square = inspect_image(path, output_profile="square_1080")
+            self.assertFalse(square["fits_frame"])
+            self.assertIn("1080×1080", square["note"])
+
+            preview = inspect_image(
+                path, output_profile="portrait_1080x1920", with_preview=True
+            )
+            self.assertTrue(preview["preview"].startswith("data:image/jpeg;base64,"))
 
 
 def _tone(path: Path, frequency: float, seconds: float = 0.4) -> None:

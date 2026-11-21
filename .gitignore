@@ -8,3 +8,8 @@ __pycache__/
 .DS_Store
 data.pkl
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
+# Generated eval report; regenerate with scripts/eval_living_still.py
+docs/eval-results.json

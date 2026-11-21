@@ -1,22 +1,28 @@
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
+from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
+from karaoke.director import DirectorError, analyze_scene
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
 from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
 from karaoke.separate_runner import separate_kim2
 from karaoke.align import fit_lines_to_voice
+from karaoke.studio import StudioError, cache_path, is_preview_id, render_preview
 from karaoke.pipeline import (
     JobError,
     align_job,
@@ -40,6 +46,29 @@ from karaoke.project import (
     sync_project_file,
 )
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_env(env_path: Path | None = None) -> None:
+    """Load `.env` without overriding real environment variables.
+
+    A non-empty exported variable always wins (README documents that path).
+    `.env` only fills variables that are missing or blank, so a copied
+    `.env.example` with ``GEMINI_API_KEY=`` cannot erase a shell key. The
+    default absolute path makes the server independent of the current directory.
+    """
+    env_path = Path(env_path) if env_path is not None else ROOT / ".env"
+    if not env_path.is_file():
+        return
+    for key, value in dotenv_values(env_path).items():
+        if value is None:
+            continue
+        if not os.environ.get(key, "").strip():
+            os.environ[key] = value
+
+
+_load_env()
+
 app = FastAPI(title="KaraokeMaker")
 app.add_middleware(
     CORSMiddleware,
@@ -52,6 +81,12 @@ _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
 _JOB_LIMIT = 12
 _JOB_TTL_SECONDS = 6 * 60 * 60
+# Full-resolution Studio renders run in the background so the Next proxy never
+# has to hold a request open for a 16 s 1080p multi-effect encode.
+_studio_jobs: dict[str, dict] = {}
+_STUDIO_JOB_LIMIT = 20
+_STUDIO_JOB_TTL_SECONDS = 30 * 60
+_STUDIO_JOB_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class BrowseRequest(BaseModel):
@@ -72,6 +107,8 @@ class ProjectFieldsRequest(BaseModel):
     instrumental_audio: str = ""
     lyrics: str = ""
     background_images: list[str] = Field(default_factory=list)
+    background_effects: list[dict] = Field(default_factory=list)
+    output_profile: str = "landscape_1080p"
     cover_image: str = ""
     output_dir: str = ""
     cover_duration: float = 5
@@ -107,6 +144,8 @@ class OpenSavedRequest(BaseModel):
     vocal_audio: str = ""
     instrumental_audio: str = ""
     background_images: list[str] = Field(default_factory=list)
+    background_effects: list[dict] = Field(default_factory=list)
+    output_profile: str = "landscape_1080p"
     cover_image: str = ""
     output_dir: str = ""
     cover_duration: float = 5
@@ -119,6 +158,24 @@ class RevealRequest(BaseModel):
 
 class ImageInspectRequest(BaseModel):
     paths: list[str] = Field(default_factory=list)
+    output_profile: str = "landscape_1080p"
+    with_preview: bool = False
+
+
+class DirectorRequest(BaseModel):
+    image_path: str = ""
+    prompt: str = Field(default="", max_length=500)
+    consent: bool = False
+    model: str = ""
+    output_profile: str = "landscape_1080p"
+
+
+class StudioRenderRequest(BaseModel):
+    image_path: str = ""
+    effect_plan: dict = Field(default_factory=dict)
+    duration: float = 8
+    output_profile: str = "landscape_1080p"
+    full_resolution: bool = False
 
 
 class WordIn(BaseModel):
@@ -358,6 +415,7 @@ def inspect_images(body: ImageInspectRequest):
                     "fits_frame": False,
                     "note": "Ảnh nằm ngoài thư mục được phép. Hãy chọn lại bằng hộp thoại.",
                     "thumbnail": "",
+                    "preview": "",
                 }
             )
             continue
@@ -371,11 +429,18 @@ def inspect_images(body: ImageInspectRequest):
                     "fits_frame": False,
                     "note": "Không đọc được ảnh này.",
                     "thumbnail": "",
+                    "preview": "",
                 }
             )
             continue
         try:
-            facts.append(inspect_image(path))
+            facts.append(
+                inspect_image(
+                    path,
+                    output_profile=body.output_profile,
+                    with_preview=body.with_preview,
+                )
+            )
         except Exception:
             facts.append(
                 {
@@ -386,9 +451,206 @@ def inspect_images(body: ImageInspectRequest):
                     "fits_frame": False,
                     "note": "Không đọc được ảnh này.",
                     "thumbnail": "",
+                    "preview": "",
                 }
             )
     return {"images": facts}
+
+
+@app.post("/api/director/analyze")
+def director_analyze(body: DirectorRequest):
+    if not body.consent:
+        raise HTTPException(
+            status_code=400,
+            detail="Cần đồng ý gửi ảnh lên Google trước khi phân tích.",
+        )
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh để phân tích.")
+    try:
+        path = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh này.")
+    try:
+        return analyze_scene(
+            path,
+            body.prompt,
+            consent=body.consent,
+            # The model comes from the client; ignore anything outside the
+            # server allowlist instead of interpolating it into the Gemini URL.
+            model=(body.model or "").strip() or None,
+            output_profile=body.output_profile,
+        )
+    except DirectorError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+def _preview_payload(result: dict) -> dict:
+    preview_id = result["id"]
+    return {
+        "id": preview_id,
+        "url": f"/api/studio/preview/{preview_id}",
+        "width": result["width"],
+        "height": result["height"],
+        "duration": result["duration"],
+    }
+
+
+def _prune_studio_jobs() -> None:
+    """Drop finished Studio jobs older than the TTL, then cap the list."""
+    now = time.time()
+    stale = [
+        job_id
+        for job_id, record in _studio_jobs.items()
+        if record["status"] in {"done", "error"}
+        and now - record["created"] > _STUDIO_JOB_TTL_SECONDS
+    ]
+    for job_id in stale:
+        _studio_jobs.pop(job_id, None)
+    if len(_studio_jobs) <= _STUDIO_JOB_LIMIT:
+        return
+    finished = sorted(
+        (record["created"], job_id)
+        for job_id, record in _studio_jobs.items()
+        if record["status"] in {"done", "error"}
+    )
+    for _created, job_id in finished:
+        if len(_studio_jobs) <= _STUDIO_JOB_LIMIT:
+            break
+        _studio_jobs.pop(job_id, None)
+
+
+def _run_studio_job(
+    job_id: str,
+    path: Path,
+    body: StudioRenderRequest,
+) -> None:
+    def progress(done: int, total: int) -> None:
+        with _lock:
+            record = _studio_jobs.get(job_id)
+            if record is not None:
+                record["done"] = done
+                record["total"] = total
+                record["percent"] = round(100.0 * done / max(1, total))
+
+    try:
+        result = render_preview(
+            path,
+            body.effect_plan,
+            duration=body.duration,
+            output_profile=body.output_profile,
+            full_resolution=True,
+            progress=progress,
+        )
+        payload = _preview_payload(result)
+        with _lock:
+            record = _studio_jobs.get(job_id)
+            if record is not None:
+                record["status"] = "done"
+                record["result"] = payload
+                record["percent"] = 100
+    except Exception:
+        traceback.print_exc()
+        with _lock:
+            record = _studio_jobs.get(job_id)
+            if record is not None:
+                record["status"] = "error"
+                record["error"] = (
+                    "Không render được bản chuẩn. Xem terminal Python để xem chi tiết."
+                )
+
+
+@app.post("/api/studio/render")
+def studio_render(body: StudioRenderRequest):
+    """Render an independent Studio preview loop (no Gemini call, no consent).
+
+    ``full_resolution=true`` starts a background job and returns HTTP 202 with
+    ``job_id``; poll ``/api/studio/render-job/{job_id}`` for the result.
+    """
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh để render preview.")
+    try:
+        path = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh này.")
+    if body.full_resolution:
+        job_id = uuid.uuid4().hex
+        with _lock:
+            _prune_studio_jobs()
+            _studio_jobs[job_id] = {
+                "id": job_id,
+                "status": "rendering",
+                "created": time.time(),
+                "error": "",
+                "result": None,
+                "done": 0,
+                "total": 0,
+                "percent": 0,
+            }
+        thread = threading.Thread(
+            target=_run_studio_job,
+            args=(job_id, path, body),
+            daemon=True,
+        )
+        thread.start()
+        return JSONResponse(
+            status_code=202,
+            content={"job_id": job_id, "status": "rendering"},
+        )
+    try:
+        result = render_preview(
+            path,
+            body.effect_plan,
+            duration=body.duration,
+            output_profile=body.output_profile,
+        )
+    except StudioError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail="Không render được preview. Xem terminal Python để xem chi tiết.",
+        )
+    return _preview_payload(result)
+
+
+@app.get("/api/studio/render-job/{job_id}")
+def studio_render_job(job_id: str):
+    """Return the status of a background full-resolution Studio render."""
+    if not _STUDIO_JOB_PATTERN.fullmatch(str(job_id or "")):
+        raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
+    with _lock:
+        _prune_studio_jobs()
+        record = _studio_jobs.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
+        return {
+            "id": record["id"],
+            "status": record["status"],
+            "created": record["created"],
+            "error": record["error"],
+            "result": record["result"],
+            "done": record.get("done", 0),
+            "total": record.get("total", 0),
+            "percent": record.get("percent", 0),
+        }
+
+
+@app.get("/api/studio/preview/{preview_id}")
+def studio_preview(preview_id: str):
+    """Serve a rendered Studio preview from the cache."""
+    if not is_preview_id(preview_id):
+        raise HTTPException(status_code=404, detail="Không thấy preview.")
+    path = cache_path(preview_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy preview. Hãy render lại.")
+    return FileResponse(path, media_type="video/mp4", filename=f"{preview_id}.mp4")
 
 
 def _public_job(record: dict) -> dict:
@@ -476,10 +738,20 @@ def project_session(body: ProjectFieldsRequest):
             "device",
             "no_speech_threshold",
             "whisper_retry",
+            "output_profile",
+            "background_effects",
         ):
-            if key in payload:
+            # Only fields the client actually sent may change. Pydantic defaults
+            # (notably output_profile="landscape_1080p") must not overwrite a
+            # saved 9:16 project when an older client omits the field.
+            if key not in body.model_fields_set:
+                continue
+            if key == "background_effects":
+                prepared[key] = [dict(item) for item in payload[key] or [] if isinstance(item, dict)]
+            else:
                 prepared[key] = payload[key]
-        prepared["background_images"] = list(payload.get("background_images") or [])
+        if "background_images" in body.model_fields_set:
+            prepared["background_images"] = list(payload.get("background_images") or [])
         prepared["project_path"] = path_text
         # status=None keeps exported (same rule as sync_project_file for timing saves).
         saved = sync_project_file(
@@ -870,6 +1142,10 @@ def _restore_record(project: dict, path: Path) -> dict:
         "vocal_audio": project.get("vocal_audio") or "",
         "instrumental_audio": project.get("instrumental_audio") or "",
         "background_images": list(project.get("background_images") or []),
+        "background_effects": [
+            dict(item) for item in project.get("background_effects") or [] if isinstance(item, dict)
+        ],
+        "output_profile": project.get("output_profile") or "landscape_1080p",
         "cover_image": project.get("cover_image") or "",
         "output_dir": project.get("output_dir") or "",
         "cover_duration": project.get("cover_duration") or 5,
@@ -911,8 +1187,13 @@ def _require_restore_job(job_id: str) -> dict:
 
 @app.post("/api/restore/session")
 def restore_session(body: ProjectFieldsRequest):
+    payload = body.model_dump()
+    # Older clients do not send these fields; keep plans already stored in the project.
+    for key in ("background_effects", "output_profile"):
+        if key not in body.model_fields_set:
+            payload.pop(key, None)
     try:
-        project, path = _save_project_fields(body.model_dump())
+        project, path = _save_project_fields(payload)
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {

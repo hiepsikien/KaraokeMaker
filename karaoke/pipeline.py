@@ -17,6 +17,7 @@ from karaoke.media import (
     write_timing,
 )
 from karaoke.render import render_videos
+from karaoke.profiles import normalize_profile_id
 
 EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
 WHISPER_MODELS = frozenset({"tiny", "base", "small", "medium", "large-v2", "large"})
@@ -32,6 +33,12 @@ def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
         return ensure_allowed(path)
     except AccessError as error:
         raise JobError(str(error)) from error
+
+
+def _dict_list(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def normalize_edited_lines(lines: list[dict]) -> list[dict]:
@@ -120,6 +127,7 @@ def prepare_job(payload: dict, log) -> dict:
         raise JobError("Thời lượng ảnh phải lớn hơn 0. Thời lượng bìa có thể bằng 0.")
 
     language = str(payload.get("language") or "vi").strip() or "vi"
+    output_profile = normalize_profile_id(payload.get("output_profile"))
     whisper = whisper_options(payload)
 
     try:
@@ -144,6 +152,8 @@ def prepare_job(payload: dict, log) -> dict:
         "vocal_audio": str(vocal),
         "instrumental_audio": str(instrumental),
         "background_images": [str(path) for path in backgrounds],
+        "background_effects": _dict_list(payload.get("background_effects")),
+        "output_profile": output_profile,
         "cover_image": str(cover),
         "output_dir": str(output_dir),
         "cover_duration": cover_duration,
@@ -241,6 +251,8 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
             for item in payload.get("background_images") or []
             if str(item).strip()
         ],
+        "background_effects": _dict_list(payload.get("background_effects")),
+        "output_profile": normalize_profile_id(payload.get("output_profile")),
         "cover_image": _optional_existing(payload.get("cover_image", ""), "ảnh bìa", IMAGE_SUFFIXES),
         "output_dir": str(output_dir),
         "cover_duration": float(payload.get("cover_duration") or 0),
@@ -336,6 +348,8 @@ def open_project_file(path_text: str) -> tuple[dict, list[dict], dict]:
     for key in ("original_audio", "vocal_audio", "instrumental_audio", "cover_image", "output_dir"):
         project[key] = prepared.get(key) or ""
     project["background_images"] = list(prepared.get("background_images") or [])
+    project["background_effects"] = _dict_list(prepared.get("background_effects"))
+    project["output_profile"] = prepared.get("output_profile") or "landscape_1080p"
     return prepared, lines, project
 
 
@@ -428,14 +442,24 @@ def normalize_export_format(raw: str | None) -> str:
     return fmt
 
 
-def unique_export_names(output_dir: Path, stem: str, fmt: str) -> tuple[str, str]:
+def unique_export_names(
+    output_dir: Path,
+    stem: str,
+    fmt: str,
+    profile_id: str = "",
+) -> tuple[str, str]:
     """Build video filenames with a timestamp suffix so re-exports never overwrite."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     ext = f".{fmt}"
+    label = {
+        "portrait_1080x1920": " (dọc)",
+        "square_1080": " (vuông)",
+        "portrait_4x5": " (4x5)",
+    }.get(normalize_profile_id(profile_id), "")
     for index in range(0, 50):
         suffix = stamp if index == 0 else f"{stamp}-{index + 1}"
-        vocal_name = f"{stem} (có giọng) {suffix}{ext}"
-        instrumental_name = f"{stem} (không lời) {suffix}{ext}"
+        vocal_name = f"{stem}{label} (có giọng) {suffix}{ext}"
+        instrumental_name = f"{stem}{label} (không lời) {suffix}{ext}"
         if not (output_dir / vocal_name).exists() and not (output_dir / instrumental_name).exists():
             return vocal_name, instrumental_name
     raise JobError("Không tạo được tên file xuất mới. Thử lại sau một giây.")
@@ -467,7 +491,9 @@ def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict |
 
     title = prepared["title"]
     stem = safe_title(title)
-    vocal_name, instrumental_name = unique_export_names(output_dir, stem, fmt)
+    profile_id = normalize_profile_id(prepared.get("output_profile"))
+    prepared["output_profile"] = profile_id
+    vocal_name, instrumental_name = unique_export_names(output_dir, stem, fmt, profile_id)
     cover, images = _images_for_render(prepared)
     try:
         timing_path = save_timing_file(timing_path_for(prepared), lines)
@@ -488,6 +514,8 @@ def render_job(prepared: dict, lines: list[dict], log, *, export_options: dict |
             instrumental_name=instrumental_name,
             cover_duration=float(prepared["cover_duration"]),
             image_duration=float(prepared["image_duration"]),
+            background_effects=prepared.get("background_effects") or [],
+            output_profile=profile_id,
             log=log,
         )
     except (MediaError, JobError):

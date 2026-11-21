@@ -8,6 +8,7 @@ from karaoke.access import AccessError, ensure_allowed, grant
 from karaoke.errors import JobError
 from karaoke.media import safe_title
 from karaoke.mix import default_mix_settings, parse_mix_settings
+from karaoke.profiles import normalize_profile_id
 
 
 def _normalize_lines(lines: list[dict]) -> list[dict]:
@@ -62,6 +63,34 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value if str(item).strip()]
 
 
+def _dict_list(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _effects_list(value: Any) -> list[dict]:
+    """Keep stored effects UI-safe even if a project JSON is hand-edited.
+
+    The frontend reads ``effect_plan.items``; a missing plan or non-list items
+    used to crash the AI panel. Normalise the shape on load/save instead.
+    """
+    effects: list[dict] = []
+    for item in _dict_list(value):
+        effect = dict(item)
+        plan = effect.get("effect_plan")
+        plan = dict(plan) if isinstance(plan, dict) else {}
+        items = plan.get("items")
+        plan["items"] = (
+            [entry for entry in items if isinstance(entry, dict)]
+            if isinstance(items, list)
+            else []
+        )
+        effect["effect_plan"] = plan
+        effects.append(effect)
+    return effects
+
+
 def empty_project() -> dict:
     return {
         "version": PROJECT_VERSION,
@@ -75,6 +104,8 @@ def empty_project() -> dict:
         "instrumental_audio": "",
         "cover_image": "",
         "background_images": [],
+        "background_effects": [],
+        "output_profile": "landscape_1080p",
         "output_dir": "",
         "cover_duration": 5.0,
         "image_duration": 8.0,
@@ -119,6 +150,8 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     project["instrumental_audio"] = str(payload.get("instrumental_audio") or "").strip()
     project["cover_image"] = str(payload.get("cover_image") or "").strip()
     project["background_images"] = _string_list(payload.get("background_images"))
+    project["background_effects"] = _effects_list(payload.get("background_effects"))
+    project["output_profile"] = normalize_profile_id(payload.get("output_profile"))
     project["output_dir"] = str(payload.get("output_dir") or "").strip()
     try:
         project["cover_duration"] = float(payload.get("cover_duration", 5))
@@ -157,6 +190,8 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "instrumental_audio": project.get("instrumental_audio") or "",
         "cover_image": project.get("cover_image") or "",
         "background_images": list(project.get("background_images") or []),
+        "background_effects": _effects_list(project.get("background_effects")),
+        "output_profile": normalize_profile_id(project.get("output_profile")),
         "output_dir": project.get("output_dir") or "",
         "cover_duration": float(project.get("cover_duration") or 0),
         "image_duration": float(project.get("image_duration") or 8),
@@ -272,6 +307,8 @@ def prepared_from_project(project: dict) -> dict:
         "vocal_audio": str(project.get("vocal_audio") or "").strip(),
         "instrumental_audio": str(project.get("instrumental_audio") or "").strip(),
         "background_images": list(project.get("background_images") or []),
+        "background_effects": _effects_list(project.get("background_effects")),
+        "output_profile": normalize_profile_id(project.get("output_profile")),
         "cover_image": str(project.get("cover_image") or "").strip(),
         "output_dir": str(project.get("output_dir") or "").strip(),
         "cover_duration": float(project.get("cover_duration") or 0),

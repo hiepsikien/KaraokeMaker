@@ -1,0 +1,188 @@
+{
+  "source_root": "~/Projects/vanxuan/client/Assets/_Project/Resources/Art",
+  "note": "Local-only eval set. Core/extra images are user-owned; external images are CC0/CC-BY from Wikimedia Commons. Do not commit images to the repo.",
+  "core": [
+    {
+      "file": "still-era02-le-cuoi.png",
+      "width": 1280,
+      "height": 720,
+      "aspect": "16:9",
+      "profiles": ["landscape_1080p", "portrait_1080x1920"],
+      "focus": ["steam", "smoke", "light_breathing", "people_protect", "indoor"],
+      "notes": "Warm campfire interior; test steam/smoke near faces and fire glow."
+    },
+    {
+      "file": "still-era02-qua-doi.png",
+      "width": 1280,
+      "height": 720,
+      "aspect": "16:9",
+      "profiles": ["landscape_1080p"],
+      "focus": ["smoke", "steam", "light_breathing", "people_protect", "indoor"],
+      "notes": "Interior with smoke and several people; test protect masks."
+    },
+    {
+      "file": "disaster_flash_flood.png",
+      "width": 1280,
+      "height": 720,
+      "aspect": "16:9",
+      "profiles": ["landscape_1080p", "portrait_1080x1920"],
+      "focus": ["rain", "water", "storm", "depth_parallax"],
+      "notes": "Flood/storm landscape; test rain layers and water mask."
+    },
+    {
+      "file": "disaster_great_blizzard.png",
+      "width": 1280,
+      "height": 720,
+      "aspect": "16:9",
+      "profiles": ["landscape_1080p"],
+      "focus": ["snow", "storm", "depth_parallax"],
+      "notes": "Blizzard/vortex; test snow and strong depth separation."
+    },
+    {
+      "file": "disaster_wildfire_lightning.png",
+      "width": 1280,
+      "height": 720,
+      "aspect": "16:9",
+      "profiles": ["landscape_1080p"],
+      "focus": ["fire", "lightning", "smoke", "emissive"],
+      "notes": "Wildfire + lightning; test optional fire/lightning recipes."
+    },
+    {
+      "file": "still-era06-song-cuon-bach-dang.png",
+      "width": 720,
+      "height": 1280,
+      "aspect": "9:16",
+      "profiles": ["portrait_1080x1920", "landscape_1080p"],
+      "focus": ["water", "rain", "boats", "depth_parallax"],
+      "notes": "River/boats; test water shimmer, rain, and 9:16 safe area."
+    },
+    {
+      "file": "still-era03-dem-suong-nui-nua.png",
+      "width": 720,
+      "height": 1280,
+      "aspect": "9:16",
+      "profiles": ["portrait_1080x1920"],
+      "focus": ["steam", "smoke", "fire", "people_protect", "night"],
+      "notes": "Cave camp with people; test steam/smoke and face protection."
+    },
+    {
+      "file": "still-era06-hoi-nghi-dien-hong.png",
+      "width": 720,
+      "height": 1280,
+      "aspect": "9:16",
+      "profiles": ["portrait_1080x1920"],
+      "focus": ["light_rays", "dust", "interior", "people_protect"],
+      "notes": "Temple interior with light shafts; test dust/light rays and safe area."
+    },
+    {
+      "file": "still-era07-bat-song-moc-thanh.png",
+      "width": 1024,
+      "height": 1024,
+      "aspect": "1:1",
+      "profiles": ["square_1080", "portrait_1080x1920"],
+      "focus": ["rain", "storm", "water", "depth_parallax"],
+      "notes": "Stormy fortress; test square output and fit/crop behavior."
+    },
+    {
+      "file": "hero-nguyen-trai.png",
+      "width": 896,
+      "height": 1344,
+      "aspect": "2:3",
+      "profiles": ["portrait_1080x1920", "portrait_4x5"],
+      "focus": ["character", "face_protect", "C0", "C1_optional"],
+      "notes": "Character portrait; MVP C0. Use to test face protect and future C1."
+    }
+  ],
+  "extra": [
+    {
+      "file": "relic-coc-tre-lam-son.png",
+      "width": 928,
+      "height": 1232,
+      "aspect": "3:4",
+      "profiles": ["portrait_4x5", "portrait_1080x1920"],
+      "focus": ["fire", "emissive", "object"],
+      "notes": "Object/relic on fire; test 3:4/4:5 and emissive effects."
+    },
+    {
+      "file": "still-era05-tap-kich-dem-nhu-nguyet.png",
+      "width": 720,
+      "height": 1280,
+      "aspect": "9:16",
+      "profiles": ["portrait_1080x1920"],
+      "focus": ["night", "fire", "rain", "boats", "people_protect"],
+      "notes": "Night camp/boats; test fire, rain, and dark-scene exposure."
+    }
+  ],
+  "external_root": "/tmp/eval_external",
+  "external_note": "Downloaded thumbnails for local testing only. Re-download from source if /tmp is cleared. Keep attribution/license with the image.",
+  "external": [
+    {
+      "file": "food_ramen_cc0.jpg",
+      "width": 1280,
+      "height": 1707,
+      "original_width": 3468,
+      "original_height": 4624,
+      "aspect": "3:4",
+      "profiles": ["portrait_4x5", "portrait_1080x1920"],
+      "focus": ["food_closeup", "steam", "bowl", "depth"],
+      "license": "CC0 1.0",
+      "author": "GiveMeMollusks",
+      "source": "https://commons.wikimedia.org/wiki/File:Bowl_of_shio_ramen_with_pork.jpg",
+      "download_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a4/Bowl_of_shio_ramen_with_pork.jpg/1280px-Bowl_of_shio_ramen_with_pork.jpg"
+    },
+    {
+      "file": "food_pho_cc0.jpg",
+      "width": 1280,
+      "height": 964,
+      "original_width": 8160,
+      "original_height": 6144,
+      "aspect": "4:3",
+      "profiles": ["landscape_1080p", "portrait_1080x1920"],
+      "focus": ["food_closeup", "steam", "bowl", "vietnamese"],
+      "license": "CC0 1.0",
+      "author": "Andy Li",
+      "source": "https://commons.wikimedia.org/wiki/File:Beef_noodle_soup_(Ph%E1%BB%9F_b%C3%B2)_-_Pho_Hanoi_Authentic_2024-12-01.jpg",
+      "download_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/6/65/Beef_noodle_soup_%28Ph%E1%BB%9F_b%C3%B2%29_-_Pho_Hanoi_Authentic_2024-12-01.jpg/1280px-Beef_noodle_soup_%28Ph%E1%BB%9F_b%C3%B2%29_-_Pho_Hanoi_Authentic_2024-12-01.jpg"
+    },
+    {
+      "file": "neon_dotonbori.jpg",
+      "width": 1280,
+      "height": 1566,
+      "original_width": 3872,
+      "original_height": 4738,
+      "aspect": "9:16-ish",
+      "profiles": ["portrait_1080x1920"],
+      "focus": ["neon", "street", "water_reflection", "bloom", "night"],
+      "license": "CC BY-SA 4.0",
+      "author": "Martin Falbisoner",
+      "source": "https://commons.wikimedia.org/wiki/File:Dotonbori,_Osaka,_at_night,_November_2016.jpg",
+      "download_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/4/47/Dotonbori%2C_Osaka%2C_at_night%2C_November_2016.jpg/1280px-Dotonbori%2C_Osaka%2C_at_night%2C_November_2016.jpg"
+    },
+    {
+      "file": "neon_night1.jpg",
+      "width": 1280,
+      "height": 853,
+      "original_width": 5616,
+      "original_height": 3744,
+      "aspect": "3:2",
+      "profiles": ["landscape_1080p"],
+      "focus": ["neon", "text_sign", "bloom", "night"],
+      "license": "CC BY 2.0",
+      "author": "Billie Grace Ward",
+      "source": "https://commons.wikimedia.org/wiki/File:Neon_Night_1_(22755978604).jpg",
+      "download_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f0/Neon_Night_1_%2822755978604%29.jpg/1280px-Neon_Night_1_%2822755978604%29.jpg"
+    },
+    {
+      "file": "text_ramen_shop.jpg",
+      "width": 1536,
+      "height": 2048,
+      "aspect": "3:4",
+      "profiles": ["portrait_4x5", "portrait_1080x1920"],
+      "focus": ["text_heavy", "ocr", "protect_text", "menu_signs"],
+      "license": "CC BY-SA 2.0",
+      "author": "kc7fys",
+      "source": "https://commons.wikimedia.org/wiki/File:Ganko_Ramen,_Chiyoda_Ward,_Tokyo_(3217609888).jpg",
+      "download_url": "https://upload.wikimedia.org/wikipedia/commons/4/4d/Ganko_Ramen%2C_Chiyoda_Ward%2C_Tokyo_%283217609888%29.jpg"
+    }
+  ]
+}

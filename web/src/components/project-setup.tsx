@@ -2,6 +2,7 @@
 
 import { useMemo, type FormEvent } from "react";
 
+import { AiEffects } from "@/components/ai-effects";
 import { ImageCards } from "@/components/image-cards";
 import { sungCount, type ProjectFields } from "@/lib/types";
 
@@ -164,7 +165,7 @@ export function ProjectSetup({
         <section className="space-y-3">
           <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Hình</h2>
           <p className="text-sm leading-6 text-[var(--muted)]">
-            Khung video là 1920×1080, tỉ lệ 16:9. Ảnh đúng tỉ lệ này sẽ đầy khung. Ảnh vuông hoặc 3:2 vẫn dùng được, nằm giữa khung và có viền tối hai bên.
+            Khung video theo Định dạng video bên dưới. Ảnh đúng tỉ lệ khung sẽ đầy khung. Ảnh khác tỉ lệ vẫn dùng được, nằm giữa khung và có viền tối.
           </p>
           <PathField
             label="Ảnh bìa"
@@ -173,7 +174,19 @@ export function ProjectSetup({
             onBrowse={() => onBrowse("cover")}
           />
           {fields.cover_image && (
-            <ImageCards paths={[fields.cover_image]} onRemove={() => setFields((current) => ({ ...current, cover_image: "" }))} />
+            <ImageCards
+              paths={[fields.cover_image]}
+              onRemove={() =>
+                setFields((current) => ({
+                  ...current,
+                  cover_image: "",
+                  background_effects: current.background_effects.filter(
+                    (effect) => effect.image_path !== current.cover_image
+                  ),
+                }))
+              }
+              outputProfile={fields.output_profile}
+            />
           )}
           <div>
             <div className="mb-1.5 flex items-center justify-between">
@@ -187,10 +200,14 @@ export function ProjectSetup({
             )}
             <ImageCards
               paths={fields.background_images}
+              outputProfile={fields.output_profile}
               onRemove={(path) =>
                 setFields((current) => ({
                   ...current,
                   background_images: current.background_images.filter((item) => item !== path),
+                  background_effects: current.background_effects.filter(
+                    (effect) => effect.image_path !== path
+                  ),
                 }))
               }
             />
@@ -219,6 +236,51 @@ export function ProjectSetup({
               />
             </label>
           </div>
+          <label className="block">
+            <span className="mb-1.5 block text-sm text-[var(--muted)]">Định dạng video</span>
+            <select
+              className={fieldClass}
+              value={
+                ["landscape_1080p", "portrait_1080x1920", "square_1080", "portrait_4x5"].includes(
+                  fields.output_profile,
+                )
+                  ? fields.output_profile
+                  : "landscape_1080p"
+              }
+              onChange={(event) => setFields((current) => ({ ...current, output_profile: event.target.value }))}
+            >
+              <option value="landscape_1080p">Ngang 16:9 · 1920×1080</option>
+              <option value="portrait_1080x1920">Dọc 9:16 · 1080×1920 (TikTok/Reels/Shorts)</option>
+              <option value="square_1080">Vuông 1:1 · 1080×1080</option>
+              <option value="portrait_4x5">Dọc 4:5 · 1080×1350 (Instagram feed)</option>
+            </select>
+          </label>
+          <p className="text-xs leading-5 text-[var(--muted)]">
+            Với 9:16, lời nằm phía trên vùng an toàn đáy; vùng an toàn trên và phải dành cho giao diện ứng dụng. 1:1 và 4:5
+            không có vùng UI che. Preview trong Hiệu ứng nền vẫn hiển thị ảnh gốc; bản render cuối sẽ khớp định dạng đã chọn.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Hiệu ứng nền (AI)</h2>
+          <p className="text-sm leading-6 text-[var(--muted)]">
+            Tuỳ chọn. Phân tích ảnh nền bằng Gemini để lập kế hoạch hiệu ứng; hiện render mưa, tuyết, nước, khói,
+            gió/sway, lửa, tàn lửa, chim, tia nắng, sương mù và nhịp sáng. Cần bật đồng ý gửi ảnh lên Gemini trước khi phân tích. Bỏ trống nếu chỉ dùng ảnh tĩnh.
+          </p>
+          <AiEffects
+            images={
+              fields.background_images.length
+                ? fields.background_images
+                : fields.cover_image
+                  ? [fields.cover_image]
+                  : []
+            }
+            effects={fields.background_effects}
+            outputProfile={fields.output_profile}
+            onEffectsChange={(updater) =>
+              setFields((current) => ({ ...current, background_effects: updater(current.background_effects) }))
+            }
+          />
         </section>
 
         <label className="block">
@@ -287,10 +349,11 @@ export function ProjectSetup({
           <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Luồng</h2>
           <ol className="mt-4 space-y-2 text-sm leading-6 text-[var(--muted)]">
             <li>1. Khai báo audio, lời, ảnh</li>
-            <li>2. Tách Kim Vocal 2 và trộn nhạc nền</li>
-            <li>3. Căn / ghép chữ</li>
-            <li>4. Biên tập timing</li>
-            <li>5. Xuất hai video</li>
+            <li>2. Hiệu ứng AI (tuỳ chọn)</li>
+            <li>3. Tách Kim Vocal 2 và trộn nhạc nền</li>
+            <li>4. Căn / ghép chữ</li>
+            <li>5. Biên tập timing</li>
+            <li>6. Xuất hai video</li>
           </ol>
         </section>
       </aside>

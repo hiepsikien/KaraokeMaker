@@ -25,6 +25,127 @@ export type Outputs = {
   project?: string;
 };
 
+export type DirectorPoint = {
+  x: number;
+  y: number;
+};
+
+export type DirectorBox = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+};
+
+export type DirectorAnchors = {
+  pivot?: DirectorPoint | null;
+  opening?: DirectorPoint | null;
+};
+
+export type DirectorObject = {
+  id: string;
+  label: string;
+  box: DirectorBox;
+  anchors: DirectorAnchors;
+  affordances: string[];
+  confidence: number;
+  source?: string;
+};
+
+export type DirectorRegion = {
+  id: string;
+  polygon: DirectorPoint[];
+};
+
+export type DirectorProtect = {
+  label: string;
+  box: DirectorBox;
+};
+
+export type DirectorFitTransform = {
+  mode: string;
+  source_width: number;
+  source_height: number;
+  frame_width: number;
+  frame_height: number;
+  scale: number;
+  offset_x: number;
+  offset_y: number;
+};
+
+export type EffectPlanItem = {
+  effect: string;
+  target_ids: string[];
+  params: Record<string, unknown>;
+};
+
+export type EffectPlan = {
+  version: number;
+  image_hash: string;
+  profile_id: string;
+  fit_transform: DirectorFitTransform;
+  regions?: DirectorRegion[];
+  protect?: DirectorProtect[];
+  /** Optional global filter applied when the plan is rendered. */
+  selected_object_ids?: string[];
+  items: EffectPlanItem[];
+};
+
+export type EffectConsentReceipt = {
+  timestamp: string;
+  image_hash: string;
+  provider: string;
+  model: string;
+};
+
+export type BackgroundEffect = {
+  image_path: string;
+  image_hash: string;
+  effect_prompt: string;
+  effect_consent_receipt: EffectConsentReceipt;
+  selected_object_ids: string[];
+  effect_plan: EffectPlan;
+  model: string;
+  created: string;
+  asset_id: string | null;
+};
+
+export type DirectorIntentEffect = {
+  type: string;
+  intensity?: number;
+  audio?: boolean;
+  [key: string]: unknown;
+};
+
+export type DirectorIntent = {
+  effects: DirectorIntentEffect[];
+};
+
+export type DirectorUsage = {
+  prompt?: number;
+  output?: number;
+  thoughts?: number;
+  total?: number;
+};
+
+export type DirectorAnalysis = {
+  image: string;
+  image_hash: string;
+  width: number;
+  height: number;
+  prompt?: string;
+  model: string;
+  scene?: string;
+  objects: DirectorObject[];
+  regions?: DirectorRegion[];
+  protect?: DirectorProtect[];
+  intent?: DirectorIntent | null;
+  effect_plan: EffectPlan;
+  usage?: DirectorUsage | null;
+  cached?: boolean;
+  intent_fallback?: boolean;
+};
+
 export type Project = {
   version: number;
   status: "draft" | "aligned" | "exported";
@@ -37,6 +158,8 @@ export type Project = {
   instrumental_audio: string;
   cover_image: string;
   background_images: string[];
+  background_effects: BackgroundEffect[];
+  output_profile: string;
   output_dir: string;
   cover_duration: number;
   image_duration: number;
@@ -74,6 +197,8 @@ export type ProjectFields = {
   instrumental_audio: string;
   lyrics: string;
   background_images: string[];
+  background_effects: BackgroundEffect[];
+  output_profile: string;
   cover_image: string;
   output_dir: string;
   cover_duration: string;
@@ -95,6 +220,8 @@ export function emptyFields(outputDir = ""): ProjectFields {
     instrumental_audio: "",
     lyrics: "",
     background_images: [],
+    background_effects: [],
+    output_profile: "landscape_1080p",
     cover_image: "",
     output_dir: outputDir,
     cover_duration: "5",
@@ -117,6 +244,8 @@ export function fieldsFromProject(project: Project): ProjectFields {
     instrumental_audio: project.instrumental_audio || "",
     lyrics: project.lyrics || "",
     background_images: project.background_images || [],
+    background_effects: Array.isArray(project.background_effects) ? project.background_effects : [],
+    output_profile: project.output_profile || "landscape_1080p",
     cover_image: project.cover_image || "",
     output_dir: project.output_dir || "",
     cover_duration: String(project.cover_duration ?? 5),
@@ -140,6 +269,8 @@ export function fieldsPayload(fields: ProjectFields) {
     instrumental_audio: fields.instrumental_audio,
     lyrics: fields.lyrics,
     background_images: fields.background_images,
+    background_effects: fields.background_effects,
+    output_profile: fields.output_profile,
     cover_image: fields.cover_image,
     output_dir: fields.output_dir,
     cover_duration: Number(fields.cover_duration),
