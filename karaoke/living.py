@@ -1710,7 +1710,9 @@ def _wind_specs(
         log("Bỏ qua gió: intensity bằng 0.")
         return []
     speed = _items_speed(items)
-    cycles = max(0, int(round(seconds / 3.0 * speed)))
+    # A positive speed must still move at low slider values. Rounding a slow
+    # wind (e.g. 10% of 8s) to zero cycles made the target look frozen.
+    cycles = 0 if speed <= 0.0 else max(1, int(round(seconds / 3.0 * speed)))
     rng = np.random.default_rng(seed ^ 0x51D)
     size_scale = height / HEIGHT
     specs: list[dict] = []

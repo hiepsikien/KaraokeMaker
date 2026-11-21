@@ -822,6 +822,33 @@ class WindFlagTests(unittest.TestCase):
         self.assertEqual([spec["id"] for spec in specs], ["manual-1"])
         self.assertTrue(specs[0]["cloth"])
 
+    def test_low_wind_speed_still_animates(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["manual-1"], "params": {"intensity": 0.15, "speed": 0.1}}],
+            objects=[
+                object_entry(
+                    "manual-1",
+                    "hoa đào",
+                    (0.55, 0.10, 0.75, 0.40),
+                    affordances=["wind_movable"],
+                    pivot=(0.65, 0.11),
+                    source="manual",
+                )
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        self.assertGreaterEqual(specs[0]["cycles"], 1)
+        rng = np.random.default_rng(7)
+        image = Image.fromarray(rng.integers(0, 255, (100, 100, 3), dtype=np.uint8), "RGB")
+        first = np.asarray(living._wind_frame(image.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._wind_frame(image.copy(), specs, 0.5), dtype=np.float32)
+        self.assertGreater(float(np.abs(first - second).max()), 0.5)
+
     def test_zero_wind_speed_freezes_the_target(self):
         plan = effect_plan(
             [{"effect": "wind", "target_ids": ["flag-1"], "params": {"intensity": 0.35, "speed": 0.0}}],
