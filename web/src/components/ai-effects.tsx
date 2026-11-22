@@ -2,6 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { ImageTray } from "@/components/image-tray";
+import { Badge, Disclosure, ProgressBar, Segmented, btnPrimary, btnSecondary } from "@/components/ui/primitives";
+import { inputClass } from "@/components/ui/field";
+import { useNotices } from "@/components/ui/toast";
+import { useSettings } from "@/lib/settings";
+import { PROFILE_OPTIONS } from "@/lib/format";
 import type {
   BackgroundEffect,
   DirectorAnalysis,
@@ -95,8 +101,7 @@ function profileLabel(id: string) {
   return PROFILE_LABELS[id] || PROFILE_LABELS.landscape_1080p;
 }
 
-const fieldClass =
-  "w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none transition focus:border-[var(--gold)]";
+const fieldClass = inputClass;
 
 function fileName(path: string) {
   const parts = path.split(/[/\\]/);
@@ -504,6 +509,14 @@ export function AiEffects({
   onAssetDuration,
   resumeAsset = null,
   onAssetSaved,
+  layout = "stacked",
+  assets: assetsProp,
+  onAssetsRefresh,
+  onAddImages,
+  onRemoveImage,
+  busyImages = false,
+  onProfileChange,
+  onDurationChange,
 }: {
   images: string[];
   effects: BackgroundEffect[];
@@ -513,26 +526,49 @@ export function AiEffects({
   onEffectsChange: (updater: (current: BackgroundEffect[]) => BackgroundEffect[]) => void;
   onAssetDuration?: (seconds: number) => void;
   onAssetSaved?: () => void;
+  layout?: "stacked" | "studio";
+  assets?: StudioAsset[];
+  onAssetsRefresh?: () => void;
+  onAddImages?: () => void;
+  onRemoveImage?: (path: string) => void;
+  busyImages?: boolean;
+  onProfileChange?: (value: string) => void;
+  onDurationChange?: (value: number) => void;
 }) {
   const imageSignature = images.join("\n");
+  const { settings, save: saveSettings } = useSettings();
+  const { push } = useNotices();
   const [selectedImage, setSelectedImage] = useState(() => images[0] || "");
   const [prompt, setPrompt] = useState("");
-  const [consent, setConsent] = useState(false);
+  const [consent, setConsentState] = useState(settings.gemini_consent);
   const [analysis, setAnalysis] = useState<DirectorAnalysis | null>(null);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [fact, setFact] = useState<InspectFact | null>(null);
   const [inspectError, setInspectError] = useState("");
-  const [assets, setAssets] = useState<StudioAsset[]>([]);
+  const [internalAssets, setInternalAssets] = useState<StudioAsset[]>([]);
+  const assets = assetsProp ?? internalAssets;
   const [assetsError, setAssetsError] = useState("");
   const [renderStates, setRenderStates] = useState<Record<string, RenderState>>({});
   const [drawMode, setDrawMode] = useState(false);
   const [draftBox, setDraftBox] = useState<DirectorBox | null>(null);
   const [manualName, setManualName] = useState("");
   const [manualWind, setManualWind] = useState(true);
+  const [stageTab, setStageTab] = useState<"image" | "clip">("image");
+  const [quickPreview, setQuickPreview] = useState<PreviewResult | null>(null);
+  const [quickBusy, setQuickBusy] = useState(false);
   const renderAbortRef = useRef<AbortController | null>(null);
   const renderTargetRef = useRef("");
+
+  useEffect(() => {
+    setConsentState(settings.gemini_consent);
+  }, [settings.gemini_consent]);
+
+  useEffect(() => {
+    setQuickPreview(null);
+    setStageTab("image");
+  }, [selectedImage, outputProfile, imageDuration]);
 
   useEffect(() => {
     return () => {
@@ -596,6 +632,8 @@ export function AiEffects({
     setDrawMode(false);
     setDraftBox(null);
     setManualName("");
+    setQuickPreview(null);
+    setStageTab("clip");
   }, [resumeAsset?.token]);
 
   useEffect(() => {
@@ -629,6 +667,11 @@ export function AiEffects({
   }, [selectedImage, outputProfile]);
 
   async function refreshAssets() {
+    if (assetsProp) {
+      onAssetsRefresh?.();
+      setAssetsError("");
+      return;
+    }
     try {
       const response = await fetch("/api/studio/assets");
       if (!response.ok) {
@@ -636,16 +679,16 @@ export function AiEffects({
         return;
       }
       const data = (await response.json()) as { assets?: StudioAsset[] };
-      setAssets(Array.isArray(data.assets) ? data.assets : []);
+      setInternalAssets(Array.isArray(data.assets) ? data.assets : []);
       setAssetsError("");
     } catch {
-      setAssetsError("Không tải được asset đã render. Kiểm tra server Python.");
+      setAssetsError("Không tải được clip đã render. Kiểm tra server Python.");
     }
   }
 
   useEffect(() => {
-    void refreshAssets();
-  }, []);
+    if (!assetsProp) void refreshAssets();
+  }, [assetsProp]);
 
   const existingEffect = selectedImage ? effects.find((item) => item.image_path === selectedImage) : undefined;
   const preview = fact?.preview || fact?.thumbnail || "";
@@ -914,6 +957,8 @@ export function AiEffects({
           ),
         );
         setImageRender(imagePath, { status: "done" });
+        setQuickPreview(null);
+        setStageTab("clip");
         return;
       }
     }
@@ -1035,6 +1080,11 @@ export function AiEffects({
         ),
       );
       setImageRender(imagePath, { status: "done", preview });
+      setStageTab("clip");
+      push({
+        tone: "success",
+        message: `Đã lưu clip “${fileName(imagePath).replace(/\.[^.]+$/, "")}” vào Thư viện.`,
+      });
       void refreshAssets();
       onAssetSaved?.();
     } catch {
@@ -1051,8 +1101,48 @@ export function AiEffects({
     }
   }
 
+  async function renderQuick() {
+    const plan = existingEffect?.effect_plan || analysis?.effect_plan;
+    if (!selectedImage || !plan) {
+      push({ tone: "info", message: "Hãy phân tích ảnh và áp dụng hiệu ứng trước khi xem nhanh." });
+      return;
+    }
+    const parsed = Number(imageDuration);
+    const seconds = Number.isFinite(parsed) && parsed > 0 ? parsed : 8;
+    setQuickBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/studio/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_path: selectedImage,
+          effect_plan: plan,
+          duration: seconds,
+          output_profile: outputProfile,
+        }),
+      });
+      if (!response.ok) {
+        setError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as PreviewResult;
+      if (!data?.url) {
+        setError("Render nhanh không trả về clip.");
+        return;
+      }
+      setQuickPreview(data);
+      setStageTab("clip");
+    } catch {
+      setError("Không kết nối được server render. Kiểm tra server Python đang chạy.");
+    } finally {
+      setQuickBusy(false);
+    }
+  }
+
   function applyEffect() {
     if (!analysis || !selectedImage) return;
+    setQuickPreview(null);
     const manualWindIds = analysis.objects
       .filter(
         (object) =>
@@ -1121,6 +1211,8 @@ export function AiEffects({
 
   function removeEffect() {
     if (!selectedImage) return;
+    setQuickPreview(null);
+    setStageTab("image");
     onEffectsChange((current) => current.filter((item) => item.image_path !== selectedImage));
   }
 
@@ -1140,6 +1232,12 @@ export function AiEffects({
       )
     : undefined;
   const currentRenderState = selectedImage ? renderStates[selectedImage] : undefined;
+  const clipUrl =
+    quickPreview?.url ||
+    currentRenderState?.preview?.url ||
+    (existingEffect?.asset_id ? `/api/studio/assets/${existingEffect.asset_id}/clip` : "");
+  const clipMeta = quickPreview || currentRenderState?.preview || null;
+  const [clipWidth, clipHeight] = PROFILE_DIMENSIONS[outputProfile] || PROFILE_DIMENSIONS.landscape_1080p;
   const assetSeconds = selectedAsset?.asset_frames && selectedAsset?.fps
     ? selectedAsset.asset_frames / selectedAsset.fps
     : selectedAsset?.loop_duration;
@@ -1214,490 +1312,674 @@ export function AiEffects({
     ]);
   }
 
+  const planItems =
+    analysis?.effect_plan.items || existingEffect?.effect_plan.items || [];
+  const durationValue = Number(imageDuration) || 8;
+
+  const imageSelector =
+    images.length > 1 ? (
+      <label className="block">
+        <span className="mb-1.5 block text-sm text-[var(--muted)]">Ảnh phân tích</span>
+        <select
+          className={fieldClass}
+          value={selectedImage}
+          onChange={(event) => setSelectedImage(event.target.value)}
+        >
+          {images.map((path) => (
+            <option key={path} value={path}>
+              {fileName(path)}
+            </option>
+          ))}
+        </select>
+      </label>
+    ) : null;
+
+  const renderSettings = (
+    <Disclosure
+      title="Thiết lập render"
+      summary={`${profileLabel(outputProfile)} · ${imageDuration}s`}
+    >
+      <div className="space-y-3">
+        <label className="block">
+          <span className="mb-1 block text-[11px] text-[var(--muted)]">Định dạng</span>
+          <select
+            className={fieldClass}
+            value={outputProfile}
+            disabled={!onProfileChange}
+            onChange={(event) => onProfileChange?.(event.target.value)}
+          >
+            {PROFILE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label} · {option.size}
+              </option>
+            ))}
+            {!PROFILE_OPTIONS.some((option) => option.value === outputProfile) ? (
+              <option value={outputProfile}>{outputProfile}</option>
+            ) : null}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[11px] text-[var(--muted)]">Thời lượng clip</span>
+          <select
+            className={fieldClass}
+            value={durationValue}
+            disabled={!onDurationChange}
+            onChange={(event) => onDurationChange?.(Number(event.target.value))}
+          >
+            <option value={8}>8 giây</option>
+            <option value={16}>16 giây</option>
+            {durationValue !== 8 && durationValue !== 16 ? (
+              <option value={durationValue}>{durationValue} giây (theo clip)</option>
+            ) : null}
+          </select>
+        </label>
+      </div>
+    </Disclosure>
+  );
+
+  const drawBlock = analysis ? (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs leading-5">
+        {drawMode ? (
+          <button
+            type="button"
+            onClick={() => setDrawMode(false)}
+            className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-[var(--muted)] hover:border-[var(--gold)]"
+          >
+            Huỷ vẽ
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={startManualDraw}
+            className="rounded-xl border border-[var(--gold)] px-3 py-1.5 font-semibold text-[var(--gold)] hover:bg-black/25"
+          >
+            Vẽ object
+          </button>
+        )}
+        <span className="text-[var(--muted)]">
+          {drawMode
+            ? "Kéo chuột trên ảnh để vẽ vùng object mới."
+            : "Kéo 4 góc ô để chỉnh kích thước; hoặc vẽ object thủ công."}
+        </span>
+      </div>
+      {draftBox ? (
+        <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 p-3">
+          <p className="text-sm font-semibold text-[var(--gold)]">Object thủ công</p>
+          <input
+            value={manualName}
+            onChange={(event) => setManualName(event.target.value)}
+            placeholder="Tên object, vd. khăn, lọn tóc, vạt áo"
+            className={fieldClass}
+          />
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={manualWind}
+              onChange={(event) => setManualWind(event.target.checked)}
+              className="accent-[var(--gold)]"
+            />
+            Bay theo gió (wind_movable)
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={addManualObject}
+              className="rounded-xl bg-[var(--gold)] px-3 py-1.5 text-sm font-semibold text-[#1a1206]"
+            >
+              Thêm object
+            </button>
+            <button
+              type="button"
+              onClick={cancelManualObject}
+              className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--muted)] hover:border-[var(--gold)]"
+            >
+              Huỷ
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  ) : null;
+
+  const sourceStage = (
+    <PlanOverlay
+      analysis={analysis}
+      preview={preview}
+      frameWidth={frameWidth}
+      frameHeight={frameHeight}
+      selectedIds={selectedObjectIds}
+      onToggle={toggleObject}
+      onBoxChange={changeObjectBox}
+      drawMode={drawMode}
+      onDrawBox={finishManualDraw}
+      pendingBox={draftBox}
+    />
+  );
+
+  const clipStage = clipUrl ? (
+    <div
+      className="overflow-hidden rounded-2xl border border-[var(--line)] bg-black"
+      style={{ aspectRatio: `${clipWidth} / ${clipHeight}` }}
+    >
+      <video
+        key={clipUrl}
+        src={clipUrl}
+        controls
+        autoPlay
+        loop
+        muted
+        playsInline
+        className="h-full w-full object-contain"
+      />
+    </div>
+  ) : (
+    <div className="grid min-h-40 place-items-center rounded-2xl border border-dashed border-[var(--line)] bg-black/20 p-6 text-center text-xs leading-5 text-[var(--muted)]">
+      Chưa có clip. Bấm Áp dụng để tạo clip chuẩn, hoặc Xem nhanh sau khi đã có kế hoạch hiệu ứng.
+    </div>
+  );
+
+  const stage = (
+    <div className="space-y-2">
+      {layout === "studio" ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Segmented<"image" | "clip">
+            value={stageTab}
+            onChange={setStageTab}
+            ariaLabel="Xem ảnh hay clip"
+            options={[
+              { value: "image", label: "Ảnh" },
+              { value: "clip", label: "Clip" },
+            ]}
+          />
+          <div className="flex items-center gap-2">
+            <Badge tone="muted">
+              {profileLabel(outputProfile)} · {imageDuration}s
+            </Badge>
+            {clipMeta ? (
+              <Badge tone="success">
+                {clipMeta.width}×{clipMeta.height}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {layout === "studio" && stageTab === "clip" ? clipStage : sourceStage}
+      {drawBlock}
+    </div>
+  );
+
+  const imageMeta = (
+    <div className="space-y-1 text-[11px] leading-4 text-[var(--muted)]">
+      <p className="truncate text-xs text-[var(--paper)]">
+        {fileName(selectedImage)}
+        {fact && fact.width > 0 ? ` · ${fact.width}×${fact.height}` : ""}
+      </p>
+      {fact?.note ? <p>{fact.note}</p> : null}
+      {portrait ? (
+        <p>9:16: lời nằm trên vùng an toàn đáy; vùng trên/phải dành cho giao diện ứng dụng.</p>
+      ) : null}
+    </div>
+  );
+
+  const promptBlock = (
+    <div>
+      <label className="mb-1.5 block text-sm text-[var(--muted)]" htmlFor="ai-effects-prompt">
+        Mô tả hiệu ứng
+      </label>
+      <textarea
+        id="ai-effects-prompt"
+        className={`${fieldClass} min-h-16 resize-y leading-6`}
+        value={prompt}
+        onChange={(event) => setPrompt(event.target.value)}
+        placeholder="Ví dụ: mưa nhẹ trên phố, khói bốc từ bát mỳ…"
+      />
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {QUICK_PROMPTS.map((chip) => (
+          <button
+            key={chip}
+            type="button"
+            onClick={() => setPrompt(chip)}
+            className={`rounded-full border px-3 py-1 text-xs transition ${
+              prompt === chip
+                ? "border-[var(--gold)] bg-black/40 text-[var(--gold)]"
+                : "border-[var(--line)] text-[var(--muted)] hover:border-[var(--gold)] hover:text-white"
+            }`}
+          >
+            {chip}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  const consentBlock = (
+    <label className="flex items-start gap-2 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-2">
+      <input
+        type="checkbox"
+        checked={consent}
+        onChange={(event) => {
+          const next = event.target.checked;
+          setConsentState(next);
+          void saveSettings({ gemini_consent: next });
+        }}
+        className="mt-0.5 accent-[var(--gold)]"
+      />
+      <span className="text-xs leading-5">
+        Gửi ảnh lên Google Gemini để phân tích
+        <span className="mt-0.5 block text-[11px] leading-4 text-[var(--muted)]">
+          Chỉ ảnh đang chọn và mô tả được gửi khi bấm Phân tích. Tuỳ chọn được lưu trong Cài đặt.
+        </span>
+      </span>
+    </label>
+  );
+
+  const analyzeBlock = (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={analyze}
+        disabled={!canAnalyze}
+        className="w-full rounded-xl bg-[var(--gold)] px-4 py-2.5 text-sm font-semibold text-[#1a1206] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {busy ? "Đang phân tích ảnh…" : "Phân tích ảnh"}
+      </button>
+      {busy ? (
+        <p className="text-[11px] leading-4 text-[var(--muted)]">
+          Gemini đang đọc ảnh và lập kế hoạch hiệu ứng…
+        </p>
+      ) : analyzeHint ? (
+        <p className="text-[11px] leading-4 text-[var(--muted)]">{analyzeHint}</p>
+      ) : null}
+    </div>
+  );
+
+  const errorBlock = error || inspectError ? (
+    <p
+      className={`whitespace-pre-line rounded-xl border px-3 py-2 text-xs leading-5 ${
+        error
+          ? "border-red-900 bg-red-950/60 text-red-100"
+          : "border-amber-900/70 bg-amber-950/30 text-amber-100"
+      }`}
+    >
+      {error || inspectError}
+    </p>
+  ) : null;
+
+  const analysisMeta = analysis ? (
+    <div className="space-y-1 rounded-xl border border-[var(--line)] bg-black/20 px-2.5 py-2 text-[11px] leading-4">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[var(--muted)]">{analysis.model}</span>
+        {analysis.cached ? <Badge tone="gold">Cache</Badge> : null}
+        {analysis.usage ? <span className="text-[var(--muted)]">{usageText(analysis.usage)}</span> : null}
+      </div>
+      {analysis.intent_fallback ? (
+        <p className="text-amber-100/90">
+          Không gọi được Gemini để hiểu prompt; đang dùng từ khoá dự phòng.
+        </p>
+      ) : null}
+      {analysis.scene ? <p className="text-[var(--muted)]">{analysis.scene}</p> : null}
+    </div>
+  ) : null;
+
+  const paramsBlock = planItems.length > 0 ? (
+    <div className="space-y-2">
+      {planItems.map((item, index) => {
+        const keys = EFFECT_PARAMS[item.effect] || ["intensity"];
+        return (
+          <div key={`${item.effect}-${index}`} className="space-y-1">
+            <p className="text-[11px] font-medium">{effectLabel(item.effect)}</p>
+            {keys.map((key) => {
+              const meta = PARAM_META[key];
+              const raw = item.params?.[key];
+              const value = typeof raw === "number" ? Math.round(raw * 100) : meta.default;
+              const min = key === "speed" && item.effect === "wind" ? 0 : meta.min;
+              return (
+                <label key={key} className="block">
+                  <span className="flex items-center justify-between text-[10px] text-[var(--muted)]">
+                    <span>{meta.label}</span>
+                    <span>{value}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={min}
+                    max={meta.max}
+                    step={meta.step}
+                    value={value}
+                    onChange={(event) => updateParam(index, key, Number(event.target.value))}
+                    className="mt-0.5 w-full accent-[var(--gold)]"
+                  />
+                </label>
+              );
+            })}
+          </div>
+        );
+      })}
+      <p className="text-[10px] leading-4 text-[var(--muted)]">
+        Chỉnh cục bộ, không gọi lại Gemini. Bấm Áp dụng để lưu.
+      </p>
+    </div>
+  ) : null;
+
+  const appliedBlock = existingEffect ? (
+    <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 px-2.5 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs text-[var(--gold)]">Đã áp dụng</p>
+          <p className="truncate text-[11px] leading-4 text-[var(--muted)]">
+            {existingEffect.effect_prompt}
+            {planItems.length ? ` · ${planItems.map((item) => item.effect).join(", ")}` : ""}
+          </p>
+        </div>
+        <button type="button" onClick={removeEffect} className="shrink-0 text-[11px] text-[var(--muted)] hover:text-white">
+          Xoá
+        </button>
+      </div>
+      {currentRenderState?.status === "rendering" ? (
+        <div className="space-y-1">
+          <ProgressBar percent={currentRenderState.percent || 0} />
+          <p className="text-[11px] text-[var(--muted)]">
+            Đang tạo clip…{currentRenderState.percent ? ` ${currentRenderState.percent}%` : ""}
+          </p>
+        </div>
+      ) : null}
+      {currentRenderState?.status === "error" ? (
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="text-red-200">{currentRenderState.error}</span>
+          <button type="button" onClick={() => void startRender(existingEffect, true)} className="text-[var(--gold)] hover:text-white">
+            Thử lại
+          </button>
+        </div>
+      ) : null}
+      {existingEffect.asset_id &&
+      currentRenderState?.status !== "rendering" &&
+      currentRenderState?.status !== "error" ? (
+        <p className="text-[11px] text-emerald-200">Đã có clip trong thư viện</p>
+      ) : null}
+      <label className="block">
+        <span className="mb-1 block text-[10px] text-[var(--muted)]">Clip đã render</span>
+        <div className="flex gap-2">
+          <select
+            className={fieldClass}
+            value={existingEffect.asset_id || ""}
+            onChange={(event) => chooseAsset(event.target.value)}
+          >
+            <option value="">Render từ effect plan</option>
+            {imageAssets.map((asset) => (
+              <option key={asset.id} value={asset.id}>
+                {asset.name} · {asset.asset_frames && asset.fps ? `${(asset.asset_frames / asset.fps).toFixed(1)}s` : "clip"}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => void refreshAssets()}
+            className="shrink-0 rounded-xl border border-[var(--line)] px-2.5 text-[11px] hover:border-[var(--gold)]"
+          >
+            Tải lại
+          </button>
+        </div>
+      </label>
+      {latestMatchingAsset ? (
+        <button
+          type="button"
+          onClick={() => chooseAsset(latestMatchingAsset.id)}
+          className="text-left text-[11px] text-[var(--gold)] hover:text-white"
+        >
+          Có clip mới khớp plan: dùng “{latestMatchingAsset.name}”
+        </button>
+      ) : null}
+      {currentRenderState?.status !== "rendering" && currentRenderState?.status !== "error" ? (
+        <button
+          type="button"
+          onClick={() => void startRender(existingEffect, true)}
+          className="text-[11px] text-[var(--gold)] hover:text-white"
+        >
+          {existingEffect.asset_id ? "Tạo lại clip chuẩn" : "Tạo clip chuẩn"}
+        </button>
+      ) : null}
+      {assetsError ? <p className="text-[11px] text-red-200">{assetsError}</p> : null}
+      {assetProfileMismatch ? (
+        <p className="text-[10px] leading-4 text-amber-200">
+          Clip ở {selectedAsset?.profile_id}, khác định dạng hiện tại ({outputProfile}). Export sẽ fallback render từ effect plan.
+        </p>
+      ) : null}
+      {assetMismatch ? (
+        <div className="space-y-1">
+          <p className="text-[10px] leading-4 text-amber-200">
+            Clip dài {assetSeconds?.toFixed(1)}s, khác “Mỗi ảnh nền” ({imageDuration}s). Export sẽ fallback render từ effect plan.
+          </p>
+          {onAssetDuration && assetSeconds ? (
+            <button
+              type="button"
+              onClick={() => onAssetDuration(assetSeconds)}
+              className="text-[10px] text-[var(--gold)] hover:text-white"
+            >
+              Đặt “Mỗi ảnh nền” = {assetSeconds.toFixed(1)}s
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  ) : null;
+
+  const assetPickBlock = !existingEffect && selectedImage && imageAssets.length > 0 ? (
+    <div className="space-y-1 rounded-xl border border-[var(--line)] bg-black/20 px-2.5 py-2">
+      <p className="text-[11px] text-[var(--gold)]">Dùng clip Studio cho ảnh này</p>
+      <select
+        className={fieldClass}
+        defaultValue=""
+        onChange={(event) => {
+          if (event.target.value) useAssetForImage(event.target.value);
+        }}
+      >
+        <option value="">Chọn clip đã render…</option>
+        {imageAssets.map((asset) => (
+          <option key={asset.id} value={asset.id}>
+            {asset.name}
+          </option>
+        ))}
+      </select>
+      <p className="text-[10px] leading-4 text-[var(--muted)]">
+        Chọn clip sẽ tạo hiệu ứng chỉ dùng asset, không cần phân tích Gemini.
+      </p>
+    </div>
+  ) : null;
+
+  const objectsBlock = analysis && (analysis.objects || []).length > 0 ? (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-xs text-[var(--muted)]">Object cho hiệu ứng</span>
+        <span className="text-[11px] text-[var(--muted)]">
+          {selectedObjectIds.length}/{analysis.objects.length} chọn
+        </span>
+      </div>
+      <ul className={layout === "studio" ? "space-y-1.5" : "max-h-64 space-y-2 overflow-auto pr-1"}>
+        {analysis.objects.map((object) => {
+          const checked = selectedObjectIds.includes(object.id);
+          const percent =
+            object.confidence <= 1
+              ? Math.round(Math.max(0, object.confidence) * 100)
+              : Math.round(object.confidence);
+          return (
+            <li
+              key={object.id}
+              className={`rounded-lg border px-2 py-1.5 transition ${
+                checked ? "border-[var(--gold)] bg-black/25" : "border-[var(--line)] bg-black/15"
+              }`}
+            >
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleObject(object.id)}
+                  className="mt-0.5 accent-[var(--gold)]"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-baseline gap-1.5">
+                    <span className="text-xs">{object.label}</span>
+                    <span className="text-[10px] text-[var(--muted)]">{percent}%</span>
+                    {object.source === "manual" ? <Badge tone="gold">thủ công</Badge> : null}
+                  </span>
+                  {(checked || layout !== "studio") && object.affordances.length > 0 ? (
+                    <span className="mt-1 flex flex-wrap gap-1">
+                      {object.affordances.map((affordance) => (
+                        <span
+                          key={affordance}
+                          className="rounded-full border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
+                        >
+                          {affordance}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+              {object.source === "manual" ? (
+                <button
+                  type="button"
+                  onClick={() => removeManualObject(object.id)}
+                  className="mt-1 text-[10px] text-[var(--muted)] hover:text-red-200"
+                >
+                  Xoá object thủ công
+                </button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  ) : null;
+
+  const regionsBlock =
+    regions.length > 0 || protect.length > 0 ? (
+      <div className="rounded-xl border border-[var(--line)] bg-black/20 px-2.5 py-2 text-[10px] leading-4 text-[var(--muted)]">
+        {regions.length > 0 ? (
+          <p>Vùng: {regions.map((region) => `${region.id} (${region.polygon.length} điểm)`).join(", ")}</p>
+        ) : null}
+        {protect.length > 0 ? (
+          <p className={regions.length > 0 ? "mt-1" : ""}>Bảo vệ: {protect.map((item) => item.label).join(", ")}</p>
+        ) : null}
+      </div>
+    ) : null;
+
+  const applyBar = analysis ? (
+    <div
+      className={`rounded-2xl border border-[var(--gold)] bg-[var(--panel)] p-2 ${
+        layout === "studio" ? "" : "sticky bottom-2 z-10 shadow-lg"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={applyEffect}
+        disabled={busy}
+        className="w-full rounded-xl bg-[var(--gold)] px-4 py-2.5 text-sm font-semibold text-[#1a1206] transition hover:brightness-105 disabled:opacity-50"
+      >
+        {existingEffect ? "Áp dụng lại" : "Áp dụng"}
+      </button>
+      <p className="mt-1 text-center text-[10px] leading-4 text-[var(--muted)]">
+        Áp dụng xong clip chuẩn tự tạo ở nền. Xuất video vẫn dựng trực tiếp nếu clip chưa xong.
+      </p>
+    </div>
+  ) : null;
+
+  const stageActions =
+    layout === "studio" && (analysis || existingEffect) ? (
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => void renderQuick()}
+          disabled={quickBusy}
+          className={btnSecondary}
+        >
+          {quickBusy ? "Đang render nhanh…" : "Xem nhanh (640px)"}
+        </button>
+      </div>
+    ) : null;
+
   if (images.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed border-[var(--line)] bg-black/15 p-4 text-sm leading-6 text-[var(--muted)]">
-        Chưa có ảnh nền để phân tích. Thêm ảnh ở mục Hình; nếu bỏ trống, ảnh bìa sẽ được dùng.
+      <div className="rounded-2xl border border-dashed border-[var(--line)] bg-black/15 p-6 text-center text-sm leading-6 text-[var(--muted)]">
+        <p>Chưa có ảnh nền để phân tích. Thêm ảnh ở mục Hình; nếu bỏ trống, ảnh bìa sẽ được dùng.</p>
+        {onAddImages ? (
+          <button type="button" onClick={onAddImages} className={`${btnPrimary} mt-3`}>
+            Chọn ảnh
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (layout === "studio") {
+    return (
+      <div className="grid items-start gap-4 xl:grid-cols-[220px_minmax(0,1fr)_340px]">
+        <aside className="space-y-3 rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3 xl:sticky xl:top-20 xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto">
+          <ImageTray
+            paths={images}
+            selected={selectedImage}
+            outputProfile={outputProfile}
+            onSelect={setSelectedImage}
+            onRemove={(path) => onRemoveImage?.(path)}
+            onAdd={() => onAddImages?.()}
+            busyAdd={busyImages}
+          />
+          {renderSettings}
+          {imageMeta}
+          {assetsError ? <p className="text-[11px] text-red-200">{assetsError}</p> : null}
+        </aside>
+
+        <section className="min-w-0 space-y-3 rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3 sm:p-4">
+          {stage}
+          {promptBlock}
+          {consentBlock}
+          {analyzeBlock}
+          {errorBlock}
+          {stageActions}
+          {applyBar}
+        </section>
+
+        <aside className="space-y-2 rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3 xl:sticky xl:top-20 xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto">
+          {analysisMeta}
+          {paramsBlock ? (
+            <Disclosure title="Hiệu ứng" summary={`${planItems.length}`} defaultOpen>
+              {paramsBlock}
+            </Disclosure>
+          ) : null}
+          {appliedBlock}
+          {assetPickBlock}
+          {objectsBlock ? (
+            <Disclosure
+              title="Object"
+              summary={`${selectedObjectIds.length}/${analysis?.objects.length || 0}`}
+              defaultOpen
+            >
+              {objectsBlock}
+            </Disclosure>
+          ) : null}
+          {regionsBlock}
+        </aside>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
-      {images.length > 1 && (
-        <label className="block">
-          <span className="mb-1.5 block text-sm text-[var(--muted)]">Ảnh phân tích</span>
-          <select
-            className={fieldClass}
-            value={selectedImage}
-            onChange={(event) => setSelectedImage(event.target.value)}
-          >
-            {images.map((path) => (
-              <option key={path} value={path}>
-                {fileName(path)}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      <PlanOverlay
-        analysis={analysis}
-        preview={preview}
-        frameWidth={frameWidth}
-        frameHeight={frameHeight}
-        selectedIds={selectedObjectIds}
-        onToggle={toggleObject}
-        onBoxChange={changeObjectBox}
-        drawMode={drawMode}
-        onDrawBox={finishManualDraw}
-        pendingBox={draftBox}
-      />
-      {analysis && (
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-2 text-xs leading-5">
-            {drawMode ? (
-              <button
-                type="button"
-                onClick={() => setDrawMode(false)}
-                className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-[var(--muted)] hover:border-[var(--gold)]"
-              >
-                Huỷ vẽ
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={startManualDraw}
-                className="rounded-xl border border-[var(--gold)] px-3 py-1.5 font-semibold text-[var(--gold)] hover:bg-black/25"
-              >
-                Vẽ object
-              </button>
-            )}
-            <span className="text-[var(--muted)]">
-              {drawMode
-                ? "Kéo chuột trên ảnh để vẽ vùng object mới."
-                : "Kéo 4 góc ô để chỉnh kích thước; hoặc vẽ object thủ công."}
-            </span>
-          </div>
-          {draftBox && (
-            <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 p-3">
-              <p className="text-sm font-semibold text-[var(--gold)]">Object thủ công</p>
-              <input
-                value={manualName}
-                onChange={(event) => setManualName(event.target.value)}
-                placeholder="Tên object, vd. khăn, lọn tóc, vạt áo"
-                className={fieldClass}
-              />
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={manualWind}
-                  onChange={(event) => setManualWind(event.target.checked)}
-                  className="accent-[var(--gold)]"
-                />
-                Bay theo gió (wind_movable)
-              </label>
-              <p className="text-[11px] leading-4 text-[var(--muted)]">
-                Object được chọn + bật wind_movable sẽ được thêm vào hiệu ứng Gió khi bấm Áp dụng.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={addManualObject}
-                  className="rounded-xl bg-[var(--gold)] px-3 py-1.5 text-sm font-semibold text-[#1a1206]"
-                >
-                  Thêm object
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelManualObject}
-                  className="rounded-xl border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--muted)] hover:border-[var(--gold)]"
-                >
-                  Huỷ
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2 text-xs leading-5 text-[var(--muted)]">
-        <span>
-          {fileName(selectedImage)}
-          {fact && fact.width > 0 ? ` · ${fact.width}×${fact.height} · ${fact.ratio}` : ""}
-        </span>
-        <span className="rounded-full border border-[var(--gold)] px-2 py-0.5 text-[var(--gold)]">
-          Khung xuất: {profileLabel(outputProfile)}
-        </span>
-      </div>
-      {portrait && (
-        <p className="text-xs leading-5 text-[var(--muted)]">
-          9:16: dải lời nằm trên vùng an toàn đáy; vùng an toàn trên và phải dành cho giao diện ứng dụng. Overlay vẫn vẽ
-          trên ảnh gốc; bản render cuối sẽ khớp khung 9:16.
-        </p>
-      )}
-      {inspectError && <p className="text-xs leading-5 text-amber-100/90">{inspectError}</p>}
-
-      <div>
-        <label className="mb-1.5 block text-sm text-[var(--muted)]" htmlFor="ai-effects-prompt">
-          Mô tả hiệu ứng
-        </label>
-        <textarea
-          id="ai-effects-prompt"
-          className={`${fieldClass} min-h-20 resize-y leading-6`}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder="Ví dụ: mưa nhẹ trên phố, khói bốc từ bát mỳ…"
-        />
-        <div className="mt-2 flex flex-wrap gap-2">
-          {QUICK_PROMPTS.map((chip) => (
-            <button
-              key={chip}
-              type="button"
-              onClick={() => setPrompt(chip)}
-              className={`rounded-full border px-3 py-1 text-xs transition ${
-                prompt === chip
-                  ? "border-[var(--gold)] bg-black/40 text-[var(--gold)]"
-                  : "border-[var(--line)] text-[var(--muted)] hover:border-[var(--gold)] hover:text-white"
-              }`}
-            >
-              {chip}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <label className="flex items-start gap-2 rounded-xl border border-[var(--line)] bg-black/20 p-3">
-        <input
-          type="checkbox"
-          checked={consent}
-          onChange={(event) => setConsent(event.target.checked)}
-          className="mt-0.5 accent-[var(--gold)]"
-        />
-        <span className="text-sm leading-5">
-          Gửi ảnh lên Google Gemini để phân tích
-          <span className="mt-1 block text-xs leading-4 text-[var(--muted)]">
-            Mặc định tắt. Chỉ ảnh đang chọn cùng mô tả hiệu ứng được gửi khi bạn bấm Phân tích ảnh.
-          </span>
-        </span>
-      </label>
-
-      <div className="space-y-2">
-        <button
-          type="button"
-          onClick={analyze}
-          disabled={!canAnalyze}
-          className="w-full rounded-2xl bg-[var(--gold)] px-4 py-2.5 text-sm font-semibold text-[#1a1206] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "Đang phân tích ảnh…" : "Phân tích ảnh"}
-        </button>
-        {busy && (
-          <p className="text-xs leading-5 text-[var(--muted)]">Gemini đang đọc ảnh và lập kế hoạch hiệu ứng…</p>
-        )}
-        {!busy && analyzeHint && <p className="text-xs leading-5 text-[var(--muted)]">{analyzeHint}</p>}
-      </div>
-
-      {error && (
-        <p className="whitespace-pre-line rounded-xl border border-red-900 bg-red-950/60 px-3 py-2 text-sm leading-5 text-red-100">
-          {error}
-        </p>
-      )}
-
-      {analysis && (
-        <div className="space-y-2 rounded-xl border border-[var(--line)] bg-black/20 p-3">
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="text-[var(--muted)]">{analysis.model}</span>
-            {analysis.cached && (
-              <span className="rounded-full border border-[var(--gold)] px-2 py-0.5 text-[var(--gold)]">
-                Đã lưu cache
-              </span>
-            )}
-            {analysis.usage && <span className="text-[var(--muted)]">{usageText(analysis.usage)}</span>}
-          </div>
-          {analysis.intent_fallback && (
-            <p className="text-xs leading-5 text-amber-100/90">
-              Không gọi được Gemini để hiểu prompt; đang dùng từ khóa dự phòng. Kết quả có thể thiếu hiệu ứng.
-            </p>
-          )}
-          {analysis.scene && <p className="text-xs leading-5 text-[var(--muted)]">{analysis.scene}</p>}
-        </div>
-      )}
-
-      {analysis && (analysis.effect_plan.items || []).length > 0 && (
-        <div className="space-y-3 rounded-xl border border-[var(--line)] bg-black/20 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-sm">Cường độ / mật độ / tốc độ</span>
-            <span className="text-[11px] text-[var(--muted)]">chỉnh trước khi Áp dụng</span>
-          </div>
-          {analysis.effect_plan.items.map((item, index) => {
-            const keys = EFFECT_PARAMS[item.effect] || ["intensity"];
-            return (
-              <div key={`${item.effect}-${index}`} className="space-y-1">
-                <p className="text-xs font-medium">{effectLabel(item.effect)}</p>
-                {keys.map((key) => {
-                  const meta = PARAM_META[key];
-                  const raw = item.params?.[key];
-                  const value = typeof raw === "number" ? Math.round(raw * 100) : meta.default;
-                  // Wind can be fully stopped; other effects keep a small
-                  // minimum so their particles/loops still resolve.
-                  const min = key === "speed" && item.effect === "wind" ? 0 : meta.min;
-                  return (
-                    <label key={key} className="block">
-                      <span className="flex items-center justify-between text-[11px] text-[var(--muted)]">
-                        <span>{meta.label}</span>
-                        <span>{value}%</span>
-                      </span>
-                      <input
-                        type="range"
-                        min={min}
-                        max={meta.max}
-                        step={meta.step}
-                        value={value}
-                        onChange={(event) =>
-                          updateParam(index, key, Number(event.target.value))
-                        }
-                        className="mt-0.5 w-full accent-[var(--gold)]"
-                      />
-                    </label>
-                  );
-                })}
-              </div>
-            );
-          })}
-          <p className="text-[11px] leading-4 text-[var(--muted)]">
-            Chỉ đổi kế hoạch cục bộ, không gọi lại Gemini. Bấm Áp dụng để lưu. Mật độ chỉ
-            hiện với mưa/tuyết/khói/tàn lửa.
-          </p>
-        </div>
-      )}
-
-      {existingEffect && (
-        <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 px-3 py-2">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm text-[var(--gold)]">Đã áp dụng</p>
-              <p className="text-xs leading-5 text-[var(--muted)]">
-                {existingEffect.effect_prompt}
-                {(existingEffect.effect_plan?.items?.length ?? 0) > 0
-                  ? ` · ${existingEffect.effect_plan.items.map((item) => item.effect).join(", ")}`
-                  : ""}
-              </p>
-            </div>
-            <button type="button" onClick={removeEffect} className="shrink-0 text-xs text-[var(--muted)] hover:text-white">
-              Xóa
-            </button>
-          </div>
-          {currentRenderState?.status === "rendering" && (
-            <p className="text-xs leading-5 text-[var(--muted)]">
-              Đang tạo clip…
-              {typeof currentRenderState.percent === "number" && currentRenderState.percent > 0
-                ? ` ${currentRenderState.percent}%`
-                : ""}
-            </p>
-          )}
-          {currentRenderState?.status === "error" && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-red-200">{currentRenderState.error}</span>
-              <button
-                type="button"
-                onClick={() => void startRender(existingEffect, true)}
-                className="text-[var(--gold)] hover:text-white"
-              >
-                Thử lại
-              </button>
-            </div>
-          )}
-          {existingEffect.asset_id &&
-            currentRenderState?.status !== "rendering" &&
-            currentRenderState?.status !== "error" && (
-              <p className="text-xs leading-5 text-emerald-200">Đã tạo clip</p>
-            )}
-          <label className="block">
-            <span className="mb-1 block text-[11px] text-[var(--muted)]">Clip đã render (Studio)</span>
-            <div className="flex gap-2">
-              <select
-                className={fieldClass}
-                value={existingEffect.asset_id || ""}
-                onChange={(event) => chooseAsset(event.target.value)}
-              >
-                <option value="">Render từ effect_plan</option>
-                {imageAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.name} · {asset.asset_frames && asset.fps ? `${(asset.asset_frames / asset.fps).toFixed(1)}s` : "clip"}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => void refreshAssets()}
-                className="shrink-0 rounded-xl border border-[var(--line)] px-3 text-xs hover:border-[var(--gold)]"
-              >
-                Tải lại
-              </button>
-            </div>
-          </label>
-          {latestMatchingAsset && (
-            <button
-              type="button"
-              onClick={() => chooseAsset(latestMatchingAsset.id)}
-              className="text-left text-xs text-[var(--gold)] hover:text-white"
-            >
-              Có clip mới khớp plan: dùng “{latestMatchingAsset.name}”
-            </button>
-          )}
-          {currentRenderState?.status !== "rendering" && currentRenderState?.status !== "error" && (
-            <button
-              type="button"
-              onClick={() => void startRender(existingEffect, true)}
-              className="text-xs text-[var(--gold)] hover:text-white"
-            >
-              {existingEffect.asset_id ? "Tạo lại clip" : "Tạo clip"}
-            </button>
-          )}
-          {assetsError && <p className="text-[11px] text-red-200">{assetsError}</p>}
-          {assetProfileMismatch && (
-            <p className="text-[11px] leading-4 text-amber-200">
-              Clip được render ở {selectedAsset?.profile_id}, khác định dạng hiện tại ({outputProfile}). Export sẽ
-              fallback render từ effect_plan.
-            </p>
-          )}
-          {assetMismatch && (
-            <div className="space-y-1">
-              <p className="text-[11px] leading-4 text-amber-200">
-                Clip dài {assetSeconds?.toFixed(1)}s, khác “Mỗi ảnh nền” ({imageDuration}s). Export sẽ fallback render từ
-                effect_plan; hãy render lại đúng thời lượng nếu muốn dùng clip này.
-              </p>
-              {onAssetDuration && assetSeconds ? (
-                <button
-                  type="button"
-                  onClick={() => onAssetDuration(assetSeconds)}
-                  className="text-[11px] text-[var(--gold)] hover:text-white"
-                >
-                  Đặt “Mỗi ảnh nền” = {assetSeconds.toFixed(1)}s
-                </button>
-              ) : null}
-            </div>
-          )}
-        </div>
-      )}
-
-      {!existingEffect && selectedImage && imageAssets.length > 0 && (
-        <div className="space-y-1 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-2">
-          <p className="text-xs text-[var(--gold)]">Dùng clip Studio cho ảnh này</p>
-          <select
-            className={fieldClass}
-            defaultValue=""
-            onChange={(event) => {
-              if (event.target.value) useAssetForImage(event.target.value);
-            }}
-          >
-            <option value="">Chọn clip đã render…</option>
-            {imageAssets.map((asset) => (
-              <option key={asset.id} value={asset.id}>
-                {asset.name}
-              </option>
-            ))}
-          </select>
-          <p className="text-[11px] leading-4 text-[var(--muted)]">
-            Chọn clip sẽ tạo một hiệu ứng chỉ dùng asset, không cần phân tích Gemini.
-          </p>
-        </div>
-      )}
-
-      {analysis && (analysis.objects || []).length > 0 && (
-        <div>
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-sm text-[var(--muted)]">Object cho hiệu ứng</span>
-            <span className="text-xs text-[var(--muted)]">
-              {selectedObjectIds.length}/{analysis.objects.length} chọn
-            </span>
-          </div>
-          <ul className="max-h-64 space-y-2 overflow-auto pr-1">
-            {analysis.objects.map((object) => {
-              const checked = selectedObjectIds.includes(object.id);
-              const percent =
-                object.confidence <= 1
-                  ? Math.round(Math.max(0, object.confidence) * 100)
-                  : Math.round(object.confidence);
-              return (
-                <li
-                  key={object.id}
-                  className={`rounded-xl border px-3 py-2 transition ${
-                    checked ? "border-[var(--gold)] bg-black/25" : "border-[var(--line)] bg-black/15"
-                  }`}
-                >
-                  <label className="flex cursor-pointer items-start gap-2">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleObject(object.id)}
-                      className="mt-1 accent-[var(--gold)]"
-                    />
-                    <span className="min-w-0">
-                      <span className="flex flex-wrap items-baseline gap-2">
-                        <span className="text-sm">{object.label}</span>
-                        <span className="text-xs text-[var(--muted)]">{percent}%</span>
-                        {object.source === "manual" && (
-                          <span className="rounded-full border border-[var(--gold)] px-2 py-0.5 text-[11px] text-[var(--gold)]">
-                            thủ công
-                          </span>
-                        )}
-                      </span>
-                      {object.affordances.length > 0 && (
-                        <span className="mt-1 flex flex-wrap gap-1">
-                          {object.affordances.map((affordance) => (
-                            <span
-                              key={affordance}
-                              className="rounded-full border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--muted)]"
-                            >
-                              {affordance}
-                            </span>
-                          ))}
-                        </span>
-                      )}
-                    </span>
-                  </label>
-                  {object.source === "manual" && (
-                    <button
-                      type="button"
-                      onClick={() => removeManualObject(object.id)}
-                      className="mt-1 text-[11px] text-[var(--muted)] hover:text-red-200"
-                    >
-                      Xoá object thủ công
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-
-      {(regions.length > 0 || protect.length > 0) && (
-        <div className="rounded-xl border border-[var(--line)] bg-black/20 p-3 text-xs leading-5 text-[var(--muted)]">
-          {regions.length > 0 && (
-            <p>Vùng: {regions.map((region) => `${region.id} (${region.polygon.length} điểm)`).join(", ")}</p>
-          )}
-          {protect.length > 0 && <p className={regions.length > 0 ? "mt-1" : ""}>Bảo vệ: {protect.map((item) => item.label).join(", ")}</p>}
-        </div>
-      )}
-
-      {analysis && (
-        <div className="sticky bottom-2 z-10 rounded-2xl border border-[var(--gold)] bg-[var(--panel)] p-2 shadow-lg">
-          <button
-            type="button"
-            onClick={applyEffect}
-            disabled={busy}
-            className="w-full rounded-xl bg-[var(--gold)] px-4 py-2.5 text-sm font-semibold text-[#1a1206] transition hover:brightness-105 disabled:opacity-50"
-          >
-            {existingEffect ? "Áp dụng lại" : "Áp dụng"}
-          </button>
-          <p className="mt-1 text-center text-[11px] leading-4 text-[var(--muted)]">
-            Bấm Áp dụng sau khi chọn object — clip chuẩn tự tạo ở nền. Xuất video vẫn dựng trực tiếp nếu clip chưa xong.
-          </p>
-        </div>
-      )}
-
+      {imageSelector}
+      {stage}
+      {imageMeta}
+      {promptBlock}
+      {consentBlock}
+      {analyzeBlock}
+      {errorBlock}
+      {analysisMeta}
+      {paramsBlock ? (
+        <div className="rounded-xl border border-[var(--line)] bg-black/20 p-3">{paramsBlock}</div>
+      ) : null}
+      {appliedBlock}
+      {assetPickBlock}
+      {objectsBlock}
+      {regionsBlock}
+      {applyBar}
       <p className="text-xs leading-5 text-[var(--muted)]">
         Hiện render mưa, tuyết, nước, khói, gió/sway, lửa, tàn lửa, chim, tia nắng, sương mù và nhịp sáng.
       </p>

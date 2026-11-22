@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -12,13 +13,17 @@ from PIL import Image
 
 from karaoke.assets import (
     AssetError,
+    asset_summary,
     assets_usage,
     cleanup_assets,
     delete_asset,
+    ensure_asset_thumbnail,
     known_project_paths,
     list_assets,
     load_asset,
+    referenced_asset_projects,
     register_project_path,
+    rename_asset,
     save_asset_from_preview,
     validate_asset,
 )
@@ -220,6 +225,138 @@ class AssetQuotaTests(unittest.TestCase):
         register_project_path(project)
         self.assertEqual(known_project_paths(), [project.resolve()])
 
+    def test_list_assets_summary_omits_effect_plan(self):
+        folder = make_asset(self.data_root, "a" * 32, age_days=1)
+        meta_path = folder / "meta.json"
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "id": folder.name,
+                    "name": "Nền tóm tắt",
+                    "clip_file": "loop.mp4",
+                    "image_hash": "sha256:" + "1" * 64,
+                    "plan_hash": "plan",
+                    "profile_id": "landscape_1080p",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 10,
+                    "asset_frames": 80,
+                    "loop_duration": 8.0,
+                    "clip_size": 100,
+                    "created": "2026-01-01T00:00:00+00:00",
+                    "effect_plan": {
+                        "items": [{"effect": "rain"}, {"effect": "wind"}],
+                        "objects": [
+                            {"id": "a", "source": "manual"},
+                            {"id": "b", "source": "detected"},
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        full = list_assets()
+        self.assertEqual(len(full), 1)
+        self.assertIn("effect_plan", full[0])
+
+        summary = list_assets(summary=True)
+        self.assertEqual(len(summary), 1)
+        item = summary[0]
+        self.assertNotIn("effect_plan", item)
+        self.assertEqual(item["effect_names"], ["rain", "wind"])
+        self.assertEqual(item["duration_seconds"], 8.0)
+        self.assertEqual(item["object_count"], 2)
+        self.assertEqual(item["manual_object_count"], 1)
+
+    def test_asset_summary_uses_loop_duration_when_fps_is_missing(self):
+        summary = asset_summary(
+            {
+                "id": "bg_" + "a" * 32,
+                "asset_frames": 0,
+                "loop_duration": 4.5,
+                "effect_plan": {},
+            }
+        )
+        self.assertEqual(summary["duration_seconds"], 4.5)
+        self.assertEqual(summary["effect_names"], [])
+
+    def test_rename_asset_round_trip_and_validation(self):
+        folder = make_asset(self.data_root, "b" * 32, age_days=1)
+        asset_id = folder.name
+
+        meta = rename_asset(asset_id, "  Tên mới  ")
+        self.assertEqual(meta["name"], "Tên mới")
+        self.assertEqual(load_asset(asset_id)["name"], "Tên mới")
+
+        with self.assertRaises(AssetError):
+            rename_asset(asset_id, "   ")
+        with self.assertRaises(AssetError):
+            rename_asset(asset_id, "x" * 121)
+        with self.assertRaises(AssetError):
+            rename_asset("not-an-asset", "Tên")
+        with self.assertRaises(AssetError):
+            rename_asset("bg_" + "f" * 32, "Tên")
+
+    def test_cleanup_dry_run_reports_without_deleting(self):
+        oldest = make_asset(self.data_root, "a" * 32, size=120, age_days=40)
+        newest = make_asset(self.data_root, "b" * 32, size=80, age_days=10)
+
+        result = cleanup_assets(max_files=1, max_bytes=10**9, min_age_days=0, dry_run=True)
+
+        self.assertEqual(result["deleted"], [self.asset_id("a" * 32)])
+        self.assertEqual(result["freed_bytes"], 120)
+        self.assertTrue(oldest.exists())
+        self.assertTrue(newest.exists())
+
+        real = cleanup_assets(max_files=1, max_bytes=10**9, min_age_days=0)
+        self.assertEqual(real["deleted"], [self.asset_id("a" * 32)])
+        self.assertFalse(oldest.exists())
+        self.assertTrue(newest.exists())
+
+    def test_referenced_asset_projects_maps_ids_to_paths(self):
+        first = self.data_root / "one.karaoke.json"
+        second = self.data_root / "two.karaoke.json"
+        ids = ["bg_" + "1" * 32, "bg_" + "2" * 32]
+        first.write_text(
+            json.dumps({"background_effects": [{"asset_id": ids[0]}]}),
+            encoding="utf-8",
+        )
+        second.write_text(
+            json.dumps(
+                {
+                    "background_effects": [
+                        {"asset_id": ids[0]},
+                        {"asset_id": ids[1]},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        register_project_path(first)
+        register_project_path(second)
+
+        mapping = referenced_asset_projects()
+
+        self.assertIsNotNone(mapping)
+        self.assertEqual(
+            mapping[ids[0]],
+            sorted([str(first.resolve()), str(second.resolve())]),
+        )
+        self.assertEqual(mapping[ids[1]], [str(second.resolve())])
+
+    def test_referenced_asset_projects_returns_none_for_broken_json(self):
+        good = self.data_root / "good.karaoke.json"
+        good.write_text(
+            json.dumps({"background_effects": [{"asset_id": "bg_" + "3" * 32}]}),
+            encoding="utf-8",
+        )
+        broken = self.data_root / "broken.karaoke.json"
+        broken.write_text("{not-json", encoding="utf-8")
+        register_project_path(good)
+        register_project_path(broken)
+
+        self.assertIsNone(referenced_asset_projects())
+
 
 class AssetStoreTests(unittest.TestCase):
     def setUp(self):
@@ -260,6 +397,21 @@ class AssetStoreTests(unittest.TestCase):
         self.preview_patch.stop()
         self.env.stop()
         self.folder.cleanup()
+
+    def test_save_reuses_same_render_instead_of_duplicating(self):
+        kwargs = dict(
+            preview_id="a" * 64,
+            name="Nền thử",
+            image_path=self.image,
+            image_hash=_file_hash(self.image),
+            effect_plan={"items": [{"effect": "rain", "params": {"intensity": 0.5}}]},
+            duration=2.0,
+            output_profile="landscape_1080p",
+        )
+        first = save_asset_from_preview(**kwargs)
+        second = save_asset_from_preview(**kwargs)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(list_assets()), 1)
 
     def test_save_list_validate_and_delete_asset(self):
         meta = save_asset_from_preview(
@@ -617,6 +769,87 @@ class BackgroundStatusTests(unittest.TestCase):
         self.assertEqual(deleted, [old_unreferenced.name])
         self.assertTrue(self.build.path.is_file())
         self.assertTrue(recent_unreferenced.is_file())
+
+
+class AssetThumbnailTests(unittest.TestCase):
+    def setUp(self):
+        if shutil.which("ffmpeg") is None:
+            self.skipTest("ffmpeg is not installed")
+        self.folder = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.folder.name) / "data"
+        self.asset_id = "bg_" + "c" * 32
+        self.asset_dir = self.data_root / "assets" / self.asset_id
+        self.asset_dir.mkdir(parents=True)
+        self.clip = self.asset_dir / "loop.mp4"
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=blue:s=320x180:d=1:r=10",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(self.clip),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.folder.cleanup()
+            self.skipTest(f"cannot create test clip: {error}")
+        self.meta = {"id": self.asset_id, "clip_file": "loop.mp4"}
+        self.env = patch.dict(os.environ, {"KARAOKE_DATA_DIR": str(self.data_root)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.folder.cleanup()
+
+    def test_thumbnail_is_generated_and_reused(self):
+        thumb = ensure_asset_thumbnail(self.meta)
+
+        self.assertTrue(thumb.is_file())
+        self.assertEqual(thumb.parent, self.asset_dir)
+        self.assertRegex(thumb.name, r"^thumb-v1-[0-9a-f]{12}\.jpg$")
+        self.assertGreater(thumb.stat().st_size, 0)
+        self.assertEqual(thumb.read_bytes()[:2], b"\xff\xd8")
+        first_mtime = thumb.stat().st_mtime_ns
+
+        again = ensure_asset_thumbnail(self.meta)
+        self.assertEqual(again, thumb)
+        self.assertEqual(again.stat().st_mtime_ns, first_mtime)
+
+    def test_thumbnail_missing_clip_raises(self):
+        self.clip.unlink()
+        with self.assertRaises(AssetError):
+            ensure_asset_thumbnail(self.meta)
+
+    def test_thumbnail_short_clip_falls_back_to_first_frame(self):
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=320x180:d=0.3:r=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(self.clip),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        thumb = ensure_asset_thumbnail(self.meta)
+        self.assertTrue(thumb.is_file())
+        self.assertGreater(thumb.stat().st_size, 0)
 
 
 if __name__ == "__main__":

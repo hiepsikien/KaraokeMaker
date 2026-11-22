@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { AlignOptions } from "@/components/align-options";
 import { AudioRestore } from "@/components/audio-restore";
@@ -8,7 +9,13 @@ import { HomeGate } from "@/components/home-gate";
 import { PhaseStepper } from "@/components/phase-stepper";
 import { ProjectSetup } from "@/components/project-setup";
 import { TimingEditor, type ExportOptions } from "@/components/timing-editor";
+import { PageHeader } from "@/components/ui/page-header";
+import { Badge, btnGhost } from "@/components/ui/primitives";
+import { useNotices } from "@/components/ui/toast";
 import type { TimedLine } from "@/lib/cue";
+import { clearSession, sessionKeys, useSessionState } from "@/lib/session";
+import { trackJob, useTrackedJob } from "@/lib/jobs";
+import { useSettings } from "@/lib/settings";
 import {
   emptyFields,
   fieldsFromProject,
@@ -33,21 +40,62 @@ async function readError(response: Response) {
 }
 
 export function MakerForm() {
-  const [phase, setPhase] = useState<Phase>("home");
-  const [fields, setFields] = useState<ProjectFields>(() => emptyFields());
-  const [hasLines, setHasLines] = useState(false);
+  const router = useRouter();
+  const params = useSearchParams();
+  const projectParam = params.get("project") || "";
+  const startNew = params.get("new") === "1";
+  const { settings } = useSettings();
+  const { push } = useNotices();
+  const handledParam = useRef("");
+
+  const [phase, setPhase] = useSessionState<Phase>(sessionKeys.makerPhase, "home");
+  const [fields, setFields] = useSessionState<ProjectFields>(sessionKeys.makerFields, () => emptyFields());
+  const [hasLines, setHasLines] = useSessionState<boolean>(sessionKeys.makerHasLines, false);
+  const [alignReturn, setAlignReturn] = useSessionState<Phase>(sessionKeys.makerAlignReturn, "setup");
+  const [jobId, setJobId] = useSessionState<string>(sessionKeys.makerJob, "");
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
-  const [alignReturn, setAlignReturn] = useState<Phase>("setup");
+  const tracked = useTrackedJob(jobId || null);
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
   const exported = job?.status === "done";
-  // Only highlight Xuất while rendering or right after a finished export.
-  // Once the user edits again (status back to editing), return to Biên tập.
-  const displayPhase: Phase =
-    phase === "edit" && (rendering || exported) ? "export" : phase;
+  const displayPhase: Phase = phase === "edit" ? "edit" : phase;
+
+  useEffect(() => {
+    if (!tracked) return;
+    setJob(tracked);
+  }, [tracked]);
+
+  useEffect(() => {
+    if (!job?.id) return;
+    setJobId(job.id);
+    trackJob(job.id, job);
+  }, [job?.id, job?.status, job?.background?.state]);
+
+  useEffect(() => {
+    if (!tracked) return;
+    if (tracked.status === "error" && tracked.error.includes("Không thấy tác vụ")) {
+      setJob(null);
+      setJobId("");
+      clearSession(sessionKeys.makerJob);
+      if (phase === "edit") setPhase("setup");
+      push({
+        tone: "error",
+        message: "Phiên làm việc trước đã hết (server có thể đã restart). Hãy mở lại dự án đã lưu.",
+      });
+    }
+  }, [tracked?.id, tracked?.status]);
+
+  useEffect(() => {
+    if (!tracked) return;
+    if (tracked.status === "editing" || tracked.status === "done") {
+      setPhase("edit");
+      setHasLines(Boolean(tracked.lines?.length));
+      if (tracked.project) setFields(fieldsFromProject(tracked.project));
+    }
+  }, [tracked?.id, tracked?.status]);
 
   useEffect(() => {
     fetch("/api/defaults")
@@ -58,33 +106,29 @@ export function MakerForm() {
         }
       })
       .catch(() => {
-        setNotice("Chưa kết nối được phần xử lý. Hãy chạy server Python rồi tải lại trang.");
+        push({ tone: "error", message: "Chưa kết nối được phần xử lý. Hãy chạy server Python rồi tải lại trang." });
       });
   }, []);
 
   useEffect(() => {
-    if (
-      !job ||
-      (job.status !== "running" && job.status !== "rendering" && job.background?.state !== "building")
-    ) {
+    if (projectParam) {
+      const key = `p:${projectParam}`;
+      if (handledParam.current === key) return;
+      handledParam.current = key;
+      void openProjectPath(projectParam);
       return;
     }
-    const jobId = job.id;
-    const timer = setInterval(async () => {
-      const response = await fetch(`/api/jobs/${jobId}`);
-      if (!response.ok) return;
-      const next = (await response.json()) as Job;
-      setJob(next);
-      if (next.status === "editing") {
-        setPhase("edit");
-        setHasLines(Boolean(next.lines?.length));
-        if (next.project) setFields(fieldsFromProject(next.project));
-      }
-      if (next.status === "done") setPhase("edit");
-      // Keep phase "align" on error so the Ghép chữ screen can show job.error.
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [job?.id, job?.status, job?.background?.state]);
+    if (startNew && handledParam.current !== "new") {
+      handledParam.current = "new";
+      startCreate();
+    }
+  }, [projectParam, startNew]);
+
+  useEffect(() => {
+    if (phase === "home" || !fields.project_path) return;
+    if (projectParam === fields.project_path) return;
+    router.replace(`/project?project=${encodeURIComponent(fields.project_path)}`);
+  }, [fields.project_path, phase, projectParam, router]);
 
   async function browse(kind: BrowseKind) {
     setNotice("");
@@ -161,8 +205,15 @@ export function MakerForm() {
     setNotice("");
     setJob(null);
     setHasLines(false);
-    setFields((current) => emptyFields(current.output_dir));
+    setFields({
+      ...emptyFields(settings.output_dir),
+      device: settings.device || "cpu",
+      model_name: settings.model_name || "small",
+    });
+    setAlignReturn("setup");
     setPhase("setup");
+    clearSession(sessionKeys.makerJob);
+    router.replace("/project");
   }
 
   async function openProject() {
@@ -170,6 +221,11 @@ export function MakerForm() {
     const paths = await browse("project");
     const path = paths[0];
     if (!path) return;
+    router.push(`/project?project=${encodeURIComponent(path)}`);
+  }
+
+  async function openProjectPath(path: string) {
+    setNotice("");
     try {
       const response = await fetch("/api/projects/open", {
         method: "POST",
@@ -178,6 +234,7 @@ export function MakerForm() {
       });
       if (!response.ok) {
         setNotice(await readError(response));
+        handledParam.current = "";
         return;
       }
       const data = (await response.json()) as {
@@ -188,16 +245,19 @@ export function MakerForm() {
       };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
-      if (data.notice) setNotice(data.notice);
+      if (data.notice) push({ tone: "info", message: data.notice });
       if (data.phase === "edit" && data.job) {
         setJob(data.job);
         setPhase("edit");
-        return;
+      } else {
+        setJob(null);
+        setPhase("setup");
       }
-      setJob(null);
-      setPhase("setup");
+      handledParam.current = `p:${path}`;
+      router.replace(`/project?project=${encodeURIComponent(path)}`);
     } catch {
       setNotice("Không mở được dự án. Server Python chưa chạy bản mới.");
+      handledParam.current = "";
     }
   }
 
@@ -410,11 +470,12 @@ export function MakerForm() {
         return;
       }
       const data = (await response.json()) as { deleted?: string[] };
-      setNotice(
-        data.deleted?.length
+      push({
+        tone: "success",
+        message: data.deleted?.length
           ? `Đã dọn ${data.deleted.length} bản nền cũ.`
           : "Không có bản nền cũ nào đủ điều kiện để dọn.",
-      );
+      });
     } catch {
       setNotice("Không dọn được bản nền cũ. Kiểm tra server Python đang chạy.");
     }
@@ -446,7 +507,26 @@ export function MakerForm() {
 
   return (
     <div>
-      <PhaseStepper phase={displayPhase} />
+      <PageHeader
+        title={fields.title || "Dự án Karaoke"}
+        description={
+          fields.artist
+            ? `${fields.artist}${fields.project_path ? " · dự án đã lưu" : " · chưa lưu"}`
+            : "Khai báo audio, lời và ảnh; căn lời rồi xuất hai video."
+        }
+        actions={
+          <>
+            <Badge tone={exported ? "success" : hasLines ? "info" : "muted"}>
+              {exported ? "Đã xuất" : hasLines ? "Đã ghép lời" : "Nháp"}
+            </Badge>
+            <button type="button" className={btnGhost} onClick={() => router.push("/")}>
+              Danh sách dự án
+            </button>
+          </>
+        }
+      >
+        <PhaseStepper phase={displayPhase} rendering={rendering} exported={exported} />
+      </PageHeader>
 
       {phase === "home" && (
         <HomeGate onCreate={startCreate} onOpen={openProject} busy={busyBrowse === "project"} notice={notice} />
@@ -466,8 +546,11 @@ export function MakerForm() {
           onResumeEdit={resumeEdit}
           onBackHome={() => {
             setJob(null);
+            setJobId("");
+            clearSession(sessionKeys.makerJob);
             setPhase("home");
             setNotice("");
+            router.replace("/project");
           }}
           onNewProject={startCreate}
         />
@@ -599,6 +682,19 @@ export function MakerForm() {
         </section>
       )}
 
+      {phase === "edit" && !job ? (
+        <section className="rounded-2xl border border-dashed border-[var(--line)] bg-[var(--panel)] p-6 text-sm text-[var(--muted)]">
+          Đang khôi phục phiên biên tập
+          {jobId ? ` (${jobId.slice(0, 8)}…)` : ""}…
+        </section>
+      ) : null}
+
+      {phase === "edit" && job && !job.lines ? (
+        <section className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-6 text-sm text-[var(--muted)]">
+          Dự án chưa có timing. Quay lại Chuẩn bị để ghép chữ.
+        </section>
+      ) : null}
+
       {phase === "edit" && job?.lines && (
         <TimingEditor
           key={job.id}
@@ -624,7 +720,11 @@ export function MakerForm() {
             setPhase("setup");
           }}
           onFillGaps={() => {
-            setNotice("Bổ sung các file còn thiếu rồi bấm lưu khai báo và vào biên tập.");
+            push({
+              tone: "info",
+              message: "Bổ sung các file còn thiếu rồi bấm lưu khai báo và vào biên tập.",
+            });
+            setNotice("");
             setPhase("setup");
           }}
           onNewProject={startCreate}

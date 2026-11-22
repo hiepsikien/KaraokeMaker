@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -285,6 +286,67 @@ def load_project(path: Path) -> tuple[dict, Path]:
             project["title"] = stem
     project["path"] = str(path)
     return project, path
+
+
+def recent_projects(paths: list[Path], limit: int = 12) -> list[dict]:
+    """Return compact dashboard cards for existing project files, newest first."""
+    entries: list[tuple[float, dict]] = []
+    seen: set[Path] = set()
+    for raw in paths or []:
+        try:
+            path = Path(raw).expanduser()
+        except (TypeError, ValueError):
+            continue
+        try:
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            info = path.stat()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        title = str(data.get("title") or "").strip()
+        if not title:
+            stem = path.stem
+            if stem.endswith(".karaoke"):
+                title = stem[: -len(".karaoke")]
+            elif stem.endswith(" timing"):
+                title = stem[: -len(" timing")]
+            else:
+                title = stem
+        raw_status = str(data.get("status") or "").strip()
+        entries.append(
+            (
+                info.st_mtime,
+                {
+                    "path": str(resolved),
+                    "title": title,
+                    "artist": str(data.get("artist") or "").strip(),
+                    "status": raw_status if raw_status in STATUSES else "draft",
+                    "updated": datetime.fromtimestamp(
+                        info.st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                    "output_profile": normalize_profile_id(
+                        data.get("output_profile")
+                    ),
+                    "cover_image": str(data.get("cover_image") or "").strip(),
+                },
+            )
+        )
+    entries.sort(key=lambda entry: (-entry[0], entry[1]["path"]))
+    try:
+        cap = max(0, int(limit))
+    except (TypeError, ValueError):
+        cap = 0
+    return [item for _mtime, item in entries[:cap]]
 
 
 def resolve_project_path(payload: dict, prepared: dict | None = None) -> Path:

@@ -68,8 +68,9 @@ server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
   an toàn đáy; 1:1/4:5 có hậu tố `(vuông)`/`(4x5)`.
 - **Ambient audio**: mặc định tắt; nếu prompt có "tiếng mưa/tiếng sóng/âm thanh" thì
   mix rất nhỏ (-32 dB) dưới nhạc.
-- Tab **AI Studio** (`/studio`) để thử nền động và preview loop độc lập. Preview
-  render ở tối đa 640 px (4 s) để phản hồi nhanh; video Karaoke xuất vẫn đúng profile
+- Tab **AI Studio** (`/studio`) có hai tab: **Biên tập** (ảnh → sân khấu → thuộc tính)
+  và **Thư viện clip** (tìm không dấu, lọc định dạng, xem lưới/danh sách, đổi tên, xoá).
+  Preview nhanh render tối đa 640 px để phản hồi nhanh; video Karaoke xuất vẫn đúng profile
   1080p/9:16/1:1/4:5.
 - Model: `gemini-3.8-flash` cho inventory ảnh, `gemini-3.1-flash-lite` cho intent.
 - Chi phí tham khảo: ~1 cent/ảnh (xem `docs/ai-scene-director.md` §4.2).
@@ -84,18 +85,20 @@ server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
 - Trong **Biên tập**, mục **Nền có hiệu ứng** cho phép dựng nền trước khi ghép lời,
   xem trạng thái sẵn sàng/cần dựng lại, mở thư mục nền và dọn bản cũ. Nền lưu tại
   `<thư mục xuất>/.karaoke-media/backgrounds/`.
-- Trong **AI Studio**, sau khi render bản chuẩn 16 s, bấm **Lưu thành asset** để dùng
-  lại clip trong mục Hiệu ứng nền. Asset lưu ở thư mục dữ liệu ứng dụng, không bị
-  dọn cùng cache. Nếu clip khác định dạng hoặc khác “Mỗi ảnh nền”, export sẽ render
-  lại từ `effect_plan`.
+- Trong **AI Studio**, clip chuẩn được tự lưu vào **Thư viện clip** sau khi áp dụng; có thể
+  đổi tên, tải về, mở thư mục hoặc xoá (clip đang được dự án dùng sẽ bị chặn xoá). Clip lưu
+  ở thư mục dữ liệu ứng dụng, không bị dọn cùng cache. Nếu clip khác định dạng hoặc khác
+  “Mỗi ảnh nền”, export sẽ render lại từ `effect_plan`.
 
 ## Cách dùng
 
-Luồng gồm năm bước: **Khai báo → Tách và trộn → Ghép chữ → Biên tập → Xuất**.
+Giao diện dùng **Dự án** ở `/` (dashboard) và workspace ở `/project`; các bước bên trong
+workspace là **Chuẩn bị** (khai báo, tách/trộn, ghép chữ) → **Biên tập** → **Xuất** (drawer).
 
-1. Trên màn hình đầu, chọn **Tạo dự án mới** hoặc **Mở dự án đã có** (file `.karaoke.json`; bản `timing.json` cũ vẫn mở được và sẽ được chuyển sang file dự án).
+1. Ở dashboard `/`, chọn **Tạo dự án mới**, mở một dự án gần đây, hoặc **Mở file dự án**
+   (file `.karaoke.json`; bản `timing.json` cũ vẫn mở được và sẽ được chuyển sang file dự án).
 2. Với dự án mới: nhập tên bài và tác giả, chọn audio gốc, dán lời, chọn ảnh, chọn thư mục xuất, rồi bấm **Tiếp tục tách và trộn**. Nếu đã có sẵn vocal và instrumental, có thể **Bỏ qua, căn lời với file đã có**.
-3. **Tách** chạy Kim Vocal 2 (overlap 25%, segment 512) trong môi trường `.venv` của UVR và ghi vocal cùng instrumental. Cần file `models/MDX_Net_Models/Kim_Vocal_2.onnx`. Bản nhạc nền cộng instrumental với dải cao của file gốc (mặc định từ 8000 Hz, 50%) và dải thấp (mặc định dưới 120 Hz, 50%). Hai dải lấy từ bản gốc nên hơi giọng và tiếng trầm của vocal vẫn có thể lọt vào; hạ volume hoặc nới cutoff nếu muốn bản không lời sạch hơn. Cutoff và volume sửa được. **Nghe thử** và **Xuất nhạc nền** dựng file ngay trong request (WAV, FLAC hoặc MP3), nên bài dài sẽ đợi đến khi ffmpeg xong. File xuất trở thành instrumental của video không lời. Đổi cutoff hoặc volume không chạy lại model. Sau đó bấm **Căn lời và vào biên tập**. Thiết bị tách giọng dùng lựa chọn CPU hoặc GPU Apple ở bước khai báo.
+3. **Tách** chạy Kim Vocal 2 (overlap 25%, segment 512) trong môi trường `.venv` của UVR và ghi vocal cùng instrumental. Cần file `models/MDX_Net_Models/Kim_Vocal_2.onnx`. Bản nhạc nền cộng instrumental với dải cao của file gốc (mặc định từ 8000 Hz, 50%) và dải thấp (mặc định dưới 120 Hz, 50%). Hai dải lấy từ bản gốc nên hơi giọng và tiếng trầm của vocal vẫn có thể lọt vào; hạ volume hoặc nới cutoff nếu muốn bản không lời sạch hơn. Cutoff và volume sửa được. **Nghe thử** và **Xuất nhạc nền** dựng file ngay trong request (WAV, FLAC hoặc MP3), nên bài dài sẽ đợi đến khi ffmpeg xong. File xuất trở thành instrumental của video không lời. Đổi cutoff hoặc volume không chạy lại model. Sau đó bấm **Căn lời và vào biên tập**. Thiết bị tách giọng và model mặc định đổi trong **Cài đặt** (biểu tượng bánh răng ở thanh trên).
 4. Khi căn xong, sửa trên timeline: sóng âm ở trên, câu hát ở dưới. Kéo cả câu để dời. Kéo mép để đổi chỗ bắt đầu và kết thúc. Bấm một câu để sửa từng chữ. **Phát** và **Tạm dừng** nằm trên timeline.
 5. **Thêm câu** chèn một câu mới sau câu đang chọn. **Chia câu** cắt câu đang chọn thành hai, tại chữ đang chọn hoặc tại vạch phát.
 6. **Lưu dự án** ghi file `.karaoke.json` (và `timing.json` kèm theo), không cần đợi xuất video.

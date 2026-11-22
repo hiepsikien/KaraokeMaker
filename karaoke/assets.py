@@ -47,9 +47,17 @@ META_FILE = "meta.json"
 ASSET_MAX_FILES = 100
 ASSET_MAX_BYTES = 2_000_000_000
 ASSET_MIN_AGE_DAYS = 7.0
+ASSET_NAME_MAX = 120
+THUMB_VERSION = "thumb-v1"
 PROJECTS_FILE = ".projects.json"
 _LOCK = threading.Lock()
 _SHA_CACHE: dict[tuple[str, int, int], str] = {}
+_PROJECT_REFS_LOCK = threading.Lock()
+_PROJECT_REFS_FILES: dict[tuple[str, int, int], tuple[str, ...]] = {}
+_PROJECT_REFS_SNAPSHOT: tuple[
+    tuple[tuple[str, int, int], ...], dict[str, list[str]]
+] | None = None
+_THUMB_LOCKS: dict[str, threading.Lock] = {}
 
 
 @contextmanager
@@ -224,6 +232,158 @@ def clip_path(meta: dict) -> Path:
     return root / name
 
 
+def _find_reusable_asset(
+    *,
+    image_hash: str,
+    plan_hash: str,
+    profile,
+    frames: int,
+) -> dict | None:
+    """Return an existing asset rendered from the same inputs.
+
+    The Studio renders the same effect plan repeatedly while the user tweaks
+    nearby settings. Reusing the stored clip keeps auto-save from turning the
+    library into a pile of identical ``bg_*`` folders.
+    """
+    root = assets_root()
+    if not root.is_dir():
+        return None
+    for folder in root.iterdir():
+        if not ASSET_ID_PATTERN.fullmatch(folder.name):
+            continue
+        meta = load_asset(folder.name)
+        if not isinstance(meta, dict):
+            continue
+        if int(meta.get("asset_version") or 0) != ASSET_VERSION:
+            continue
+        if int(meta.get("renderer_version") or 0) != MOTION_CACHE_VERSION:
+            continue
+        if str(meta.get("image_hash") or "") != str(image_hash):
+            continue
+        if str(meta.get("plan_hash") or "") != str(plan_hash):
+            continue
+        if str(meta.get("profile_id") or "") != str(profile.id):
+            continue
+        try:
+            if int(meta.get("asset_frames") or 0) != int(frames):
+                continue
+            path = clip_path(meta)
+            if not path.is_file() or path.stat().st_size <= 0:
+                continue
+        except (OSError, AssetError, TypeError, ValueError):
+            continue
+        return meta
+    return None
+
+
+def _thumb_lock(asset_id: str) -> threading.Lock:
+    with _LOCK:
+        lock = _THUMB_LOCKS.get(asset_id)
+        if lock is None:
+            lock = threading.Lock()
+            _THUMB_LOCKS[asset_id] = lock
+        return lock
+
+
+def _run_thumbnail_ffmpeg(clip: Path, tmp: Path, seek: float) -> None:
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-ss",
+                f"{seek:g}",
+                "-i",
+                str(clip),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=640:-2",
+                "-q:v",
+                "3",
+                "-y",
+                str(tmp),
+            ],
+            timeout=30,
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as error:
+        raise AssetError("Không có ffmpeg để tạo thumbnail.") from error
+    except subprocess.TimeoutExpired as error:
+        raise AssetError("Tạo thumbnail quá lâu.") from error
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr or b""
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", "replace")
+        raise AssetError(
+            str(detail).strip() or "ffmpeg không tạo được thumbnail."
+        ) from error
+
+
+def ensure_asset_thumbnail(meta: dict) -> Path:
+    """Return a cached JPEG poster for an asset, generating it once with ffmpeg."""
+    if not isinstance(meta, dict):
+        raise AssetError("Asset không hợp lệ.")
+    asset_id = str(meta.get("id") or "")
+    folder = asset_dir(asset_id)
+    try:
+        clip = clip_path(meta)
+    except AssetError:
+        raise
+    try:
+        info = clip.stat()
+    except OSError as error:
+        raise AssetError("Không thấy clip asset.") from error
+    if not S_ISREG(info.st_mode) or info.st_size <= 0:
+        raise AssetError("Không thấy clip asset.")
+    digest = str(meta.get("clip_sha256") or "").strip()
+    if digest.startswith("sha256:"):
+        digest = digest[len("sha256:"):]
+    if not digest:
+        try:
+            digest = _sha256(clip).removeprefix("sha256:")
+        except OSError as error:
+            raise AssetError("Không đọc được clip asset.") from error
+    thumb = folder / f"{THUMB_VERSION}-{digest[:12]}.jpg"
+    try:
+        if thumb.is_file() and thumb.stat().st_size > 0:
+            return thumb
+    except OSError:
+        pass
+    lock = _thumb_lock(asset_id)
+    with lock:
+        try:
+            if thumb.is_file() and thumb.stat().st_size > 0:
+                return thumb
+        except OSError:
+            pass
+        tmp = folder / f".{thumb.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.jpg"
+        last_error: AssetError | None = None
+        try:
+            for seek in (0.5, 0.0):
+                try:
+                    _run_thumbnail_ffmpeg(clip, tmp, seek)
+                    break
+                except AssetError as error:
+                    last_error = error
+                    tmp.unlink(missing_ok=True)
+            else:
+                raise AssetError(
+                    str(last_error) if last_error else "Không tạo được thumbnail."
+                )
+            try:
+                if not tmp.is_file() or tmp.stat().st_size <= 0:
+                    raise AssetError("ffmpeg không tạo được thumbnail.")
+                os.replace(tmp, thumb)
+            except OSError as error:
+                raise AssetError("Không lưu được thumbnail.") from error
+        finally:
+            tmp.unlink(missing_ok=True)
+    return thumb
+
+
 def _save_asset_from_preview_impl(
     *,
     preview_id: str,
@@ -269,6 +429,15 @@ def _save_asset_from_preview_impl(
         raise AssetError("Clip preview dài hơn thời lượng đã khai.")
     if probe["frames"] and abs(probe["duration"] - frames / profile.fps) > 1.5 / profile.fps:
         raise AssetError("Clip preview có duration không khớp số frame.")
+
+    reusable = _find_reusable_asset(
+        image_hash=image_hash,
+        plan_hash=plan_hash,
+        profile=profile,
+        frames=frames,
+    )
+    if reusable is not None:
+        return reusable
 
     asset_id = "bg_" + uuid.uuid4().hex
     folder = asset_dir(asset_id)
@@ -343,7 +512,26 @@ def load_asset(asset_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def list_assets() -> list[dict]:
+def rename_asset(asset_id: str, name: str) -> dict:
+    """Rename one asset, writing metadata atomically under the asset lock."""
+    folder = asset_dir(asset_id)
+    value = str(name or "").strip()
+    if not value:
+        raise AssetError("Tên asset không được để trống.")
+    if len(value) > ASSET_NAME_MAX:
+        raise AssetError(f"Tên asset tối đa {ASSET_NAME_MAX} ký tự.")
+    root = assets_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with _file_lock(root / ".assets.lock"):
+        meta = load_asset(asset_id)
+        if meta is None:
+            raise AssetError("Không thấy asset.")
+        meta["name"] = value
+        _write_meta(folder, meta)
+    return meta
+
+
+def list_assets(summary: bool = False) -> list[dict]:
     root = assets_root()
     if not root.is_dir():
         return []
@@ -353,9 +541,90 @@ def list_assets() -> list[dict]:
             continue
         meta = load_asset(folder.name)
         if meta is not None:
-            assets.append(meta)
+            assets.append(asset_summary(meta) if summary else meta)
     assets.sort(key=lambda item: str(item.get("created") or ""), reverse=True)
     return assets
+
+
+def _summary_objects(plan: dict) -> list[dict]:
+    """Collect object entries from the places older plans copied them to."""
+    raw: list[dict] = []
+    for key in ("objects", "targets"):
+        value = plan.get(key)
+        if isinstance(value, list):
+            raw.extend(entry for entry in value if isinstance(entry, dict))
+    inventory = plan.get("inventory")
+    if isinstance(inventory, dict) and isinstance(inventory.get("objects"), list):
+        raw.extend(entry for entry in inventory["objects"] if isinstance(entry, dict))
+    for item in plan.get("items") or []:
+        if isinstance(item, dict) and isinstance(item.get("objects"), list):
+            raw.extend(entry for entry in item["objects"] if isinstance(entry, dict))
+    objects: list[dict] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        identity = str(entry.get("id") or f"object-{index + 1}")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        objects.append(entry)
+    return objects
+
+
+def asset_summary(meta: dict) -> dict:
+    """Compact asset metadata for the library grid (no embedded effect_plan)."""
+    if not isinstance(meta, dict):
+        return {}
+    plan = meta.get("effect_plan") if isinstance(meta.get("effect_plan"), dict) else {}
+    effect_names: list[str] = []
+    for item in plan.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("effect") or "").strip()
+        if name and name not in effect_names:
+            effect_names.append(name)
+    objects = _summary_objects(plan)
+    manual_objects = sum(
+        1
+        for entry in objects
+        if str(entry.get("source") or "").strip().casefold() == "manual"
+    )
+    try:
+        frames = int(meta.get("asset_frames") or 0)
+    except (TypeError, ValueError):
+        frames = 0
+    try:
+        fps = float(meta.get("fps") or 0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    if frames > 0 and fps > 0:
+        duration = frames / fps
+    else:
+        try:
+            duration = float(meta.get("loop_duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+    try:
+        clip_size = int(meta.get("clip_size") or 0)
+    except (TypeError, ValueError):
+        clip_size = 0
+    return {
+        "id": str(meta.get("id") or ""),
+        "name": str(meta.get("name") or ""),
+        "source_image": str(meta.get("source_image") or ""),
+        "image_hash": str(meta.get("image_hash") or ""),
+        "plan_hash": str(meta.get("plan_hash") or ""),
+        "profile_id": str(meta.get("profile_id") or ""),
+        "width": int(meta.get("width") or 0),
+        "height": int(meta.get("height") or 0),
+        "fps": float(meta.get("fps") or 0),
+        "asset_frames": frames,
+        "duration_seconds": duration,
+        "clip_size": clip_size,
+        "created": str(meta.get("created") or ""),
+        "effect_names": effect_names,
+        "object_count": len(objects),
+        "manual_object_count": manual_objects,
+    }
 
 
 def _folder_size(folder: Path) -> int | None:
@@ -503,17 +772,93 @@ def known_project_paths() -> list[Path]:
     return paths
 
 
+def _project_asset_ids(path: Path, mtime_ns: int, size: int) -> tuple[str, ...]:
+    """Asset ids referenced by one project, cached by path + mtime + size."""
+    key = (str(path), int(mtime_ns), int(size))
+    with _PROJECT_REFS_LOCK:
+        cached = _PROJECT_REFS_FILES.get(key)
+    if cached is not None:
+        return cached
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("project JSON is not an object")
+    ids: list[str] = []
+    for effect in data.get("background_effects") or []:
+        if not isinstance(effect, dict):
+            continue
+        asset_id = str(effect.get("asset_id") or "").strip()
+        if asset_id and asset_id not in ids:
+            ids.append(asset_id)
+    value = tuple(ids)
+    with _PROJECT_REFS_LOCK:
+        for stale in [
+            entry
+            for entry in _PROJECT_REFS_FILES
+            if entry[0] == key[0] and entry != key
+        ]:
+            _PROJECT_REFS_FILES.pop(stale, None)
+        _PROJECT_REFS_FILES[key] = value
+    return value
+
+
+def referenced_asset_projects() -> dict[str, list[str]] | None:
+    """Map ``asset_id -> [project path]`` for every known project file.
+
+    Returns ``None`` when any project file cannot be read, so callers can show
+    "không xác định" instead of incorrectly reporting an asset as unused.
+    """
+    global _PROJECT_REFS_SNAPSHOT
+    try:
+        known = known_project_paths()
+    except Exception:
+        return None
+    entries: list[tuple[str, int, int]] = []
+    seen: set[str] = set()
+    for path in known:
+        try:
+            resolved = str(path.expanduser().resolve())
+            info = path.stat()
+        except OSError:
+            return None
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        entries.append((resolved, info.st_mtime_ns, info.st_size))
+    key = tuple(entries)
+    with _PROJECT_REFS_LOCK:
+        snapshot = _PROJECT_REFS_SNAPSHOT
+        if snapshot is not None and snapshot[0] == key:
+            return {asset_id: list(paths) for asset_id, paths in snapshot[1].items()}
+    mapping: dict[str, set[str]] = {}
+    for resolved, mtime_ns, size in entries:
+        try:
+            ids = _project_asset_ids(Path(resolved), mtime_ns, size)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        for asset_id in ids:
+            mapping.setdefault(asset_id, set()).add(resolved)
+    result = {
+        asset_id: sorted(paths)
+        for asset_id, paths in sorted(mapping.items())
+    }
+    with _PROJECT_REFS_LOCK:
+        _PROJECT_REFS_SNAPSHOT = (key, result)
+    return {asset_id: list(paths) for asset_id, paths in result.items()}
+
+
 def cleanup_assets(
     *,
     keep_ids: set[str] | None = None,
     max_files: int = ASSET_MAX_FILES,
     max_bytes: int = ASSET_MAX_BYTES,
     min_age_days: float = ASSET_MIN_AGE_DAYS,
+    dry_run: bool = False,
 ) -> dict:
     """Delete the oldest unreferenced assets until the quota is satisfied.
 
     Assets in ``keep_ids``, anything newer than ``min_age_days`` and anything
-    that cannot be inspected safely are never removed.
+    that cannot be inspected safely are never removed. With ``dry_run`` the
+    same candidates are reported but nothing is deleted.
     """
     root = assets_root()
     if not root.is_dir():
@@ -536,12 +881,13 @@ def cleanup_assets(
             if count <= max_files and total_bytes <= max_bytes:
                 break
             folder = entry["folder"]
-            try:
-                if folder.is_symlink() or not folder.is_dir():
+            if not dry_run:
+                try:
+                    if folder.is_symlink() or not folder.is_dir():
+                        continue
+                    shutil.rmtree(folder)
+                except OSError:
                     continue
-                shutil.rmtree(folder)
-            except OSError:
-                continue
             deleted.append(entry["id"])
             freed_bytes += entry["bytes"]
             count -= 1
