@@ -1919,7 +1919,7 @@ def render_videos(
                         log,
                     )
                 except Exception as error:
-                    log(f"Không tạo được waveform: {error}")
+                    log(f"CẢNH BÁO: không tạo được waveform ({error}); video sẽ xuất không có waveform.")
                     waveform_path = None
                     waveform_hash = ""
                     # Do not cache a picture as "with waveform" when the clip
