@@ -74,6 +74,13 @@ def grant_project_paths(payload: dict) -> None:
         source = str(background.get("source_output_dir") or "").strip()
         if source:
             grant(Path(source))
+    presentation = payload.get("presentation")
+    if isinstance(presentation, dict):
+        outro = presentation.get("outro")
+        if isinstance(outro, dict):
+            image = str(outro.get("image") or "").strip()
+            if image:
+                grant(Path(image))
 
 
 def allowed_roots() -> list[Path]:

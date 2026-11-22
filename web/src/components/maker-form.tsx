@@ -21,6 +21,9 @@ import {
   emptyFields,
   fieldsFromProject,
   fieldsPayload,
+  mergePresentation,
+  mergeTypography,
+  mergeWaveform,
   sungCount,
   type Job,
   type Phase,
@@ -29,7 +32,7 @@ import {
   type RestoreSettings,
 } from "@/lib/types";
 
-type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project";
+type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project" | "outro";
 
 function replaceProjectUrl(
   router: ReturnType<typeof useRouter>,
@@ -293,6 +296,16 @@ export function MakerForm() {
     const selected = paths[0];
     if (kind === "cover") {
       setFields((current) => ({ ...current, cover_image: selected }));
+      return;
+    }
+    if (kind === "outro") {
+      setFields((current) => {
+        const presentation = mergePresentation(current.presentation);
+        return {
+          ...current,
+          presentation: { ...presentation, outro: { ...presentation.outro, image: selected } },
+        };
+      });
       return;
     }
     if (kind === "output") {
@@ -655,6 +668,9 @@ export function MakerForm() {
           lines: nextLines,
           output_dir: options.output_dir,
           format: options.format,
+          waveform: mergeWaveform(options.waveform ?? fields.waveform),
+          presentation: mergePresentation(fields.presentation),
+          typography: mergeTypography(fields.typography),
         }),
       });
       if (!response.ok) {
@@ -870,6 +886,15 @@ export function MakerForm() {
           defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
           background={job.background}
           renderPercent={job.render_percent ?? 0}
+          presentation={mergePresentation(fields.presentation)}
+          waveform={mergeWaveform(fields.waveform)}
+          outputProfile={fields.output_profile}
+          onPresentationSaved={(project) => {
+            const next = fieldsFromProject(project);
+            if (!project.path) next.project_path = fields.project_path;
+            setFields(next);
+            setJob((current) => (current ? { ...current, project } : current));
+          }}
           onRender={renderVideos}
           onReveal={reveal}
           onBuildBackground={buildBackground}

@@ -90,6 +90,41 @@ server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
   ở thư mục dữ liệu ứng dụng, không bị dọn cùng cache. Nếu clip khác định dạng hoặc khác
   “Mỗi ảnh nền”, export sẽ render lại từ `effect_plan`.
 
+## Hiệu ứng thêm, trang và waveform
+
+Ba phần này nằm trong **Khai báo** (mục **Hiệu ứng thêm**, **Trang & chữ**) và drawer
+**Xuất video**.
+
+- **Hiệu ứng thêm (không cần AI):** tuyết, lá, bokeh, light leak. Chạy như một lớp phủ
+  toàn video, không phụ thuộc Gemini; có thể bật/tắt, chỉnh cường độ/mật độ/tốc độ/palette.
+  Tuyết và lá dùng sprite thật, loop khép kín; bokeh/light leak blend `screen` để không
+  cháy trắng.
+- **Mây:** khoanh box trong editor ảnh (nút **Vẽ object** → vai trò **Mây**). Vùng mây
+  được warp nhẹ, viền mờ, giữ gốc; có thể dùng Gemini để gợi ý vùng nhưng không tự bật.
+- **Cành cây:** nhận diện nhiều cành theo `group_id` và cho đung đưa bằng `wind`; prompt
+  “cành cây đung đưa” sẽ kích hoạt focused inventory. Có thể vẽ tay và đặt tên nhóm.
+- **Tàn lửa/tro bay:** tách `spark` (lõi vàng-cam, có glow) và `ash` (tro xám), thêm
+  `glow`/`ash_ratio`/`flicker`, tránh hiện tượng bong bóng trắng.
+- **Trang & chữ:** layout bìa (giữa/dưới-trái/dưới-giữa), cỡ chữ, màu, uppercase,
+  bóng/viền, blur/darken/vignette/scrim; banner **Nhạc dạo** trong dải lời khi khoảng
+  lặng ≥ 8 giây; trang kết có ảnh riêng (fallback ảnh bìa), thời lượng và fade.
+- **Waveform:** dải sóng ngang, mặc định đặt ngay trên dải lời (`y = 0.70` cho 16:9,
+  `0.63` cho 9:16), kiểu bars/line/dots, chạy theo tiến trình bài hát. Kéo vị trí trong
+  tab **Waveform** của drawer Xuất; toạ độ được lưu ngay vào dự án.
+
+## Đăng YouTube
+
+Trang **Đăng bài** (`/publish`) cho phép kết nối một kênh YouTube, lưu nháp nội dung và
+bấm đăng video mới nhất sau khi xuất. Mỗi nháp gắn với một dự án + vai trò video
+(`vocal`/`instrumental`), nên sau khi xuất lại chỉ cần bấm **Đăng lại**.
+
+- Cần tạo OAuth client và điền `.env`; xem hướng dẫn từng bước tại
+  `docs/youtube-oauth-setup.md`.
+- Form YouTube chỉ có 5 trường: tiêu đề, nội dung, trẻ em có xem được, chế độ đăng
+  (mặc định **Công khai**), playlist. Không làm thumbnail/end screen.
+- Tiêu đề/nội dung giữ nguyên emoji/icon khi nhập hoặc dán.
+- TikTok chưa nằm trong phạm vi phiên bản này; nút TikTok được ẩn.
+
 ## Cách dùng
 
 Giao diện dùng **Dự án** ở `/` (dashboard) và workspace ở `/project`; các bước bên trong

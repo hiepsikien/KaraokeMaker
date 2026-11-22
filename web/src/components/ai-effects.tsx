@@ -15,6 +15,7 @@ import type {
   DirectorObject,
   DirectorPoint,
   DirectorUsage,
+  EffectPlanItem,
   StudioAsset,
 } from "@/lib/types";
 
@@ -439,7 +440,8 @@ function PlanOverlay({
                   stroke="#110e0b"
                   strokeWidth={fontSize * 0.18}
                 >
-                  {object.label}
+                  {object.display_label || object.label}
+                  {object.group_id ? ` · ${object.group_id}` : ""}
                 </text>
                 {object.anchors?.pivot && (
                   <Anchor
@@ -448,7 +450,7 @@ function PlanOverlay({
                     height={height}
                     radius={anchorRadius}
                     color={color}
-                    label={`pivot ${object.label}`}
+                    label={`pivot ${object.display_label || object.label}`}
                   />
                 )}
                 {object.anchors?.opening && (
@@ -458,7 +460,7 @@ function PlanOverlay({
                     height={height}
                     radius={anchorRadius}
                     color={color}
-                    label={`opening ${object.label}`}
+                    label={`opening ${object.display_label || object.label}`}
                   />
                 )}
                 {(
@@ -485,7 +487,7 @@ function PlanOverlay({
                     onPointerCancel={endResize}
                     onClick={(event) => event.stopPropagation()}
                   >
-                    <title>{`Kéo để chỉnh kích thước ${object.label}`}</title>
+                    <title>{`Kéo để chỉnh kích thước ${object.display_label || object.label}`}</title>
                   </rect>
                 ))}
               </g>
@@ -539,6 +541,7 @@ export function AiEffects({
   busyImages = false,
   onProfileChange,
   onDurationChange,
+  initialManual = false,
 }: {
   images: string[];
   effects: BackgroundEffect[];
@@ -556,6 +559,7 @@ export function AiEffects({
   busyImages?: boolean;
   onProfileChange?: (value: string) => void;
   onDurationChange?: (value: number) => void;
+  initialManual?: boolean;
 }) {
   const imageSignature = images.join("\n");
   const { settings, save: saveSettings } = useSettings();
@@ -576,7 +580,9 @@ export function AiEffects({
   const [drawMode, setDrawMode] = useState(false);
   const [draftBox, setDraftBox] = useState<DirectorBox | null>(null);
   const [manualName, setManualName] = useState("");
-  const [manualWind, setManualWind] = useState(true);
+  const [manualRole, setManualRole] = useState<"object" | "cloud" | "branch">("object");
+  const [manualGroup, setManualGroup] = useState("");
+  const manualAutoRef = useRef(false);
   const [stageTab, setStageTab] = useState<"image" | "clip">("image");
   const [quickPreview, setQuickPreview] = useState<PreviewResult | null>(null);
   const [quickBusy, setQuickBusy] = useState(false);
@@ -640,6 +646,8 @@ export function AiEffects({
         setDrawMode(false);
         setDraftBox(null);
         setManualName("");
+        setManualRole("object");
+        setManualGroup("");
         return;
       }
     }
@@ -649,6 +657,8 @@ export function AiEffects({
     setDrawMode(false);
     setDraftBox(null);
     setManualName("");
+    setManualRole("object");
+    setManualGroup("");
   }, [selectedImage]);
 
   useEffect(() => {
@@ -669,6 +679,8 @@ export function AiEffects({
     setDrawMode(false);
     setDraftBox(null);
     setManualName("");
+    setManualRole("object");
+    setManualGroup("");
     setQuickPreview(null);
     setStageTab("clip");
   }, [resumeAsset?.token]);
@@ -746,9 +758,26 @@ export function AiEffects({
   const protect = analysis?.protect?.length ? analysis.protect : analysis?.effect_plan.protect || [];
 
   function toggleObject(id: string) {
-    setSelectedObjectIds((current) =>
-      current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
-    );
+    setSelectedObjectIds((current) => {
+      const object = analysis?.objects.find((item) => item.id === id);
+      const groupIds =
+        object?.group_id
+          ? (analysis?.objects || [])
+              .filter((item) => item.group_id === object.group_id)
+              .map((item) => item.id)
+          : [id];
+      const allSelected = groupIds.every((value) => current.includes(value));
+      if (allSelected) return current.filter((value) => !groupIds.includes(value));
+      return Array.from(new Set([...current, ...groupIds]));
+    });
+  }
+
+  function selectGroup(groupId: string) {
+    const ids = (analysis?.objects || [])
+      .filter((item) => item.group_id === groupId)
+      .map((item) => item.id);
+    if (ids.length === 0) return;
+    setSelectedObjectIds((current) => Array.from(new Set([...current, ...ids])));
   }
 
   function changeObjectBox(id: string, box: DirectorBox) {
@@ -756,9 +785,14 @@ export function AiEffects({
       if (object.id !== id) return object;
       const next = { ...object, box };
       if (object.source === "manual") {
+        const branch = (object.affordances || []).includes("branch");
+        const cloud = (object.affordances || []).includes("cloud_soft");
         next.anchors = {
           ...object.anchors,
-          pivot: { x: (box.x1 + box.x2) / 2, y: box.y1 },
+          pivot: {
+            x: (box.x1 + box.x2) / 2,
+            y: cloud ? (box.y1 + box.y2) / 2 : branch ? box.y2 : box.y1,
+          },
         };
       } else if (object.anchors?.pivot) {
         next.anchors = {
@@ -823,38 +857,58 @@ export function AiEffects({
     });
   }
 
+  function manualDisplayLabel(label: string) {
+    const objects = analysis?.objects || [];
+    const used = new Set(objects.map((object) => object.display_label || object.label));
+    if (!used.has(label)) return label;
+    let index = 2;
+    while (used.has(`${label}_${index}`)) index += 1;
+    return `${label}_${index}`;
+  }
+
   function startManualDraw() {
     if (!analysis) return;
     setDrawMode(true);
     setDraftBox(null);
     setManualName("");
-    setManualWind(true);
+    setManualRole("object");
+    setManualGroup("");
   }
 
   function finishManualDraw(box: DirectorBox) {
     setDrawMode(false);
     setDraftBox(box);
     setManualName("");
-    setManualWind(true);
+    setManualRole("object");
+    setManualGroup("");
   }
 
   function addManualObject() {
     if (!analysis || !draftBox) return;
-    const label = manualName.trim() || "vật thể";
+    const fallback = manualRole === "cloud" ? "mây" : manualRole === "branch" ? "cành cây" : "vật thể";
+    const label = manualName.trim() || fallback;
     const existing = new Set(analysis.objects.map((object) => object.id));
     let id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     while (existing.has(id)) {
       id = `${id}-x`;
     }
+    const pivotY = manualRole === "cloud" ? (draftBox.y1 + draftBox.y2) / 2 : draftBox.y2;
     const object: DirectorObject = {
       id,
       label,
+      display_label: manualDisplayLabel(label),
+      group_id: manualRole === "branch" && manualGroup.trim() ? manualGroup.trim() : undefined,
       box: draftBox,
       anchors: {
-        pivot: { x: (draftBox.x1 + draftBox.x2) / 2, y: draftBox.y1 },
+        pivot: { x: (draftBox.x1 + draftBox.x2) / 2, y: pivotY },
         opening: null,
       },
-      affordances: manualWind ? ["wind_movable"] : [],
+      affordances:
+        manualRole === "cloud"
+          ? ["cloud_soft"]
+          : manualRole === "branch"
+            ? ["wind_movable", "branch"]
+            : ["wind_movable"],
       confidence: 1,
       source: "manual",
     };
@@ -871,16 +925,22 @@ export function AiEffects({
         },
       };
     });
-    setSelectedObjectIds((current) => (current.includes(id) ? current : [...current, id]));
+    const groupPeers =
+      object.group_id != null
+        ? analysis.objects.filter((item) => item.group_id === object.group_id).map((item) => item.id)
+        : [];
+    setSelectedObjectIds((current) => Array.from(new Set([...current, id, ...groupPeers])));
     setDraftBox(null);
     setManualName("");
-    setManualWind(true);
+    setManualRole("object");
+    setManualGroup("");
   }
 
   function cancelManualObject() {
     setDraftBox(null);
     setManualName("");
-    setManualWind(true);
+    setManualRole("object");
+    setManualGroup("");
   }
 
   function removeManualObject(id: string) {
@@ -902,6 +962,42 @@ export function AiEffects({
     setSelectedObjectIds((current) => current.filter((value) => value !== id));
   }
 
+  async function startManualPlan() {
+    if (!selectedImage || busy) return;
+    setBusy(true);
+    setError("");
+    setDrawMode(false);
+    setDraftBox(null);
+    try {
+      const response = await fetch("/api/director/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_path: selectedImage, output_profile: outputProfile }),
+      });
+      if (!response.ok) {
+        setError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as DirectorAnalysis;
+      setAnalysis(data);
+      setSelectedObjectIds([]);
+    } catch {
+      setError("Không tạo được plan thủ công. Kiểm tra server Python đang chạy.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!initialManual) {
+      manualAutoRef.current = false;
+      return;
+    }
+    if (manualAutoRef.current || !selectedImage || analysis || busy) return;
+    manualAutoRef.current = true;
+    void startManualPlan();
+  }, [initialManual, selectedImage, analysis, busy]);
+
   async function analyze() {
     if (!canAnalyze) return;
     setBusy(true);
@@ -909,6 +1005,8 @@ export function AiEffects({
     setDrawMode(false);
     setDraftBox(null);
     setManualName("");
+    setManualRole("object");
+    setManualGroup("");
     try {
       const response = await fetch("/api/director/analyze", {
         method: "POST",
@@ -1205,43 +1303,52 @@ export function AiEffects({
   function applyEffect() {
     if (!analysis || !selectedImage) return;
     setQuickPreview(null);
-    const manualWindIds = analysis.objects
-      .filter(
-        (object) =>
-          object.source === "manual" &&
-          selectedObjectIds.includes(object.id) &&
-          (object.affordances || []).includes("wind_movable"),
-      )
+    const manualSelected = analysis.objects.filter(
+      (object) => object.source === "manual" && selectedObjectIds.includes(object.id),
+    );
+    const manualWindIds = manualSelected
+      .filter((object) => (object.affordances || []).includes("wind_movable"))
       .map((object) => object.id);
-    let items = analysis.effect_plan.items;
-    if (manualWindIds.length > 0) {
+    const manualCloudIds = manualSelected
+      .filter((object) => (object.affordances || []).includes("cloud_soft"))
+      .map((object) => object.id);
+
+    function withTargets(
+      list: EffectPlanItem[],
+      effect: string,
+      targetIds: string[],
+      params: Record<string, unknown>,
+    ) {
+      if (targetIds.length === 0) return list;
       let added = false;
-      items = items.map((item) => {
-        if (item.effect !== "wind") return item;
+      const next = list.map((item) => {
+        if (item.effect !== effect) return item;
         added = true;
         return {
           ...item,
-          target_ids: Array.from(new Set([...item.target_ids, ...manualWindIds])),
+          target_ids: Array.from(new Set([...item.target_ids, ...targetIds])),
         };
       });
-      if (!added) {
-        items = [
-          ...items,
-          {
-            effect: "wind",
-            target_ids: manualWindIds,
-            params: {
-              intensity: 0.55,
-              density: 1.0,
-              speed: 1.0,
-              loop_duration: 8,
-              audio: false,
-            },
-          },
-        ];
-      }
+      if (added) return next;
+      return [...next, { effect, target_ids: targetIds, params }];
     }
+
+    let items = analysis.effect_plan.items;
+    items = withTargets(items, "wind", manualWindIds, {
+      intensity: 0.55,
+      density: 1.0,
+      speed: 1.0,
+      loop_duration: 8,
+      audio: false,
+    });
+    items = withTargets(items, "cloud", manualCloudIds, {
+      intensity: 0.55,
+      speed: 1.0,
+      billow: 0.6,
+      feather: 48,
+    });
     const currentEffect = effects.find((item) => item.image_path === selectedImage);
+    const manual = analysis.model === "manual";
     const effect: BackgroundEffect = {
       image_path: selectedImage,
       image_hash: analysis.image_hash,
@@ -1249,7 +1356,7 @@ export function AiEffects({
       effect_consent_receipt: {
         timestamp: new Date().toISOString(),
         image_hash: analysis.image_hash,
-        provider: "gemini",
+        provider: manual ? "manual" : "gemini",
         model: analysis.model,
       },
       selected_object_ids: selectedObjectIds,
@@ -1486,21 +1593,52 @@ export function AiEffects({
       {draftBox ? (
         <div className="space-y-2 rounded-xl border border-[var(--gold)] bg-black/25 p-3">
           <p className="text-sm font-semibold text-[var(--gold)]">Object thủ công</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-[var(--muted)]">Vai trò</span>
+            <Segmented<"object" | "cloud" | "branch">
+              value={manualRole}
+              onChange={setManualRole}
+              ariaLabel="Vai trò object thủ công"
+              options={[
+                { value: "object", label: "Vật thể (gió)" },
+                { value: "cloud", label: "Mây (bồng bềnh)" },
+                { value: "branch", label: "Cành cây (gió)" },
+              ]}
+            />
+          </div>
+          <p className="text-[11px] leading-4 text-[var(--muted)]">
+            {manualRole === "cloud"
+              ? "Mây biến dạng nhẹ vùng đã khoanh; thêm item cloud vào kế hoạch."
+              : manualRole === "branch"
+                ? "Cành xoay quanh gốc dưới; nhập nhóm để chọn và cho cả nhóm đung đưa."
+                : "Vật thể bay theo gió, neo ở đáy vùng vẽ."}
+          </p>
           <input
             value={manualName}
             onChange={(event) => setManualName(event.target.value)}
-            placeholder="Tên object, vd. khăn, lọn tóc, vạt áo"
+            placeholder={
+              manualRole === "cloud"
+                ? "Tên vùng mây, vd. mây trời"
+                : manualRole === "branch"
+                  ? "Tên cành, vd. cành mai"
+                  : "Tên object, vd. khăn, lọn tóc, vạt áo"
+            }
             className={fieldClass}
           />
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={manualWind}
-              onChange={(event) => setManualWind(event.target.checked)}
-              className="accent-[var(--gold)]"
-            />
-            Bay theo gió (wind_movable)
-          </label>
+          {manualRole === "branch" ? (
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-[var(--muted)]">Nhóm (tuỳ chọn)</span>
+              <input
+                value={manualGroup}
+                onChange={(event) => setManualGroup(event.target.value)}
+                placeholder="tree_1"
+                className={fieldClass}
+              />
+              <span className="mt-1 block text-[10px] leading-4 text-[var(--muted)]">
+                Để trống thì mỗi cành là một nhóm riêng.
+              </span>
+            </label>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -1663,6 +1801,14 @@ export function AiEffects({
         className="w-full rounded-xl bg-[var(--gold)] px-4 py-2.5 text-sm font-semibold text-[#1a1206] disabled:cursor-not-allowed disabled:opacity-50"
       >
         {busy ? "Đang phân tích ảnh…" : "Phân tích ảnh"}
+      </button>
+      <button
+        type="button"
+        onClick={() => void startManualPlan()}
+        disabled={!selectedImage || busy}
+        className="w-full rounded-xl border border-[var(--gold)] px-4 py-2 text-sm font-semibold text-[var(--gold)] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Làm hiệu ứng thủ công (không cần Gemini)
       </button>
       {busy ? (
         <p className="text-[11px] leading-4 text-[var(--muted)]">
@@ -1920,8 +2066,9 @@ export function AiEffects({
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-baseline gap-1.5">
-                    <span className="text-xs">{object.label}</span>
+                    <span className="text-xs">{object.display_label || object.label}</span>
                     <span className="text-[10px] text-[var(--muted)]">{percent}%</span>
+                    {object.group_id ? <Badge tone="info">nhóm {object.group_id}</Badge> : null}
                     {object.source === "manual" ? <Badge tone="gold">thủ công</Badge> : null}
                   </span>
                   {(checked || layout !== "studio") && object.affordances.length > 0 ? (
@@ -1938,6 +2085,15 @@ export function AiEffects({
                   ) : null}
                 </span>
               </label>
+              {object.group_id ? (
+                <button
+                  type="button"
+                  onClick={() => selectGroup(object.group_id!)}
+                  className="mt-1 text-[10px] text-[var(--gold)] hover:text-white"
+                >
+                  Chọn cả nhóm
+                </button>
+              ) : null}
               {object.source === "manual" ? (
                 <button
                   type="button"

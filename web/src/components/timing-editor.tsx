@@ -11,15 +11,24 @@ import {
   Panel,
   ProgressBar,
   SectionTitle,
+  Segmented,
   btnGhost,
   btnPrimary,
   btnSecondary,
 } from "@/components/ui/primitives";
 import { useNotices } from "@/components/ui/toast";
 import { cueAt, formatSeconds, wordFill, type TimedLine } from "@/lib/cue";
+import { readError } from "@/lib/api";
 import { useDirty } from "@/lib/dirty";
-import { fileName } from "@/lib/format";
+import { fileName, profileMeta } from "@/lib/format";
 import { clearSession, readSession, sessionKeys, writeSession } from "@/lib/session";
+import {
+  mergePresentation,
+  mergeWaveform,
+  type Presentation,
+  type Project,
+  type WaveformPlan,
+} from "@/lib/types";
 
 function cloneLines(lines: TimedLine[]) {
   return lines.map((line) => ({
@@ -63,6 +72,7 @@ function LyricLine({ line, time, preview }: { line: TimedLine; time: number; pre
 export type ExportOptions = {
   output_dir: string;
   format: "mp4" | "mov" | "mkv";
+  waveform?: WaveformPlan;
 };
 
 type TimingDraft = {
@@ -97,6 +107,10 @@ export function TimingEditor({
   defaultOutputDir = "",
   background = null,
   renderPercent = 0,
+  presentation,
+  waveform,
+  outputProfile = "landscape_1080p",
+  onPresentationSaved,
   onRender,
   onReveal,
   onBuildBackground,
@@ -133,6 +147,10 @@ export function TimingEditor({
     profile_id?: string;
     fps?: number;
   } | null;
+  presentation?: Presentation;
+  waveform?: WaveformPlan;
+  outputProfile?: string;
+  onPresentationSaved?: (project: Project) => void;
   onRender: (lines: TimedLine[], options: ExportOptions) => void;
   onReveal: (path: string) => void;
   onBuildBackground?: (rebuild: boolean) => void;
@@ -188,6 +206,31 @@ export function TimingEditor({
   );
   const [exportOpen, setExportOpen] = useState(false);
   const closeExport = useCallback(() => setExportOpen(false), []);
+  const [exportTab, setExportTab] = useState<"export" | "waveform" | "pages">("export");
+  const [wave, setWave] = useState<WaveformPlan>(() => mergeWaveform(waveform));
+  const [waveSaving, setWaveSaving] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [waveError, setWaveError] = useState("");
+  const waveRef = useRef(wave);
+  const persistTimer = useRef<number | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    offsetX: number;
+    offsetY: number;
+    frameRect: DOMRect;
+  } | null>(null);
+  waveRef.current = wave;
+  const waveSignature = waveform ? JSON.stringify(waveform) : "";
+  useEffect(() => {
+    if (!waveSignature) return;
+    const next = mergeWaveform(waveform);
+    setWave(next);
+    waveRef.current = next;
+  }, [waveSignature]);
+  useEffect(() => {
+    return () => {
+      if (persistTimer.current) window.clearTimeout(persistTimer.current);
+    };
+  }, []);
 
   const cue = cueAt(lines, time);
   const backgroundBuilding = background?.state === "building";
@@ -551,8 +594,128 @@ export function TimingEditor({
       return;
     }
     setSaveError("");
-    onRender(lines, { output_dir: exportDir.trim(), format: exportFormat });
+    onRender(lines, { output_dir: exportDir.trim(), format: exportFormat, waveform: waveRef.current });
   }
+
+  async function persistPresentation(partial: {
+    waveform?: WaveformPlan;
+    presentation?: Presentation;
+  }) {
+    if (!projectPath) {
+      setWaveSaving("error");
+      setWaveError("Chưa có file dự án. Hãy Lưu dự án trước khi đổi waveform.");
+      return;
+    }
+    setWaveSaving("saving");
+    setWaveError("");
+    try {
+      const response = await fetch("/api/projects/presentation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_path: projectPath, ...partial }),
+      });
+      if (!response.ok) {
+        setWaveSaving("error");
+        setWaveError(await readError(response));
+        return;
+      }
+      const data = (await response.json()) as { project?: Project };
+      const project = data.project;
+      if (project) onPresentationSaved?.(project);
+      setWaveSaving("saved");
+      window.setTimeout(() => setWaveSaving((current) => (current === "saved" ? "idle" : current)), 1800);
+    } catch {
+      setWaveSaving("error");
+      setWaveError("Chưa lưu được vị trí waveform. Kiểm tra server Python.");
+    }
+  }
+
+  function commitWave(patch: Partial<WaveformPlan>, debounce = false) {
+    const next = { ...waveRef.current, ...patch };
+    waveRef.current = next;
+    setWave(next);
+    if (persistTimer.current) window.clearTimeout(persistTimer.current);
+    if (debounce) {
+      persistTimer.current = window.setTimeout(() => {
+        void persistPresentation({ waveform: waveRef.current });
+      }, 500);
+    } else {
+      void persistPresentation({ waveform: next });
+    }
+  }
+
+  function waveCenterFromPointer(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return null;
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect() || drag.frameRect;
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const halfW = waveRef.current.width / 2;
+    const halfH = waveRef.current.height / 2;
+    const x = (event.clientX - drag.offsetX - rect.left) / rect.width;
+    const y = (event.clientY - drag.offsetY - rect.top) / rect.height;
+    return {
+      x: Math.min(1 - halfW, Math.max(halfW, x)),
+      y: Math.min(1 - halfH, Math.max(halfH, y)),
+    };
+  }
+
+  function startWaveDrag(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return;
+    const centerX = rect.left + waveRef.current.x * rect.width;
+    const centerY = rect.top + waveRef.current.y * rect.height;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - centerX,
+      offsetY: event.clientY - centerY,
+      frameRect: rect,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveWaveDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (!dragRef.current) return;
+    const next = waveCenterFromPointer(event);
+    if (!next) return;
+    const updated = { ...waveRef.current, ...next };
+    waveRef.current = updated;
+    setWave(updated);
+  }
+
+  function endWaveDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    void persistPresentation({ waveform: waveRef.current });
+  }
+
+  function snapWave(x: number, y: number) {
+    commitWave({ x, y });
+  }
+
+  const pagePresentation = mergePresentation(presentation);
+  const profile = profileMeta(outputProfile);
+  const snapMargin = 0.04;
+  const snapPoints = [
+    { key: "tl", label: "↖", x: wave.width / 2 + snapMargin, y: wave.height / 2 + snapMargin },
+    { key: "tc", label: "↑", x: 0.5, y: wave.height / 2 + snapMargin },
+    { key: "tr", label: "↗", x: 1 - wave.width / 2 - snapMargin, y: wave.height / 2 + snapMargin },
+    { key: "ml", label: "←", x: wave.width / 2 + snapMargin, y: 0.5 },
+    { key: "mc", label: "•", x: 0.5, y: 0.5 },
+    { key: "mr", label: "→", x: 1 - wave.width / 2 - snapMargin, y: 0.5 },
+    { key: "bl", label: "↙", x: wave.width / 2 + snapMargin, y: 1 - wave.height / 2 - snapMargin },
+    { key: "bc", label: "↓", x: 0.5, y: 1 - wave.height / 2 - snapMargin },
+    { key: "br", label: "↘", x: 1 - wave.width / 2 - snapMargin, y: 1 - wave.height / 2 - snapMargin },
+  ];
+  const waveBars = Array.from({ length: 34 }, (_, index) => {
+    const phase = Math.sin(index * 1.7) * 0.34 + Math.sin(index * 0.51 + 1.2) * 0.36;
+    return Math.min(1, Math.max(0.14, Math.abs(phase) + 0.3));
+  });
+  const playhead = 0.42;
 
   return (
     <div className="space-y-5">
@@ -894,6 +1057,18 @@ export function TimingEditor({
         }
       >
         <div className="space-y-5">
+          <Segmented<"export" | "waveform" | "pages">
+            value={exportTab}
+            onChange={setExportTab}
+            ariaLabel="Phần cài đặt xuất"
+            options={[
+              { value: "export", label: "Xuất" },
+              { value: "waveform", label: "Waveform", badge: wave.enabled ? "bật" : undefined },
+              { value: "pages", label: "Trang" },
+            ]}
+          />
+          {exportTab === "export" ? (
+          <div className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <SectionTitle>Trạng thái xuất</SectionTitle>
             <Badge tone={exportStatusTone}>{exportStatusLabel}</Badge>
@@ -956,6 +1131,14 @@ export function TimingEditor({
                 <button type="button" className={btnGhost} onClick={() => onReveal(outputs.directory)}>
                   Mở thư mục
                 </button>
+                {projectPath ? (
+                  <a
+                    className={btnGhost}
+                    href={`/publish?project=${encodeURIComponent(projectPath)}`}
+                  >
+                    Đăng bài
+                  </a>
+                ) : null}
               </div>
             </div>
           )}
@@ -1046,6 +1229,331 @@ export function TimingEditor({
               </ol>
             )}
           </Disclosure>
+          </div>
+          ) : null}
+
+          {exportTab === "waveform" ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <SectionTitle>Waveform</SectionTitle>
+                <Badge tone={waveSaving === "error" ? "danger" : waveSaving === "saving" ? "gold" : wave.enabled ? "success" : "muted"}>
+                  {waveSaving === "saving"
+                    ? "Đang lưu…"
+                    : waveSaving === "error"
+                      ? "Chưa lưu được"
+                      : waveSaving === "saved"
+                        ? "Đã lưu"
+                        : wave.enabled
+                          ? "Đang bật"
+                          : "Đang tắt"}
+                </Badge>
+              </div>
+              <p className="text-xs leading-5 text-[var(--muted)]">
+                Dải sóng nhỏ chạy theo nhạc, tự đẩy lên khi chạm dải lời. Nguồn mặc định là instrumental; cả hai video
+                dùng chung một lớp hình nên bản có giọng cũng hiện waveform không vocal.
+              </p>
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={wave.enabled}
+                  onChange={(event) => commitWave({ enabled: event.target.checked }, true)}
+                  className="accent-[var(--gold)]"
+                  disabled={locked}
+                />
+                Bật waveform
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Kiểu vẽ">
+                  <Select
+                    value={wave.style}
+                    onChange={(event) => commitWave({ style: event.target.value }, true)}
+                    disabled={locked}
+                  >
+                    <option value="bars">Cột</option>
+                    <option value="line">Đường sóng</option>
+                    <option value="dots">Chấm</option>
+                  </Select>
+                </Field>
+                <Field label="Nguồn">
+                  <Select
+                    value={wave.source}
+                    onChange={(event) => commitWave({ source: event.target.value }, true)}
+                    disabled={locked}
+                  >
+                    <option value="instrumental">Instrumental</option>
+                    <option value="original">Bài gốc / có vocal</option>
+                  </Select>
+                </Field>
+                <Field label="Kiểu hiển thị">
+                  <Select
+                    value={wave.mode}
+                    onChange={(event) => commitWave({ mode: event.target.value }, true)}
+                    disabled={locked}
+                  >
+                    <option value="progress">Toàn bài, tô đến vị trí hiện tại</option>
+                  </Select>
+                </Field>
+                <div className="flex flex-col justify-end pb-1">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={wave.background}
+                      onChange={(event) => commitWave({ background: event.target.checked }, true)}
+                      className="accent-[var(--gold)]"
+                      disabled={locked}
+                    />
+                    Nền chip bo góc
+                  </label>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-[var(--muted)]">
+                  <span>Khung {profile.label} · {profile.size}</span>
+                  <span className="tabular-nums">
+                    x {wave.x.toFixed(2)} · y {wave.y.toFixed(2)} · {Math.round(wave.width * 100)}×{Math.round(wave.height * 100)}%
+                  </span>
+                </div>
+                <div
+                  className="relative w-full touch-none overflow-hidden rounded-2xl border border-[var(--line)] bg-black/60"
+                  style={{ aspectRatio: profile.aspect }}
+                >
+                  <div
+                    className="pointer-events-none absolute inset-0 opacity-40"
+                    style={{
+                      backgroundImage:
+                        "linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px)",
+                      backgroundSize: "10% 10%",
+                    }}
+                  />
+                  <div
+                    role="slider"
+                    aria-label="Kéo waveform"
+                    aria-valuetext={`x ${wave.x.toFixed(2)}, y ${wave.y.toFixed(2)}`}
+                    tabIndex={0}
+                    onPointerDown={startWaveDrag}
+                    onPointerMove={moveWaveDrag}
+                    onPointerUp={endWaveDrag}
+                    onPointerCancel={endWaveDrag}
+                    className="absolute flex cursor-grab items-center gap-px overflow-hidden rounded-lg border border-[var(--gold)]/70 px-1 active:cursor-grabbing"
+                    style={{
+                      left: `${(wave.x - wave.width / 2) * 100}%`,
+                      top: `${(wave.y - wave.height / 2) * 100}%`,
+                      width: `${wave.width * 100}%`,
+                      height: `${wave.height * 100}%`,
+                      opacity: wave.enabled ? wave.opacity : 0.35,
+                      background: wave.background ? "rgba(8, 6, 4, 0.62)" : "transparent",
+                    }}
+                  >
+                    {waveBars.map((height, index) => {
+                      const sung = index / waveBars.length <= playhead;
+                      return (
+                        <span
+                          key={index}
+                          className="flex-1 rounded-sm"
+                          style={{
+                            height: `${height * 100}%`,
+                            background: sung ? wave.accent : wave.color,
+                            minWidth: 1,
+                          }}
+                        />
+                      );
+                    })}
+                    <span
+                      aria-hidden
+                      className="absolute inset-y-0 w-px bg-white/80"
+                      style={{ left: `${playhead * 100}%` }}
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] leading-4 text-[var(--muted)]">
+                  Kéo dải sóng trên khung để đổi vị trí. Vị trí là tâm dải, lưu ngay khi thả.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-[var(--muted)]">Snap</span>
+                {snapPoints.map((point) => (
+                  <button
+                    key={point.key}
+                    type="button"
+                    onClick={() => snapWave(point.x, point.y)}
+                    disabled={locked}
+                    aria-label={`Snap ${point.key}`}
+                    className="rounded-lg border border-[var(--line)] px-2.5 py-1 text-sm transition hover:border-[var(--gold)] hover:text-[var(--gold)] disabled:opacity-40"
+                  >
+                    {point.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => snapWave(0.5, 0.84)}
+                  disabled={locked}
+                  className={btnGhost}
+                >
+                  Đặt lại
+                </button>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1 flex items-center justify-between text-[11px] text-[var(--muted)]">
+                    <span>Độ rộng</span>
+                    <span className="tabular-nums text-[var(--paper)]">{Math.round(wave.width * 100)}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={10}
+                    max={90}
+                    step={1}
+                    value={Math.round(wave.width * 100)}
+                    onChange={(event) => commitWave({ width: Number(event.target.value) / 100 }, true)}
+                    disabled={locked}
+                    className="w-full accent-[var(--gold)]"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 flex items-center justify-between text-[11px] text-[var(--muted)]">
+                    <span>Độ cao</span>
+                    <span className="tabular-nums text-[var(--paper)]">{Math.round(wave.height * 100)}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={3}
+                    max={30}
+                    step={1}
+                    value={Math.round(wave.height * 100)}
+                    onChange={(event) => commitWave({ height: Number(event.target.value) / 100 }, true)}
+                    disabled={locked}
+                    className="w-full accent-[var(--gold)]"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 flex items-center justify-between text-[11px] text-[var(--muted)]">
+                    <span>Độ đậm</span>
+                    <span className="tabular-nums text-[var(--paper)]">{Math.round(wave.opacity * 100)}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={10}
+                    max={100}
+                    step={1}
+                    value={Math.round(wave.opacity * 100)}
+                    onChange={(event) => commitWave({ opacity: Number(event.target.value) / 100 }, true)}
+                    disabled={locked}
+                    className="w-full accent-[var(--gold)]"
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block">
+                    <span className="mb-1 block text-[11px] text-[var(--muted)]">Màu chính</span>
+                    <input
+                      type="color"
+                      value={wave.color}
+                      onChange={(event) => commitWave({ color: event.target.value }, true)}
+                      disabled={locked}
+                      aria-label="Màu chính waveform"
+                      className="h-9 w-full cursor-pointer rounded-lg border border-[var(--line)] bg-black/25"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-[11px] text-[var(--muted)]">Màu đã hát</span>
+                    <input
+                      type="color"
+                      value={wave.accent}
+                      onChange={(event) => commitWave({ accent: event.target.value }, true)}
+                      disabled={locked}
+                      aria-label="Màu đã hát waveform"
+                      className="h-9 w-full cursor-pointer rounded-lg border border-[var(--line)] bg-black/25"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {waveError ? (
+                <p className="rounded-xl border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs leading-5 text-amber-100">
+                  {waveError} Vị trí vẫn được gửi kèm lần xuất này.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {exportTab === "pages" ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <SectionTitle>Trang & chữ</SectionTitle>
+                <button type="button" onClick={() => void leaveIfSaved(onBack)} className={btnSecondary}>
+                  Sửa trong khai báo
+                </button>
+              </div>
+              <p className="text-xs leading-5 text-[var(--muted)]">
+                Tóm tắt cấu hình trang. Chỉnh chi tiết ở bước Chuẩn bị → “Trang & chữ” để tránh nhân đôi form.
+              </p>
+              <Panel className="space-y-3 bg-black/15">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium">Trang bìa</h3>
+                  <Badge tone="muted">
+                    {pagePresentation.cover.layout === "center"
+                      ? "Giữa khung"
+                      : pagePresentation.cover.layout === "bottom_left"
+                        ? "Dưới trái"
+                        : "Dưới giữa"}
+                  </Badge>
+                </div>
+                <dl className="grid gap-1.5 text-xs sm:grid-cols-2">
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-[var(--muted)]">Tối nền / màn mờ</dt>
+                    <dd>{pagePresentation.cover.bg_darken}% / {pagePresentation.cover.veil}%</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-[var(--muted)]">Màu tên / tác giả</dt>
+                    <dd className="flex items-center gap-1.5">
+                      <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: pagePresentation.cover.text_color }} />
+                      <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: pagePresentation.cover.accent_color }} />
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-[var(--muted)]">Nhãn trên tên</dt>
+                    <dd>{pagePresentation.cover.show_label && pagePresentation.cover.label ? pagePresentation.cover.label : "Ẩn"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-[var(--muted)]">Viết hoa</dt>
+                    <dd>{pagePresentation.cover.uppercase ? "Có" : "Không"}</dd>
+                  </div>
+                </dl>
+              </Panel>
+              <Panel className="space-y-2 bg-black/15">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium">Nhạc dạo</h3>
+                  <Badge tone={pagePresentation.interlude.enabled ? "success" : "muted"}>
+                    {pagePresentation.interlude.enabled ? "Bật" : "Tắt"}
+                  </Badge>
+                </div>
+                <p className="text-xs leading-5 text-[var(--muted)]">
+                  Banner “{pagePresentation.interlude.text || "Nhạc dạo"}” khi khoảng lặng ≥ {pagePresentation.interlude.min_gap}s.
+                  {pagePresentation.interlude.show_next_line ? " Có hiện câu tiếp theo." : ""}
+                </p>
+              </Panel>
+              <Panel className="space-y-2 bg-black/15">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium">Trang kết</h3>
+                  <Badge tone={pagePresentation.outro.enabled && pagePresentation.outro.duration > 0 ? "success" : "muted"}>
+                    {pagePresentation.outro.enabled && pagePresentation.outro.duration > 0
+                      ? `${pagePresentation.outro.duration}s`
+                      : "Tắt"}
+                  </Badge>
+                </div>
+                <p className="text-xs leading-5 text-[var(--muted)]">
+                  {pagePresentation.outro.subtext || "Cảm ơn đã xem"}
+                  {pagePresentation.outro.handle ? ` · ${pagePresentation.outro.handle}` : ""}
+                  {pagePresentation.outro.image ? " · ảnh nền riêng" : " · dùng ảnh bìa"}
+                </p>
+              </Panel>
+              <p className="text-[11px] leading-4 text-[var(--muted)]">
+                Màu chữ lời, cỡ chữ và nền dải lời nằm cùng nhóm “Trang & chữ” trong khai báo.
+              </p>
+            </div>
+          ) : null}
         </div>
       </Drawer>
     </div>

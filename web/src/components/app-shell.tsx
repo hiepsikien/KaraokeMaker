@@ -5,7 +5,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/primitives";
 import { SettingsDrawer } from "@/components/settings-drawer";
-import { IconFilm, IconFolder, IconSettings } from "@/components/ui/icons";
+import { IconFilm, IconFolder, IconSend, IconSettings } from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
 import { useHasDirty } from "@/lib/dirty";
 import { activeJobLabel, useActiveJobs } from "@/lib/jobs";
@@ -15,6 +15,7 @@ import { useGuardedNavigate } from "@/lib/navigation";
 const NAV = [
   { href: "/", label: "Dự án", icon: IconFolder },
   { href: "/studio", label: "AI Studio", icon: IconFilm },
+  { href: "/publish", label: "Đăng bài", icon: IconSend },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {

@@ -660,3 +660,129 @@ class EnvLoadingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DisplayLabelTests(unittest.TestCase):
+    def test_duplicate_labels_get_reading_order_numbers_while_ids_stay_stable(self):
+        inventory = normalize_inventory(
+            {
+                "objects": [
+                    {"id": "flag-b", "label": "flag", "box_2d": [600, 100, 900, 500]},
+                    {"id": "guitar-1", "label": "guitar", "box_2d": [200, 600, 400, 800]},
+                    {"id": "flag-a", "label": "flag", "box_2d": [100, 100, 300, 500]},
+                ]
+            }
+        )
+        labels = {item["id"]: item["display_label"] for item in inventory["objects"]}
+        self.assertEqual(labels, {"flag-a": "flag_1", "guitar-1": "guitar", "flag-b": "flag_2"})
+        self.assertEqual(
+            [item["id"] for item in inventory["objects"]], ["flag-b", "guitar-1", "flag-a"]
+        )
+
+    def test_unique_label_is_not_numbered(self):
+        inventory = normalize_inventory(
+            {"objects": [{"id": "guitar-1", "label": "guitar", "box_2d": [100, 100, 400, 500]}]}
+        )
+        self.assertEqual(inventory["objects"][0]["display_label"], "guitar")
+
+    def test_group_id_is_carried_and_empty_groups_are_dropped(self):
+        inventory = normalize_inventory(
+            {
+                "objects": [
+                    {
+                        "id": "branch-1",
+                        "label": "branch",
+                        "group_id": "tree_1",
+                        "box_2d": [100, 100, 300, 500],
+                    },
+                    {
+                        "id": "branch-2",
+                        "label": "branch",
+                        "group_id": "  ",
+                        "box_2d": [400, 100, 600, 500],
+                    },
+                ]
+            }
+        )
+        self.assertEqual(inventory["objects"][0]["group_id"], "tree_1")
+        self.assertNotIn("group_id", inventory["objects"][1])
+        self.assertEqual(
+            [item["display_label"] for item in inventory["objects"]],
+            ["branch_1", "branch_2"],
+        )
+
+    def test_merge_inventory_renumbers_display_labels(self):
+        base = normalize_inventory(
+            {"objects": [{"id": "flag-1", "label": "flag", "box_2d": [100, 100, 300, 400]}]}
+        )
+        extra = normalize_inventory(
+            {"objects": [{"id": "flag-2", "label": "flag", "box_2d": [100, 600, 300, 900]}]}
+        )
+        merged = director._merge_inventory(base, extra)
+        self.assertEqual(
+            [item["display_label"] for item in merged["objects"]], ["flag_1", "flag_2"]
+        )
+
+    def test_branch_hints_exist_in_the_inventory_prompt_and_schema(self):
+        self.assertIn("tree branches", director.INVENTORY_PROMPT)
+        self.assertIn("group_id", director.INVENTORY_PROMPT)
+        properties = director._INVENTORY_SCHEMA["properties"]["objects"]["items"]["properties"]
+        self.assertIn("group_id", properties)
+
+    def test_cloud_and_leaf_are_not_auto_intent_effect_types(self):
+        # Manual overlays own cloud/leaf; adding them to EFFECT_TYPES would make
+        # a prompt containing "mây"/"lá" switch the AI effect on by itself.
+        self.assertNotIn("cloud", director.EFFECT_TYPES)
+        self.assertNotIn("leaf", director.EFFECT_TYPES)
+
+    def test_branch_words_trigger_the_focused_wind_pass_but_not_street(self):
+        targets = director._unresolved_wind_targets(
+            {"effects": [{"type": "wind", "target_labels": ["cành cây", "tree", "street"]}]},
+            [],
+        )
+        self.assertEqual(targets, ["cành cây", "tree"])
+
+
+class PlanObjectLabelTests(unittest.TestCase):
+    def objects(self):
+        return normalize_inventory(
+            {
+                "objects": [
+                    {"id": "flag-a", "label": "flag", "box_2d": [100, 100, 300, 500]},
+                    {"id": "flag-b", "label": "flag", "box_2d": [600, 100, 900, 500]},
+                ]
+            }
+        )["objects"]
+
+    def plan(self, labels):
+        return director.build_effect_plan(
+            "sha256:" + "a" * 64,
+            {
+                "effects": [
+                    {"type": "wind", "target_labels": labels, "intensity": 0.35, "audio": False}
+                ]
+            },
+            self.objects(),
+            [],
+            [],
+            640,
+            360,
+        )
+
+    def test_plan_objects_carry_display_labels(self):
+        plan = self.plan(["flag"])
+        self.assertEqual(
+            [item["display_label"] for item in plan["objects"]], ["flag_1", "flag_2"]
+        )
+
+    def test_display_label_target_resolves_only_that_object(self):
+        plan = self.plan(["flag_2"])
+        self.assertEqual(plan["items"][0]["target_ids"], ["flag-b"])
+
+    def test_semantic_label_target_still_resolves_every_duplicate(self):
+        plan = self.plan(["flag"])
+        self.assertEqual(set(plan["items"][0]["target_ids"]), {"flag-a", "flag-b"})
+
+    def test_plan_without_group_id_still_works(self):
+        plan = self.plan(["flag"])
+        self.assertTrue(all("group_id" not in item for item in plan["objects"]))

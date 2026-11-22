@@ -4,6 +4,8 @@ import { useCallback, useMemo, useState, type FormEvent } from "react";
 
 import { AiEffects } from "@/components/ai-effects";
 import { ImageCards } from "@/components/image-cards";
+import { OverlayEffectsEditor } from "@/components/overlay-effects";
+import { PresentationSettings } from "@/components/presentation-settings";
 import { Drawer } from "@/components/ui/dialog";
 import { Field, PathField, Select, TextArea, TextInput } from "@/components/ui/field";
 import {
@@ -16,9 +18,14 @@ import {
 } from "@/components/ui/primitives";
 import { PROFILE_OPTIONS, profileMeta } from "@/lib/format";
 import { useSettings } from "@/lib/settings";
-import { sungCount, type ProjectFields } from "@/lib/types";
+import {
+  mergePresentation,
+  mergeTypography,
+  sungCount,
+  type ProjectFields,
+} from "@/lib/types";
 
-type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output";
+type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "outro";
 
 export function ProjectSetup({
   fields,
@@ -47,7 +54,11 @@ export function ProjectSetup({
 }) {
   const { openSettings } = useSettings();
   const [effectsOpen, setEffectsOpen] = useState(false);
-  const closeEffects = useCallback(() => setEffectsOpen(false), []);
+  const [effectsManual, setEffectsManual] = useState(false);
+  const closeEffects = useCallback(() => {
+    setEffectsOpen(false);
+    setEffectsManual(false);
+  }, []);
 
   const lines = useMemo(() => sungCount(fields.lyrics), [fields.lyrics]);
   const stemsReady = Boolean(fields.vocal_audio && fields.instrumental_audio);
@@ -59,6 +70,12 @@ export function ProjectSetup({
       ? [fields.cover_image]
       : [];
   const effectCount = fields.background_effects.length;
+  const overlayCount = (fields.overlay_effects || []).filter((item) => item.enabled).length;
+  const presentation = mergePresentation(fields.presentation);
+  const typography = mergeTypography(fields.typography);
+  const pageCount =
+    (presentation.interlude.enabled ? 1 : 0) +
+    (presentation.outro.enabled || presentation.outro.duration > 0 ? 1 : 0);
 
   const checklist = [
     {
@@ -298,7 +315,31 @@ export function ProjectSetup({
         </Disclosure>
 
         <Disclosure
-          title="Tuỳ chọn xuất"
+          title="Hiệu ứng thêm (không cần AI)"
+          summary={
+            <span className="flex items-center gap-1.5">
+              <Badge tone={overlayCount ? "gold" : "muted"}>{overlayCount} bật</Badge>
+            </span>
+          }
+          className="bg-[var(--panel)]"
+        >
+          <OverlayEffectsEditor
+            value={fields.overlay_effects || []}
+            onChange={(updater) =>
+              setFields((current) => ({
+                ...current,
+                overlay_effects: updater(Array.isArray(current.overlay_effects) ? current.overlay_effects : []),
+              }))
+            }
+            onDrawCloud={() => {
+              setEffectsManual(true);
+              setEffectsOpen(true);
+            }}
+          />
+        </Disclosure>
+
+        <Disclosure
+          title="Xuất"
           summary={`${profile.label} · ${profile.size}`}
           className="bg-[var(--panel)]"
         >
@@ -341,6 +382,41 @@ export function ProjectSetup({
               </Select>
             </Field>
           </div>
+        </Disclosure>
+
+        <Disclosure
+          title="Trang & chữ"
+          summary={
+            <span className="flex items-center gap-1.5">
+              <Badge tone="muted">bìa</Badge>
+              <Badge tone={pageCount ? "gold" : "muted"}>{pageCount} trang thêm</Badge>
+            </span>
+          }
+          className="bg-[var(--panel)]"
+        >
+          <PresentationSettings
+            presentation={presentation}
+            typography={typography}
+            onPresentationChange={(updater) =>
+              setFields((current) => ({
+                ...current,
+                presentation: updater(mergePresentation(current.presentation)),
+              }))
+            }
+            onTypographyChange={(updater) =>
+              setFields((current) => ({
+                ...current,
+                typography: updater(mergeTypography(current.typography)),
+              }))
+            }
+            onBrowseOutro={() => onBrowse("outro")}
+            outroBusy={busyBrowse === "outro"}
+            coverImage={fields.cover_image || fields.background_images[0] || ""}
+            title={fields.title}
+            artist={fields.artist}
+            coverLine={fields.cover_line}
+            outputProfile={fields.output_profile}
+          />
         </Disclosure>
 
         <div id="thu-muc-xuat" className="scroll-mt-24">
@@ -484,6 +560,7 @@ export function ProjectSetup({
           onAssetDuration={(seconds) =>
             setFields((current) => ({ ...current, image_duration: String(seconds) }))
           }
+          initialManual={effectsManual}
         />
       </Drawer>
     </div>

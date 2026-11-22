@@ -12,10 +12,11 @@ from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from karaoke.access import audio_root
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
+from karaoke.presentation import cover_style, outro_style
 from karaoke.profiles import RenderProfile, get_profile
 
 WIDTH = 1920
@@ -23,7 +24,7 @@ HEIGHT = 1080
 # Bump when prepare_slide()/fit logic or cover card rendering changes so cached
 # background identity is invalidated.
 IMAGE_PREP_VERSION = 1
-COVER_RENDER_VERSION = 1
+COVER_RENDER_VERSION = 2
 STRIP_HEIGHT = 280
 FONT_PATH = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
 AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg"}
@@ -219,6 +220,204 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, li
     return lines
 
 
+def _hex_rgba(value: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    text = str(value or "").strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(char * 2 for char in text)
+    if len(text) == 8:
+        try:
+            alpha = int(text[6:8], 16)
+        except ValueError:
+            pass
+        text = text[:6]
+    if len(text) != 6:
+        return (255, 244, 220, alpha)
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16), alpha)
+    except ValueError:
+        return (255, 244, 220, alpha)
+
+
+def _radial_overlay(size: tuple[int, int], color: tuple[int, int, int], strength: int) -> Image.Image:
+    """Dark vignette: transparent centre, dark edges."""
+    if strength <= 0:
+        return Image.new("RGBA", size, (0, 0, 0, 0))
+    gradient = Image.radial_gradient("L").resize(size, Image.Resampling.BILINEAR)
+    alpha = gradient.point(lambda value: int(value * max(0, min(100, strength)) / 100))
+    overlay = Image.new("RGBA", size, (*color, 0))
+    overlay.putalpha(alpha)
+    return overlay
+
+
+def _scrim_overlay(size: tuple[int, int], mode: str, opacity: int, color=(0, 0, 0)) -> Image.Image:
+    width, height = size
+    if mode == "none" or opacity <= 0:
+        return Image.new("RGBA", size, (0, 0, 0, 0))
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    if mode == "full":
+        draw.rectangle([0, 0, width, height], fill=(*color, int(opacity * 255 / 100)))
+        return overlay
+    # bottom scrim: transparent at 35%, solid at bottom
+    start = int(height * 0.35)
+    for y in range(start, height):
+        ratio = (y - start) / max(1, height - start)
+        draw.line([(0, y), (width, y)], fill=(*color, int(opacity * 255 / 100 * ratio)))
+    return overlay
+
+
+def _prepare_card_background(photo: Path, profile: RenderProfile, style: dict) -> Image.Image:
+    base = fit_image(photo, (profile.width, profile.height), mode=profile.fit_mode).convert("RGBA")
+    blur = int(style.get("bg_blur") or 0)
+    if blur > 0:
+        base = base.filter(ImageFilter.GaussianBlur(radius=blur))
+    darken = max(0, min(100, int(style.get("bg_darken", 58) or 0)))
+    if darken:
+        base = ImageEnhance.Brightness(base).enhance(max(0.0, 1.0 - darken / 100.0))
+    veil = max(0, min(100, int(style.get("veil", 70) or 0)))
+    if veil:
+        base.alpha_composite(Image.new("RGBA", base.size, (0, 0, 0, int(veil * 255 / 100))))
+    base.alpha_composite(_radial_overlay(base.size, (0, 0, 0), int(style.get("vignette") or 0)))
+    base.alpha_composite(
+        _scrim_overlay(
+            base.size,
+            str(style.get("scrim") or "none"),
+            int(style.get("scrim_opacity") or 0),
+        )
+    )
+    return base
+
+
+def _draw_spaced_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+    spacing: int,
+) -> None:
+    x, y = xy
+    for char in text:
+        draw.text((x, y), char, font=font, fill=fill)
+        x += draw.textlength(char, font=font) + spacing
+
+
+def _card_blocks(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+    max_width: int,
+    uppercase: bool,
+) -> list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int]]]:
+    value = text.upper() if uppercase else text
+    return [(line, font, fill) for line in _wrap(draw, value.strip(), font, max_width)]
+
+
+def _compose_card(
+    photo: Path,
+    blocks_spec: list[tuple[str, int, tuple[int, int, int, int]]],
+    destination: Path,
+    profile: RenderProfile,
+    style: dict,
+    *,
+    label: str = "",
+) -> None:
+    base = _prepare_card_background(photo, profile, style)
+    draw = ImageDraw.Draw(base)
+    uppercase = bool(style.get("uppercase"))
+    shadow = bool(style.get("shadow", True))
+    stroke = max(0, int(style.get("stroke") or 0))
+    max_width = max(120, min(profile.cover_max_width, int(profile.width * 0.86)))
+    blocks: list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int], bool]] = []
+    label_font = load_font(max(14, int(profile.cover_artist_size * 0.45)))
+    if label:
+        label_text = label.upper()
+        spacing = max(1, int(label_font.size * 0.16))
+        while label_font.size > 10:
+            label_width = sum(draw.textlength(char, font=label_font) for char in label_text)
+            label_width += spacing * max(0, len(label_text) - 1)
+            if label_width <= max_width:
+                break
+            label_font = load_font(max(10, int(label_font.size * 0.9)))
+            spacing = max(1, int(label_font.size * 0.16))
+        blocks.append((
+            label_text,
+            label_font,
+            _hex_rgba(style.get("accent_color", "#e7b15a")),
+            True,
+        ))
+    for text, size, fill in blocks_spec:
+        if not str(text or "").strip():
+            continue
+        font_size = size if size and size > 0 else profile.cover_title_size
+        font = load_font(font_size)
+        measure_text = str(text).upper() if uppercase else str(text)
+        # Auto-fit: a single long word must not spill past the card. Measure
+        # the actual rendered case (uppercase is often wider).
+        for _ in range(12):
+            words = measure_text.split()
+            widest = max((draw.textlength(word, font=font) for word in words), default=0)
+            if widest <= max_width or font_size <= 12:
+                break
+            font_size = max(12, int(font_size * 0.9))
+            font = load_font(font_size)
+        for line, _font, _fill in _card_blocks(draw, str(text), font, fill, max_width, uppercase):
+            blocks.append((line, font, fill, False))
+    if not blocks:
+        base.convert("RGB").save(destination, quality=95)
+        return
+    heights: list[int] = []
+    widths: list[int] = []
+    for text, font, _fill, spaced in blocks:
+        box = draw.textbbox((0, 0), text, font=font)
+        if spaced:
+            spacing = max(1, int(font.size * 0.16))
+            width = int(sum(draw.textlength(char, font=font) for char in text) + spacing * max(0, len(text) - 1))
+        else:
+            width = int(box[2] - box[0])
+        heights.append(max(1, int(box[3] - box[1])))
+        widths.append(max(1, width))
+    gap = max(10, int(profile.height * 0.016))
+    total = sum(heights) + gap * (len(blocks) - 1)
+    layout = str(style.get("layout") or "center")
+    margin = max(48, int(profile.width * 0.06))
+    if layout == "bottom_left":
+        x_base = margin
+        y = profile.height - total - max(80, int(profile.height * 0.12))
+    elif layout == "bottom_center":
+        x_base = profile.width // 2
+        y = profile.height - total - max(80, int(profile.height * 0.12))
+    else:
+        x_base = profile.width // 2
+        y = (profile.height - total) // 2
+    for (text, font, fill, spaced), height, width in zip(blocks, heights, widths):
+        x = x_base if layout == "bottom_left" else x_base - width // 2
+        if spaced:
+            _draw_spaced_text(draw, (x, y), text, font, fill, max(1, int(font.size * 0.16)))
+        else:
+            if shadow:
+                draw.text(
+                    (x + 2, y + 3),
+                    text,
+                    font=font,
+                    fill=(0, 0, 0, 160),
+                    stroke_width=stroke,
+                    stroke_fill=(0, 0, 0, 160),
+                )
+            draw.text(
+                (x, y),
+                text,
+                font=font,
+                fill=fill,
+                stroke_width=stroke,
+                stroke_fill=(0, 0, 0, 170) if stroke else None,
+            )
+        y += height + gap
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    base.convert("RGB").save(destination, quality=95)
+
+
 def make_cover(
     photo: Path,
     title: str,
@@ -226,44 +425,58 @@ def make_cover(
     cover_line: str,
     destination: Path,
     profile: RenderProfile | None = None,
+    style: dict | None = None,
 ) -> None:
     profile = profile or get_profile(None)
-    base = fit_image(
-        photo,
-        (profile.width, profile.height),
-        mode=profile.fit_mode,
-    ).convert("RGBA")
-    darkened = ImageEnhance.Brightness(base).enhance(0.42)
-    veil = Image.new("RGBA", base.size, (0, 0, 0, 70))
-    darkened.alpha_composite(veil)
-    draw = ImageDraw.Draw(darkened)
-    title_font = load_font(profile.cover_title_size)
-    artist_font = load_font(profile.cover_artist_size)
-    line_font = load_font(profile.cover_line_size)
-    blocks: list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int]]] = []
-    for text, font, fill in (
-        (title, title_font, (255, 244, 220, 255)),
-        (artist, artist_font, (231, 177, 90, 255)),
-        (cover_line, line_font, (232, 224, 210, 255)),
-    ):
-        for line in _wrap(draw, text.strip(), font, profile.cover_max_width):
-            blocks.append((line, font, fill))
-    heights = []
-    for line, font, _fill in blocks:
-        box = draw.textbbox((0, 0), line, font=font)
-        heights.append(box[3] - box[1])
-    gap = 18
-    total = sum(heights) + gap * (len(blocks) - 1 if blocks else 0)
-    y = (profile.height - total) // 2
-    for (line, font, fill), height in zip(blocks, heights):
-        box = draw.textbbox((0, 0), line, font=font)
-        width = box[2] - box[0]
-        x = (profile.width - width) // 2
-        draw.text((x + 2, y + 3), line, font=font, fill=(0, 0, 0, 160))
-        draw.text((x, y), line, font=font, fill=fill)
-        y += height + gap
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    darkened.convert("RGB").save(destination, quality=95)
+    config = cover_style(style or {})
+    text_color = _hex_rgba(config["text_color"])
+    accent = _hex_rgba(config["accent_color"])
+    line_color = _hex_rgba(config["line_color"])
+    blocks = [
+        (title, config.get("title_size") or profile.cover_title_size, text_color),
+        (artist, config.get("artist_size") or profile.cover_artist_size, accent),
+        (cover_line, config.get("line_size") or profile.cover_line_size, line_color),
+    ]
+    label = config.get("label") if config.get("show_label") else ""
+    _compose_card(photo, blocks, destination, profile, config, label=str(label or ""))
+
+
+def make_outro(
+    photo: Path,
+    title: str,
+    artist: str,
+    subtext: str,
+    handle: str,
+    destination: Path,
+    profile: RenderProfile | None = None,
+    style: dict | None = None,
+) -> None:
+    profile = profile or get_profile(None)
+    config = outro_style(style or {})
+    title_color = _hex_rgba("#fff4dc")
+    accent = _hex_rgba("#e7b15a")
+    line_color = _hex_rgba("#e8e0d2")
+    blocks: list[tuple[str, int, tuple[int, int, int, int]]] = []
+    if config.get("show_title", True):
+        blocks.append((config.get("title") or title, profile.cover_title_size, title_color))
+    if config.get("show_artist", True):
+        blocks.append((artist, profile.cover_artist_size, accent))
+    blocks.append((subtext, profile.cover_artist_size, line_color))
+    if handle:
+        blocks.append((handle, profile.cover_line_size, line_color))
+    card_style = {
+        "layout": "center",
+        "uppercase": False,
+        "shadow": True,
+        "stroke": 0,
+        "bg_blur": 0,
+        "bg_darken": 62,
+        "veil": 72,
+        "vignette": 25,
+        "scrim": "none",
+        "scrim_opacity": 0,
+    }
+    _compose_card(photo, blocks, destination, profile, card_style)
 
 
 def prepare_slide(

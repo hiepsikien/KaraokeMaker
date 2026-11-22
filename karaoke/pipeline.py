@@ -17,6 +17,7 @@ from karaoke.media import (
     write_timing,
 )
 from karaoke.background import BackgroundRef, render_videos
+from karaoke.presentation import normalize_presentation
 from karaoke.profiles import normalize_profile_id
 
 EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
@@ -143,6 +144,18 @@ def prepare_job(payload: dict, log) -> dict:
     if abs(vocal_length - instrumental_length) > 1.5:
         log("Vocal và instrumental lệch nhau hơn 1,5 giây. Vẫn tiếp tục với file bạn đã chọn.")
 
+    presentation = normalize_presentation(payload.get("presentation"))
+    outro_image = str(presentation.get("outro", {}).get("image") or "").strip()
+    if outro_image:
+        try:
+            outro_path = ensure_allowed(Path(outro_image))
+        except AccessError as error:
+            raise JobError(str(error)) from error
+        if not outro_path.is_file() or outro_path.suffix.lower() not in IMAGE_SUFFIXES:
+            raise JobError(f"Không thấy ảnh trang kết: {outro_image}")
+        grant(outro_path)
+        presentation["outro"]["image"] = str(outro_path)
+
     return {
         "title": title,
         "artist": artist,
@@ -153,6 +166,10 @@ def prepare_job(payload: dict, log) -> dict:
         "instrumental_audio": str(instrumental),
         "background_images": [str(path) for path in backgrounds],
         "background_effects": _dict_list(payload.get("background_effects")),
+        "overlay_effects": list(payload.get("overlay_effects") or []),
+        "waveform": dict(payload.get("waveform") or {}),
+        "presentation": presentation,
+        "typography": dict(payload.get("typography") or {}),
         "output_profile": output_profile,
         "cover_image": str(cover),
         "output_dir": str(output_dir),
@@ -252,6 +269,10 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
             if str(item).strip()
         ],
         "background_effects": _dict_list(payload.get("background_effects")),
+        "overlay_effects": list(payload.get("overlay_effects") or []),
+        "waveform": dict(payload.get("waveform") or {}),
+        "presentation": dict(payload.get("presentation") or {}),
+        "typography": dict(payload.get("typography") or {}),
         "background_render": (
             dict(payload["background_render"])
             if isinstance(payload.get("background_render"), dict)
@@ -528,6 +549,10 @@ def render_job(
             cover_duration=float(prepared["cover_duration"]),
             image_duration=float(prepared["image_duration"]),
             background_effects=prepared.get("background_effects") or [],
+            overlay_effects=prepared.get("overlay_effects") or [],
+            waveform=prepared.get("waveform") or {},
+            presentation=prepared.get("presentation") or {},
+            typography=prepared.get("typography") or {},
             output_profile=profile_id,
             background=background_ref,
             rebuild_background=bool(options.get("rebuild_background")),

@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from karaoke.media import MediaError, load_font, probe_channels
+from karaoke.presentation import interlude_ranges, normalize_presentation, normalize_typography
 from karaoke.profiles import RenderProfile, get_profile
 
 TEXT_FPS = 12
@@ -84,7 +85,19 @@ def _available_lyric_width(profile: RenderProfile) -> int:
     return max(1, min(profile.max_lyric_width, usable) - TEXT_PADDING_X)
 
 
-def _fit_lyric_font_size(lines: list[dict], profile: RenderProfile) -> int:
+def _rgba(value: str, default: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    from karaoke.media import _hex_rgba
+
+    return _hex_rgba(value, 255) if value else default
+
+
+def _fit_lyric_font_size(
+    lines: list[dict],
+    profile: RenderProfile,
+    *,
+    base_size: int | None = None,
+    row_gap: int | None = None,
+) -> int:
     """Largest shared font size that keeps every line inside the strip.
 
     One size for the whole song keeps the typography stable; long lines shrink
@@ -92,7 +105,8 @@ def _fit_lyric_font_size(lines: list[dict], profile: RenderProfile) -> int:
     """
     max_width = _available_lyric_width(profile)
     strip_height = profile.strip_rect[3]
-    size = profile.lyric_font_size
+    gap = profile.lyric_row_gap if row_gap is None else max(0, int(row_gap))
+    size = int(base_size or profile.lyric_font_size)
     for _ in range(16):
         font = load_font(size)
         space = float(font.getlength(" "))
@@ -104,7 +118,7 @@ def _fit_lyric_font_size(lines: list[dict], profile: RenderProfile) -> int:
             1,
             int(
                 (strip_height - BAR_PADDING_Y - 8)
-                // max(1, row_height + profile.lyric_row_gap)
+                // max(1, row_height + gap)
             ),
         )
         fits = True
@@ -130,8 +144,15 @@ def _render_text_pair(
     line: dict,
     profile: RenderProfile | None = None,
     font_size: int | None = None,
+    *,
+    lyric_color: tuple[int, int, int, int] = (255, 248, 236, 255),
+    sung_color: tuple[int, int, int, int] = (255, 196, 72, 255),
+    row_gap: int | None = None,
+    shadow: bool = True,
+    stroke: int = 0,
 ):
     profile = profile or get_profile(None)
+    gap = profile.lyric_row_gap if row_gap is None else max(0, int(row_gap))
     words = list(line.get("words") or [])
     font = load_font(font_size or profile.lyric_font_size)
     space = float(font.getlength(" "))
@@ -155,10 +176,10 @@ def _render_text_pair(
     row_widths = []
     for row in rows:
         row_widths.append(_row_width([widths[index] for index in row], space))
-    image_width = max(1, int(max(row_widths) + TEXT_PADDING_X))
+    image_width = max(1, int(max(row_widths) + TEXT_PADDING_X + stroke * 2))
     image_height = max(
         1,
-        int(row_height * len(rows) + profile.lyric_row_gap * max(0, len(rows) - 1)),
+        int(row_height * len(rows) + gap * max(0, len(rows) - 1) + stroke * 2),
     )
     white = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
     gold = Image.new("RGBA", (image_width, image_height), (0, 0, 0, 0))
@@ -167,16 +188,31 @@ def _render_text_pair(
     boxes: list[dict] = [{"x": 0.0, "y": 0.0, "width": 0.0, "height": float(row_height)} for _ in words]
 
     for row_index, row in enumerate(rows):
-        y = row_index * (row_height + profile.lyric_row_gap)
-        x = max(0.0, (image_width - row_widths[row_index]) / 2)
+        y = stroke + row_index * (row_height + gap)
+        x = max(float(stroke), (image_width - row_widths[row_index]) / 2)
         for word_index in row:
             word = words[word_index]
             width = widths[word_index]
             text_y = y + 4
-            white_draw.text((x + 2, text_y + 3), word["text"], font=font, fill=(0, 0, 0, 190))
-            gold_draw.text((x + 2, text_y + 3), word["text"], font=font, fill=(0, 0, 0, 190))
-            white_draw.text((x, text_y), word["text"], font=font, fill=(255, 248, 236, 255))
-            gold_draw.text((x, text_y), word["text"], font=font, fill=(255, 196, 72, 255))
+            if shadow:
+                white_draw.text((x + 2, text_y + 3), word["text"], font=font, fill=(0, 0, 0, 190))
+                gold_draw.text((x + 2, text_y + 3), word["text"], font=font, fill=(0, 0, 0, 190))
+            white_draw.text(
+                (x, text_y),
+                word["text"],
+                font=font,
+                fill=lyric_color,
+                stroke_width=stroke,
+                stroke_fill=(0, 0, 0, 170) if stroke else None,
+            )
+            gold_draw.text(
+                (x, text_y),
+                word["text"],
+                font=font,
+                fill=sung_color,
+                stroke_width=stroke,
+                stroke_fill=(0, 0, 0, 170) if stroke else None,
+            )
             boxes[word_index] = {
                 "x": x,
                 "y": float(y),
@@ -241,7 +277,13 @@ def _word_fill(word: dict, song_time: float) -> float:
     return (song_time - start) / (end - start)
 
 
-def _draw_strip(layout: dict, song_time: float, profile: RenderProfile | None = None) -> Image.Image:
+def _draw_strip(
+    layout: dict,
+    song_time: float,
+    profile: RenderProfile | None = None,
+    *,
+    bar_color: tuple[int, int, int, int] = (8, 6, 4, 196),
+) -> Image.Image:
     profile = profile or get_profile(None)
     width = profile.width
     strip_height = profile.strip_rect[3]
@@ -252,7 +294,7 @@ def _draw_strip(layout: dict, song_time: float, profile: RenderProfile | None = 
     text = layout["white"]
     bar_width = min(usable, text.width + 56)
     bar_height = text.height + BAR_PADDING_Y
-    bar = Image.new("RGBA", (bar_width, bar_height), (8, 6, 4, 196))
+    bar = Image.new("RGBA", (bar_width, bar_height), bar_color)
     bar_x = safe_left + max(0, (usable - bar_width) // 2)
     bar_y = (strip_height - bar_height) // 2
     strip.alpha_composite(bar, (bar_x, bar_y))
@@ -278,9 +320,16 @@ def _draw_strip(layout: dict, song_time: float, profile: RenderProfile | None = 
     return strip
 
 
-def _draw_countdown(layout: dict, number: int, profile: RenderProfile | None = None) -> Image.Image:
+def _draw_countdown(
+    layout: dict,
+    number: int,
+    profile: RenderProfile | None = None,
+    *,
+    sung_color: tuple[int, int, int, int] = (255, 196, 72, 255),
+    bar_color: tuple[int, int, int, int] = (8, 6, 4, 196),
+) -> Image.Image:
     profile = profile or get_profile(None)
-    strip = _draw_strip(layout, layout["start"] - 1, profile)
+    strip = _draw_strip(layout, layout["start"] - 1, profile, bar_color=bar_color)
     font = load_font(72)
     digit = str(number)
     draw = ImageDraw.Draw(strip)
@@ -288,7 +337,46 @@ def _draw_countdown(layout: dict, number: int, profile: RenderProfile | None = N
     x = max(0, profile.safe_left) + 56
     y = (profile.strip_rect[3] - (box[3] - box[1])) // 2 - box[1]
     draw.text((x + 2, y + 3), digit, font=font, fill=(0, 0, 0, 190))
-    draw.text((x, y), digit, font=font, fill=(255, 196, 72, 255))
+    draw.text((x, y), digit, font=font, fill=sung_color)
+    return strip
+
+
+def _draw_interlude(
+    text: str,
+    next_line: str,
+    show_next: bool,
+    profile: RenderProfile,
+    *,
+    lyric_color: tuple[int, int, int, int],
+    bar_color: tuple[int, int, int, int],
+    alpha: float = 1.0,
+) -> Image.Image:
+    width = profile.width
+    strip_height = profile.strip_rect[3]
+    strip = Image.new("RGBA", (width, strip_height), (0, 0, 0, 0))
+    font = load_font(max(28, int(profile.lyric_font_size * 0.82)))
+    small = load_font(max(18, int(profile.lyric_font_size * 0.5)))
+    draw = ImageDraw.Draw(strip)
+    title = str(text or "Nhạc dạo")
+    subtitle = str(next_line or "") if show_next else ""
+    box = draw.textbbox((0, 0), title, font=font)
+    sub_box = draw.textbbox((0, 0), subtitle, font=small) if subtitle else (0, 0, 0, 0)
+    bar_width = min(width - max(0, profile.safe_left) - max(0, profile.safe_right), max(box[2] - box[0], sub_box[2] - sub_box[0]) + 120)
+    bar_height = (box[3] - box[1]) + (sub_box[3] - sub_box[1]) + (70 if subtitle else 54)
+    bar_x = (width - bar_width) // 2
+    bar_y = (strip_height - bar_height) // 2
+    strip.alpha_composite(Image.new("RGBA", (bar_width, bar_height), bar_color), (bar_x, bar_y))
+    title_x = (width - (box[2] - box[0])) // 2
+    title_y = bar_y + 24
+    draw.text((title_x + 2, title_y + 3), title, font=font, fill=(0, 0, 0, 180))
+    draw.text((title_x, title_y), title, font=font, fill=lyric_color)
+    if subtitle:
+        sub_x = (width - (sub_box[2] - sub_box[0])) // 2
+        sub_y = title_y + (box[3] - box[1]) + 10
+        draw.text((sub_x, sub_y), subtitle, font=small, fill=(220, 214, 202, 255))
+    if alpha < 0.999:
+        channel = strip.getchannel("A").point(lambda value: int(value * max(0.0, min(1.0, alpha))))
+        strip.putalpha(channel)
     return strip
 
 
@@ -297,15 +385,64 @@ def _frame_at(
     song_time: float,
     blank: Image.Image,
     profile: RenderProfile | None = None,
+    *,
+    interludes: list[dict] | None = None,
+    typography: dict | None = None,
+    lyric_color: tuple[int, int, int, int] = (255, 248, 236, 255),
+    sung_color: tuple[int, int, int, int] = (255, 196, 72, 255),
+    bar_color: tuple[int, int, int, int] = (8, 6, 4, 196),
 ) -> Image.Image:
+    profile = profile or get_profile(None)
     if song_time < 0:
         return blank
     mode, layout, number = cue_at(layouts, song_time)
     if mode == "sing" and layout is not None:
-        return _draw_strip(layout, song_time, profile)
+        return _draw_strip(layout, song_time, profile, bar_color=bar_color)
     if mode == "countdown" and layout is not None:
-        return _draw_countdown(layout, number, profile)
+        return _draw_countdown(
+            layout,
+            number,
+            profile,
+            sung_color=sung_color,
+            bar_color=bar_color,
+        )
+    for item in interludes or []:
+        if item["start"] <= song_time <= item["end"]:
+            fade = float(item.get("fade") or 0.0)
+            alpha = 1.0
+            if fade > 0:
+                alpha = min(
+                    1.0,
+                    max(0.0, (song_time - item["start"]) / fade),
+                    max(0.0, (item["end"] - song_time) / fade),
+                )
+            return _draw_interlude(
+                item.get("text") or "Nhạc dạo",
+                item.get("next_line") or "",
+                bool(item.get("show_next_line")),
+                profile,
+                lyric_color=lyric_color,
+                bar_color=bar_color,
+                alpha=alpha,
+            )
     return blank
+
+
+def _waveform_rect(plan: dict, profile: RenderProfile) -> tuple[int, int, int, int] | None:
+    if not plan.get("enabled"):
+        return None
+    width = max(8, int(round(float(plan.get("width") or 0.34) * profile.width)))
+    height = max(8, int(round(float(plan.get("height") or 0.07) * profile.height)))
+    cx = float(plan.get("x") or 0.5) * profile.width
+    cy = float(plan.get("y") or 0.84) * profile.height
+    x = int(round(cx - width / 2))
+    y = int(round(cy - height / 2))
+    x = max(0, min(profile.width - width, x))
+    y = max(0, min(profile.height - height, y))
+    strip_top, strip_bottom = profile.strip_rect[1], profile.strip_rect[1] + profile.strip_rect[3]
+    if y + height > strip_top and y < strip_bottom:
+        y = max(0, strip_top - height - 8)
+    return x, y, width, height
 
 
 def _overlay_text(
@@ -317,25 +454,54 @@ def _overlay_text(
     log,
     profile: RenderProfile | None = None,
     *,
+    presentation: dict | None = None,
+    typography: dict | None = None,
+    waveform: dict | None = None,
+    waveform_path: Path | None = None,
     total_frames: int | None = None,
+    song_duration: float | None = None,
     progress=None,
 ) -> None:
     """Stream lyric frames into FFmpeg. Nothing is written as a PNG sequence."""
     profile = profile or get_profile(None)
+    pres = normalize_presentation(presentation or {})
+    typo = normalize_typography(typography or {})
+    wave = dict(waveform or {})
+    lyric_color = _rgba(typo["lyric_color"], (255, 248, 236, 255))
+    sung_color = _rgba(typo["sung_color"], (255, 196, 72, 255))
+    bar_color = _rgba(typo["bar_color"], (8, 6, 4, 255))
+    bar_color = (bar_color[0], bar_color[1], bar_color[2], int(typo["bar_opacity"]))
     strip_height = profile.strip_rect[3]
     strip_top = profile.strip_rect[1]
-    font_size = _fit_lyric_font_size(lines, profile)
-    layouts = [_render_text_pair(line, profile, font_size) for line in lines]
+    font_size = _fit_lyric_font_size(
+        lines,
+        profile,
+        base_size=typo.get("lyric_size"),
+        row_gap=typo.get("row_gap"),
+    )
+    layouts = [
+        _render_text_pair(
+            line,
+            profile,
+            font_size,
+            lyric_color=lyric_color,
+            sung_color=sung_color,
+            row_gap=typo.get("row_gap"),
+            shadow=bool(typo.get("shadow", True)),
+            stroke=int(typo.get("stroke") or 0),
+        )
+        for line in lines
+    ]
+    interludes = interlude_ranges(lines, pres, countdown=COUNTDOWN, long_gap=LONG_GAP)
     if total_frames is not None and total_frames > 0:
         frame_count = max(1, int(math.ceil(total_frames * TEXT_FPS / max(1, profile.fps))))
     else:
         frame_count = max(1, int(round(total_duration * TEXT_FPS)))
     blank = Image.new("RGBA", (profile.width, strip_height), (0, 0, 0, 0))
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(slideshow),
+    command = ["ffmpeg", "-y", "-i", str(slideshow)]
+    if waveform_path is not None and Path(waveform_path).is_file():
+        command += ["-i", str(waveform_path)]
+    command += [
         "-f",
         "rawvideo",
         "-pixel_format",
@@ -346,11 +512,35 @@ def _overlay_text(
         str(TEXT_FPS),
         "-i",
         "pipe:0",
-        "-filter_complex",
-        (
+    ]
+    text_index = 2 if waveform_path is not None and Path(waveform_path).is_file() else 1
+    if text_index == 2:
+        rect = _waveform_rect(wave, profile)
+        wave_end = cover_duration + (
+            float(song_duration) if song_duration is not None else max(0.0, total_duration - cover_duration)
+        )
+        if rect is None:
+            filter_graph = (
+                f"[{text_index}:v]fps={profile.fps},format=rgba[text];"
+                f"[0:v][text]overlay=0:{strip_top}:format=auto:shortest=1,format=yuv420p"
+            )
+        else:
+            x, y, _w, _h = rect
+            filter_graph = (
+                f"[1:v]format=rgba[wave];"
+                f"[0:v][wave]overlay=x={x}:y={y}:format=auto:eof_action=pass:"
+                f"enable='between(t,{cover_duration:.3f},{wave_end:.3f})'[base];"
+                f"[{text_index}:v]fps={profile.fps},format=rgba[text];"
+                f"[base][text]overlay=0:{strip_top}:format=auto:shortest=1,format=yuv420p"
+            )
+    else:
+        filter_graph = (
             f"[1:v]fps={profile.fps},format=rgba[text];"
             f"[0:v][text]overlay=0:{strip_top}:format=auto:shortest=1,format=yuv420p"
-        ),
+        )
+    command += [
+        "-filter_complex",
+        filter_graph,
         "-c:v",
         "libx264",
         "-preset",
@@ -361,11 +551,7 @@ def _overlay_text(
     ]
     if total_frames is not None and total_frames > 0:
         command += ["-frames:v", str(total_frames)]
-    command += [
-        "-movflags",
-        "+faststart",
-        str(destination),
-    ]
+    command += ["-movflags", "+faststart", str(destination)]
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -387,7 +573,17 @@ def _overlay_text(
     try:
         for index in range(frame_count):
             song_time = index / TEXT_FPS - cover_duration
-            frame = _frame_at(layouts, song_time, blank, profile)
+            frame = _frame_at(
+                layouts,
+                song_time,
+                blank,
+                profile,
+                interludes=interludes,
+                typography=typo,
+                lyric_color=lyric_color,
+                sung_color=sung_color,
+                bar_color=bar_color,
+            )
             process.stdin.write(frame.tobytes())
             if index % 96 == 0:
                 log(f"Vẽ chữ karaoke {index + 1}/{frame_count}.")

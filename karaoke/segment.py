@@ -68,6 +68,7 @@ def encode_still(
     height: int,
     fps: int,
     log,
+    fade_out: float = 0.0,
 ) -> Path:
     """Encode a still image to exactly ``frames`` frames, decoding it once."""
     frames = max(1, int(frames))
@@ -80,6 +81,10 @@ def encode_still(
         f"scale={width}:{height}:in_range=auto:out_range=tv,"
         "setsar=1,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS"
     )
+    duration = frames / max(1, int(fps))
+    fade = max(0.0, min(float(fade_out or 0.0), duration))
+    if fade > 0:
+        filters += f",fade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}"
     command = [
         "ffmpeg",
         "-y",

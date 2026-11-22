@@ -60,6 +60,7 @@ from karaoke.media import (
     IMAGE_PREP_VERSION,
     MediaError,
     make_cover,
+    make_outro,
     probe_duration,
 )
 from karaoke.profiles import RenderProfile, get_profile
@@ -71,12 +72,13 @@ from karaoke.segment import (
 )
 
 BACKGROUND_SCHEMA_VERSION = 1
-BACKGROUND_BUILDER_VERSION = 2
+BACKGROUND_BUILDER_VERSION = 3
 BACKGROUND_CRF = 18
+OVERLAY_RENDER_VERSION = 1
 BACKGROUND_PRESET = "veryfast"
 BACKGROUND_DIR = Path(".karaoke-media") / "backgrounds"
 PICTURE_DIR = Path(".karaoke-media") / "pictures"
-PICTURE_BUILDER_VERSION = 1
+PICTURE_BUILDER_VERSION = 2
 SEGMENT_CACHE_ROOT = cache_root("segments")
 SEGMENT_CACHE_LIMIT_FILES = 200
 SEGMENT_CACHE_LIMIT_BYTES = 4_000_000_000
@@ -185,11 +187,13 @@ def _frames(
     image_duration: float,
     song_length: float,
     fps: int,
-) -> tuple[int, int, int, int]:
+    outro_duration: float = 0.0,
+) -> tuple[int, int, int, int, int]:
     cover_frames = 0 if float(cover_duration) < 0.05 else max(0, int(round(float(cover_duration) * fps)))
     image_frames = max(1, int(round(float(image_duration) * fps)))
     song_frames = max(1, int(math.ceil(float(song_length) * fps)))
-    return cover_frames, image_frames, song_frames, cover_frames + song_frames
+    outro_frames = max(0, int(round(max(0.0, float(outro_duration)) * fps)))
+    return cover_frames, image_frames, song_frames, outro_frames, cover_frames + song_frames + outro_frames
 
 
 def _effect_map(background_effects: list[dict] | None) -> dict[str, dict]:
@@ -243,9 +247,12 @@ def _cover_identity(
     cover_line: str,
     cover_frames: int,
     profile: RenderProfile,
+    style: dict | None = None,
 ) -> str:
     if cover_frames <= 0 or cover_photo is None:
         return "no-cover"
+    from karaoke.presentation import cover_style
+
     payload = {
         "image": _file_digest(cover_photo),
         "title": " ".join(str(title or "").split()),
@@ -253,6 +260,7 @@ def _cover_identity(
         "cover_line": " ".join(str(cover_line or "").split()),
         "cover_frames": cover_frames,
         "profile": profile_fingerprint(profile),
+        "style": cover_style(style or {}),
     }
     return _sha256_text(_canonical(payload))
 
@@ -301,6 +309,9 @@ class BackgroundRef:
     cover_frames: int = 0
     song_frames: int = 0
     image_frames: int = 0
+    outro_frames: int = 0
+    overlay_hash: str = ""
+    overlay_degraded: bool = False
     width: int = 0
     height: int = 0
     fps: int = 0
@@ -323,6 +334,9 @@ class BackgroundRef:
             cover_frames=int(data.get("cover_frames") or 0),
             song_frames=int(data.get("song_frames") or 0),
             image_frames=int(data.get("image_frames") or 0),
+            outro_frames=int(data.get("outro_frames") or 0),
+            overlay_hash=str(data.get("overlay_hash") or ""),
+            overlay_degraded=bool(data.get("overlay_degraded")),
             width=int(data.get("width") or 0),
             height=int(data.get("height") or 0),
             fps=int(data.get("fps") or 0),
@@ -343,6 +357,9 @@ class BackgroundBuild:
     cover_frames: int
     song_frames: int
     image_frames: int
+    outro_frames: int = 0
+    overlay_hash: str = ""
+    overlay_degraded: bool = False
     segments: list[dict] = field(default_factory=list)
     degraded: bool = False
     created: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -367,6 +384,9 @@ class BackgroundBuild:
             "cover_frames": self.cover_frames,
             "song_frames": self.song_frames,
             "image_frames": self.image_frames,
+            "outro_frames": self.outro_frames,
+            "overlay_hash": self.overlay_hash,
+            "overlay_degraded": self.overlay_degraded,
             "degraded": self.degraded,
             "created": self.created,
             "segments": segments,
@@ -382,11 +402,16 @@ class BackgroundPlan:
     cover_frames: int
     image_frames: int
     song_frames: int
+    outro_frames: int
     total_frames: int
     unique: dict[str, dict]
     order: list[str]
     cover_identity: str
     profile_fingerprint: str
+    base_hash: str
+    overlay_hash: str
+    presentation: dict
+    overlay_effects: list[dict]
     identity_hash: str
     target: Path
 
@@ -610,6 +635,7 @@ def _cover_segment(
     profile: RenderProfile,
     work: Path,
     log,
+    style: dict | None = None,
 ) -> tuple[Path, bool]:
     destination = _segment_cache_path("cover", identity, cover_frames)
     if _cached_file(destination):
@@ -623,6 +649,7 @@ def _cover_segment(
         cover_line,
         cover_card,
         profile=profile,
+        style=style,
     )
     encode_still(
         cover_card,
@@ -632,6 +659,62 @@ def _cover_segment(
         height=profile.height,
         fps=profile.fps,
         log=log,
+    )
+    pin_cache_file(destination)
+    return destination, False
+
+
+def _outro_segment(
+    photo: Path,
+    *,
+    title: str,
+    artist: str,
+    subtext: str,
+    handle: str,
+    frames: int,
+    profile: RenderProfile,
+    style: dict,
+    work: Path,
+    log,
+) -> tuple[Path, bool]:
+    identity = _sha256_text(
+        _canonical(
+            {
+                "image": _file_digest(photo),
+                "title": title,
+                "artist": artist,
+                "subtext": subtext,
+                "handle": handle,
+                "style": style,
+                "frames": frames,
+                "profile": profile_fingerprint(profile),
+            }
+        )
+    )
+    destination = _segment_cache_path("outro", identity, frames)
+    if _cached_file(destination):
+        pin_cache_file(destination)
+        return destination, True
+    card = work / "outro.jpg"
+    make_outro(
+        photo,
+        title,
+        artist,
+        subtext,
+        handle,
+        card,
+        profile=profile,
+        style=style,
+    )
+    encode_still(
+        card,
+        destination,
+        frames=frames,
+        width=profile.width,
+        height=profile.height,
+        fps=profile.fps,
+        log=log,
+        fade_out=float(style.get("fade") or 0.0),
     )
     pin_cache_file(destination)
     return destination, False
@@ -886,6 +969,12 @@ def _plan_background(
         background_images = [cover_photo]
 
     effects = _effect_map(prepared.get("background_effects") or [])
+    from karaoke.presentation import normalize_overlay_effects, normalize_presentation
+
+    presentation = normalize_presentation(prepared.get("presentation"))
+    overlay_effects = normalize_overlay_effects(prepared.get("overlay_effects"))
+    outro = presentation.get("outro") or {}
+    outro_duration = float(outro.get("duration") or 0) if outro.get("enabled") else 0.0
     original = Path(str(prepared.get("original_audio") or "")).expanduser()
     instrumental = Path(str(prepared.get("instrumental_audio") or "")).expanduser()
     if not original.is_file():
@@ -894,11 +983,12 @@ def _plan_background(
         raise MediaError(f"Không thấy file instrumental: {instrumental}")
 
     song_length = max(probe_duration(original), probe_duration(instrumental))
-    cover_frames, image_frames, song_frames, total_frames = _frames(
+    cover_frames, image_frames, song_frames, outro_frames, total_frames = _frames(
         float(prepared.get("cover_duration") or 0),
         float(prepared.get("image_duration") or 8),
         song_length,
         profile.fps,
+        outro_duration,
     )
 
     unique: dict[str, dict] = {}
@@ -963,9 +1053,17 @@ def _plan_background(
         str(prepared.get("cover_line") or ""),
         cover_frames,
         profile,
+        presentation.get("cover") or {},
     )
     profile_id = profile_fingerprint(profile)
-    identity_payload = {
+    outro_image_text = str(outro.get("image") or "").strip() if outro_frames > 0 else ""
+    outro_photo = Path(outro_image_text).expanduser() if outro_image_text else cover_photo
+    outro_digest = (
+        _file_digest(outro_photo)
+        if outro_frames > 0 and outro_photo is not None and outro_photo.is_file()
+        else ""
+    )
+    base_payload = {
         "schema_version": BACKGROUND_SCHEMA_VERSION,
         "builder_version": BACKGROUND_BUILDER_VERSION,
         "crf": BACKGROUND_CRF,
@@ -973,13 +1071,31 @@ def _plan_background(
         "segment_encoder_version": SEGMENT_ENCODER_VERSION,
         "order": [unique[key]["clip_identity"] for key in order],
         "cover": cover_id,
+        "outro": (outro if outro_frames > 0 else {}),
+        "outro_image": outro_digest,
         "profile": profile_id,
         "total_frames": total_frames,
         "cover_frames": cover_frames,
         "song_frames": song_frames,
         "image_frames": image_frames,
+        "outro_frames": outro_frames,
     }
-    identity_hex = _sha256_text(_canonical(identity_payload))
+    base_hex = _sha256_text(_canonical(base_payload))
+    try:
+        from karaoke.overlays import OVERLAY_ENCODER_VERSION
+        from karaoke.particles import PARTICLE_VERSION
+    except Exception:
+        OVERLAY_ENCODER_VERSION = 1
+        PARTICLE_VERSION = 1
+    overlay_payload = {
+        "base": base_hex,
+        "overlay_effects": [spec for spec in overlay_effects if spec.get("enabled")],
+        "overlay_version": OVERLAY_RENDER_VERSION,
+        "overlay_encoder": OVERLAY_ENCODER_VERSION,
+        "particle_version": PARTICLE_VERSION,
+    }
+    overlay_hex = _sha256_text(_canonical(overlay_payload))
+    identity_hex = _sha256_text(_canonical({"base": base_hex, "overlay": overlay_hex}))
     return BackgroundPlan(
         profile=profile,
         cover_photo=cover_photo,
@@ -988,11 +1104,16 @@ def _plan_background(
         cover_frames=cover_frames,
         image_frames=image_frames,
         song_frames=song_frames,
+        outro_frames=outro_frames,
         total_frames=total_frames,
         unique=unique,
         order=order,
         cover_identity=cover_id,
         profile_fingerprint=profile_id,
+        base_hash=base_hex,
+        overlay_hash=overlay_hex,
+        presentation=presentation,
+        overlay_effects=overlay_effects,
         identity_hash=_hash_with_prefix(identity_hex),
         target=_background_path(output_dir, identity_hex),
     )
@@ -1020,7 +1141,12 @@ def _build_background_impl(
     cover_frames = plan.cover_frames
     image_frames = plan.image_frames
     song_frames = plan.song_frames
+    outro_frames = plan.outro_frames
     total_frames = plan.total_frames
+    presentation = plan.presentation
+    overlay_effects = plan.overlay_effects
+    base_hash = plan.base_hash
+    overlay_hash = plan.overlay_hash
     unique = plan.unique
     order = plan.order
     identity_hash = plan.identity_hash
@@ -1124,6 +1250,7 @@ def _build_background_impl(
                     profile=profile,
                     work=work,
                     log=log,
+                    style=presentation.get("cover") or {},
                 )
                 cache_hits += int(cover_hit)
 
@@ -1226,6 +1353,28 @@ def _build_background_impl(
                 remaining -= frames
                 index += 1
 
+            if outro_frames > 0:
+                outro = presentation.get("outro") or {}
+                outro_text = str(outro.get("image") or "").strip()
+                outro_photo = Path(outro_text).expanduser() if outro_text else None
+                if outro_photo is None or not outro_photo.is_file():
+                    outro_photo = cover_photo
+                if outro_photo is not None:
+                    outro_path, outro_hit = _outro_segment(
+                        outro_photo,
+                        title=str(prepared.get("title") or ""),
+                        artist=str(prepared.get("artist") or ""),
+                        subtext=str(outro.get("subtext") or ""),
+                        handle=str(outro.get("handle") or ""),
+                        frames=outro_frames,
+                        profile=profile,
+                        style=outro,
+                        work=work,
+                        log=log,
+                    )
+                    cache_hits += int(outro_hit)
+                    slots.append((outro_path, outro_frames))
+
             temporary = target.parent / f".{identity_hex}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
             log(f"Đang ghép background {total_frames} frame cho {len(unique)} ảnh.")
             if progress is not None:
@@ -1254,7 +1403,56 @@ def _build_background_impl(
                 )
                 if not valid:
                     raise MediaError(f"Background dựng xong nhưng không hợp lệ: {reason}")
-                os.replace(temporary, target)
+                final_temp = temporary
+                overlay_degraded = False
+                if overlay_effects:
+                    overlay_temp = target.parent / f".{identity_hex}.{os.getpid()}.{uuid.uuid4().hex}.overlay.tmp.mp4"
+                    try:
+                        from karaoke.overlays import apply_overlays
+
+                        def overlay_progress(done, total) -> None:
+                            if progress is None:
+                                return
+                            try:
+                                fraction = 0.85 + 0.15 * float(done) / max(1.0, float(total))
+                                progress(min(1.0, fraction), 1.0)
+                            except Exception:
+                                pass
+
+                        overlay_path, _overlay_hash, overlay_degraded = apply_overlays(
+                            temporary,
+                            overlay_effects,
+                            profile,
+                            profile.strip_rect,
+                            overlay_temp,
+                            log,
+                            progress=overlay_progress,
+                        )
+                        if overlay_path is not None and Path(overlay_path).is_file():
+                            final_temp = Path(overlay_path)
+                    except Exception as error:
+                        overlay_degraded = True
+                        log(f"Không áp được hiệu ứng thêm: {error}. Dùng nền gốc.")
+                        final_temp = temporary
+                    if overlay_degraded:
+                        degraded = True
+                    if final_temp != temporary:
+                        valid_overlay, overlay_reason = _validate_background(
+                            final_temp,
+                            width=profile.width,
+                            height=profile.height,
+                            fps=profile.fps,
+                            total_frames=total_frames,
+                        )
+                        if not valid_overlay:
+                            overlay_degraded = True
+                            degraded = True
+                            log(
+                                f"Hiệu ứng thêm không hợp lệ ({overlay_reason}); dùng nền gốc."
+                            )
+                            final_temp.unlink(missing_ok=True)
+                            final_temp = temporary
+                os.replace(final_temp, target)
                 log(
                     f"Hiệu ứng: {clip_seconds:.1f}s (cache {cache_hits}/{len(unique) + (1 if cover_path else 0)}), "
                     f"ghép nền: {assemble_seconds:.1f}s."
@@ -1297,6 +1495,9 @@ def _build_background_impl(
         cover_frames=cover_frames,
         song_frames=song_frames,
         image_frames=image_frames,
+        outro_frames=outro_frames,
+        overlay_hash=overlay_hash,
+        overlay_degraded=degraded,
         segments=list(unique.values()),
         degraded=degraded,
     )
@@ -1335,6 +1536,8 @@ def background_status(prepared: dict, output_dir: Path | None = None) -> dict:
         "cover_frames": plan.cover_frames,
         "song_frames": plan.song_frames,
         "image_frames": plan.image_frames,
+        "outro_frames": plan.outro_frames,
+        "overlay_hash": plan.overlay_hash,
         "profile_id": profile.id,
         "fps": profile.fps,
     }
@@ -1351,9 +1554,11 @@ def background_status(prepared: dict, output_dir: Path | None = None) -> dict:
         return {**base, "state": "missing", "reason": "chưa dựng nền"}
     if str(meta.get("hash") or "") != plan.identity_hash:
         return {**base, "state": "stale", "reason": "ảnh, hiệu ứng, profile hoặc thời lượng đã đổi"}
-    for key in ("total_frames", "cover_frames", "song_frames", "image_frames"):
+    for key in ("total_frames", "cover_frames", "song_frames", "image_frames", "outro_frames"):
         if int(meta.get(key) or 0) != int(getattr(plan, key)):
             return {**base, "state": "stale", "reason": "số frame đã đổi"}
+    if str(meta.get("overlay_hash") or "") != plan.overlay_hash:
+        return {**base, "state": "stale", "reason": "hiệu ứng thêm đã đổi"}
     if str(meta.get("profile_fingerprint") or "") != plan.profile_fingerprint:
         return {**base, "state": "stale", "reason": "profile đã đổi"}
     valid, reason = _validate_background(
@@ -1368,6 +1573,8 @@ def background_status(prepared: dict, output_dir: Path | None = None) -> dict:
         return {**base, "state": state, "reason": reason}
     if bool(meta.get("degraded")):
         return {**base, "state": "stale", "reason": "nền trước dùng ảnh tĩnh fallback"}
+    if bool(meta.get("overlay_degraded")):
+        return {**base, "state": "stale", "reason": "hiệu ứng thêm lần trước bị lỗi"}
     return {**base, "state": "ready", "reason": ""}
 
 
@@ -1419,7 +1626,16 @@ def cleanup_backgrounds(
     return deleted
 
 
-def _picture_identity(background: BackgroundBuild, lines: list[dict]) -> str:
+def _picture_identity(
+    background: BackgroundBuild,
+    lines: list[dict],
+    presentation: dict | None = None,
+    typography: dict | None = None,
+    waveform: dict | None = None,
+    waveform_hash: str = "",
+) -> str:
+    from karaoke.presentation import presentation_hash
+
     simplified = [
         {
             "text": line.get("text") or "",
@@ -1445,6 +1661,8 @@ def _picture_identity(background: BackgroundBuild, lines: list[dict]) -> str:
         "cover_frames": background.cover_frames,
         "text_fps": TEXT_FPS,
         "lines": simplified,
+        "presentation": presentation_hash(presentation or {}, typography or {}),
+        "waveform": waveform_hash or _sha256_text(_canonical(waveform or {})),
     }
     return _hash_with_prefix(_sha256_text(_canonical(payload)))
 
@@ -1495,6 +1713,10 @@ def render_picture(
     *,
     profile: RenderProfile,
     destination: Path,
+    presentation: dict | None = None,
+    typography: dict | None = None,
+    waveform: dict | None = None,
+    waveform_path: Path | None = None,
     progress=None,
     log,
 ) -> Path:
@@ -1507,7 +1729,12 @@ def render_picture(
         destination,
         log,
         profile=profile,
+        presentation=presentation or {},
+        typography=typography or {},
+        waveform=waveform or {},
+        waveform_path=waveform_path,
         total_frames=background.total_frames,
+        song_duration=background.song_frames / background.fps,
         progress=progress,
     )
     if not destination.is_file() or destination.stat().st_size <= 0:
@@ -1569,6 +1796,10 @@ def render_videos(
     cover_duration: float,
     image_duration: float,
     background_effects: list[dict] | None = None,
+    overlay_effects: list[dict] | None = None,
+    waveform: dict | None = None,
+    presentation: dict | None = None,
+    typography: dict | None = None,
     output_profile: str = "landscape_1080p",
     background: BackgroundRef | None = None,
     rebuild_background: bool = False,
@@ -1586,6 +1817,10 @@ def render_videos(
         "cover_image": str(cover_photo),
         "background_images": [str(path) for path in background_images],
         "background_effects": background_effects or [],
+        "overlay_effects": overlay_effects or [],
+        "waveform": waveform or {},
+        "presentation": presentation or {},
+        "typography": typography or {},
         "original_audio": str(original_audio),
         "instrumental_audio": str(instrumental_audio),
         "output_dir": str(output_dir),
@@ -1622,7 +1857,34 @@ def render_videos(
                 except Exception:
                     pass
 
-        picture_identity = _picture_identity(build, lines)
+        waveform_path: Path | None = None
+        waveform_hash = ""
+        waveform_plan = dict(waveform or {})
+        if waveform_plan.get("enabled"):
+            try:
+                from karaoke.waveform import waveform_identity
+
+                source_audio = instrumental_audio if waveform_plan.get("source") != "original" else original_audio
+                waveform_hash = waveform_identity(
+                    waveform_plan,
+                    source_audio,
+                    profile,
+                    build.cover_frames,
+                    build.song_frames,
+                    build.outro_frames,
+                )
+            except Exception as error:
+                log(f"Không tính được waveform: {error}")
+                waveform_hash = ""
+
+        picture_identity = _picture_identity(
+            build,
+            lines,
+            presentation=presentation or {},
+            typography=typography or {},
+            waveform=waveform_plan,
+            waveform_hash=waveform_hash,
+        )
         picture_path = _picture_path(output_dir, picture_identity)
         picture_path.parent.mkdir(parents=True, exist_ok=True)
         picture_started = time.perf_counter()
@@ -1637,6 +1899,42 @@ def render_videos(
             picture = picture_path
             log("Dùng lại picture đã có.")
         else:
+            if waveform_plan.get("enabled") and waveform_hash:
+                try:
+                    from karaoke.waveform import render_waveform_clip
+
+                    source_audio = (
+                        instrumental_audio
+                        if waveform_plan.get("source") != "original"
+                        else original_audio
+                    )
+                    waveform_path = render_waveform_clip(
+                        waveform_plan,
+                        source_audio,
+                        profile,
+                        build.cover_frames / build.fps,
+                        build.song_frames / build.fps,
+                        build.outro_frames / build.fps,
+                        work / "waveform.mp4",
+                        log,
+                    )
+                except Exception as error:
+                    log(f"CẢNH BÁO: không tạo được waveform ({error}); video sẽ xuất không có waveform.")
+                    waveform_path = None
+                    waveform_hash = ""
+                    # Do not cache a picture as "with waveform" when the clip
+                    # failed; recompute the identity without waveform_hash so
+                    # the next export retries.
+                    picture_identity = _picture_identity(
+                        build,
+                        lines,
+                        presentation=presentation or {},
+                        typography=typography or {},
+                        waveform=waveform_plan,
+                        waveform_hash="",
+                    )
+                    picture_path = _picture_path(output_dir, picture_identity)
+                    picture_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = picture_path.with_name(
                 f".{picture_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
             )
@@ -1646,6 +1944,10 @@ def render_videos(
                     lines,
                     profile=profile,
                     destination=temporary,
+                    presentation=presentation or {},
+                    typography=typography or {},
+                    waveform=waveform_plan,
+                    waveform_path=waveform_path,
                     progress=picture_progress,
                     log=log,
                 )

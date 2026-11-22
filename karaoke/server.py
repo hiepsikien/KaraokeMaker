@@ -11,13 +11,16 @@ import traceback
 import uuid
 from pathlib import Path
 
+from contextlib import asynccontextmanager
 from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from karaoke.access import AccessError, audio_root, ensure_allowed, grant
+from karaoke.cache import data_root
 from karaoke.assets import (
     ASSET_MAX_BYTES,
     ASSET_MAX_FILES,
@@ -46,9 +49,9 @@ from karaoke.background import (
     cleanup_backgrounds,
     cleanup_pictures,
 )
-from karaoke.director import DirectorError, analyze_scene
+from karaoke.director import DirectorError, analyze_scene, build_fit_transform
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
-from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
+from karaoke.media import COVER_RENDER_VERSION, IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
 from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
 from karaoke.separate_runner import separate_kim2
 from karaoke.align import fit_lines_to_voice
@@ -65,6 +68,7 @@ from karaoke.pipeline import (
     timing_path_for,
     whisper_options,
 )
+from karaoke.profiles import get_profile, normalize_profile_id
 from karaoke.project import (
     assert_project_path_available,
     load_project,
@@ -101,13 +105,30 @@ def _load_env(env_path: Path | None = None) -> None:
 
 _load_env()
 
-app = FastAPI(title="KaraokeMaker")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    try:
+        from karaoke.publish.service import start_publish_worker
+
+        start_publish_worker()
+    except Exception as error:  # publishing is optional
+        print(f"Không khôi phục được hàng đợi đăng bài: {error}")
+    yield
+
+
+app = FastAPI(title="KaraokeMaker", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+try:
+    from karaoke.publish.router import router as publish_router
+
+    app.include_router(publish_router)
+except Exception as error:  # publishing is optional; never break the karaoke API
+    print(f"Không nạp được module đăng bài: {error}")
 
 _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
@@ -143,6 +164,10 @@ class ProjectFieldsRequest(BaseModel):
     lyrics: str = ""
     background_images: list[str] = Field(default_factory=list)
     background_effects: list[dict] = Field(default_factory=list)
+    overlay_effects: list[dict] = Field(default_factory=list)
+    waveform: dict = Field(default_factory=dict)
+    presentation: dict = Field(default_factory=dict)
+    typography: dict = Field(default_factory=dict)
     output_profile: str = "landscape_1080p"
     cover_image: str = ""
     output_dir: str = ""
@@ -180,6 +205,10 @@ class OpenSavedRequest(BaseModel):
     instrumental_audio: str = ""
     background_images: list[str] = Field(default_factory=list)
     background_effects: list[dict] = Field(default_factory=list)
+    overlay_effects: list[dict] = Field(default_factory=list)
+    waveform: dict = Field(default_factory=dict)
+    presentation: dict = Field(default_factory=dict)
+    typography: dict = Field(default_factory=dict)
     output_profile: str = "landscape_1080p"
     cover_image: str = ""
     output_dir: str = ""
@@ -245,6 +274,27 @@ class BackgroundRequest(BaseModel):
     rebuild: bool = False
 
 
+class PresentationRequest(BaseModel):
+    project_path: str = ""
+    presentation: dict | None = None
+    waveform: dict | None = None
+    typography: dict | None = None
+
+
+class ManualDirectorRequest(BaseModel):
+    image_path: str = ""
+    output_profile: str = "landscape_1080p"
+
+
+class CoverPreviewRequest(BaseModel):
+    image_path: str = ""
+    title: str = ""
+    artist: str = ""
+    cover_line: str = ""
+    output_profile: str = "landscape_1080p"
+    presentation: dict = Field(default_factory=dict)
+
+
 class WordIn(BaseModel):
     text: str = ""
     start: float = 0
@@ -272,6 +322,9 @@ class RenderRequest(BaseModel):
     output_dir: str = ""
     format: str = "mp4"
     rebuild_background: bool = False
+    waveform: dict = Field(default_factory=dict)
+    presentation: dict = Field(default_factory=dict)
+    typography: dict = Field(default_factory=dict)
 
 
 _AUDIO_TYPES = {
@@ -349,6 +402,7 @@ def _browse_script(kind: str, directory: str) -> str:
         "vocal": "Chọn file vocal",
         "instrumental": "Chọn file instrumental",
         "cover": "Chọn ảnh bìa",
+        "outro": "Chọn ảnh trang kết",
         "images": "Chọn ảnh nền",
         "output": "Chọn thư mục xuất",
         "timing": "Chọn file thời gian đã lưu",
@@ -371,6 +425,11 @@ return output
     if kind == "project":
         return f'''
 set picked to choose file with prompt "{prompt}" of type {{"public.json", "JSON"}} default location POSIX file "{location}"
+return POSIX path of picked
+'''
+    if kind in {"cover", "outro"}:
+        return f'''
+set picked to choose file with prompt "{prompt}" of type {{"public.image"}} default location POSIX file "{location}"
 return POSIX path of picked
 '''
     return f'''
@@ -1214,6 +1273,10 @@ def project_session(body: ProjectFieldsRequest):
             "whisper_retry",
             "output_profile",
             "background_effects",
+            "overlay_effects",
+            "waveform",
+            "presentation",
+            "typography",
         ):
             # Only fields the client actually sent may change. Pydantic defaults
             # (notably output_profile="landscape_1080p") must not overwrite a
@@ -1265,6 +1328,148 @@ def project_session(body: ProjectFieldsRequest):
         "project": project_public,
     }
     return {"phase": "edit", "project": project_public, "job": _store_job(record)}
+
+
+@app.post("/api/projects/presentation")
+def save_project_presentation(body: PresentationRequest):
+    """Persist presentation/waveform/typography changes without touching media."""
+    text = str(body.project_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Thiếu đường dẫn dự án.")
+    try:
+        prepared, lines, _project = open_project_file(text)
+        for key in ("presentation", "waveform", "typography"):
+            if key in body.model_fields_set:
+                value = getattr(body, key)
+                if isinstance(value, dict):
+                    if key == "presentation":
+                        merged = dict(prepared.get("presentation") or {})
+                        for subsection, subvalue in value.items():
+                            if isinstance(subvalue, dict) and isinstance(merged.get(subsection), dict):
+                                merged[subsection] = {**merged[subsection], **subvalue}
+                            else:
+                                merged[subsection] = subvalue
+                        prepared[key] = merged
+                    else:
+                        prepared[key] = value
+        saved = sync_project_file(prepared, lines=lines or None, status=None)
+        project, path = load_project(Path(saved))
+        _remember_project(path)
+        with _lock:
+            for record in _jobs.values():
+                current = record.get("prepared") or {}
+                if str(current.get("project_path") or "") == str(path):
+                    record["prepared"] = dict(prepared)
+                    record["project"] = public_project(project, path)
+    except JobError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"project": public_project(project, path)}
+
+
+@app.post("/api/director/manual")
+def director_manual(body: ManualDirectorRequest):
+    """Build a minimal, Gemini-free plan so the user can draw boxes manually."""
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh để làm hiệu ứng thủ công.")
+    try:
+        path = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh này.")
+    try:
+        with Image.open(path) as opened:
+            width, height = opened.size
+        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        profile_id = normalize_profile_id(body.output_profile)
+        transform = build_fit_transform(width, height)
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    plan = {
+        "version": 1,
+        "image_hash": digest,
+        "profile_id": profile_id,
+        "fit_transform": transform,
+        "objects": [],
+        "regions": [],
+        "protect": [],
+        "items": [],
+    }
+    return {
+        "image": str(path),
+        "image_hash": digest,
+        "width": width,
+        "height": height,
+        "model": "manual",
+        "scene": "",
+        "objects": [],
+        "regions": [],
+        "protect": [],
+        "intent": None,
+        "effect_plan": plan,
+        "usage": None,
+        "cached": False,
+    }
+
+
+@app.post("/api/presentation/cover-preview")
+def presentation_cover_preview(body: CoverPreviewRequest):
+    """Render a single cover card as PNG for the setup preview."""
+    from karaoke.media import make_cover
+    from karaoke.presentation import normalize_presentation
+
+    text = str(body.image_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Hãy chọn ảnh bìa.")
+    try:
+        photo = ensure_allowed(Path(text))
+    except AccessError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not photo.is_file() or photo.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Không đọc được ảnh bìa.")
+    profile = get_profile(body.output_profile)
+    cache_dir = data_root() / "presentation"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(
+        (
+            str(photo.resolve())
+            + str(photo.stat().st_mtime_ns)
+            + json.dumps(normalize_presentation(body.presentation), sort_keys=True, ensure_ascii=False)
+            + body.title
+            + body.artist
+            + body.cover_line
+            + profile.id
+            + f"|v{COVER_RENDER_VERSION}"
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    destination = cache_dir / f"cover-{key}.png"
+    wrote_new = False
+    if not destination.is_file():
+        temporary = cache_dir / f".cover-{key}.{os.getpid()}.{uuid.uuid4().hex}.tmp.png"
+        try:
+            make_cover(
+                photo,
+                body.title,
+                body.artist,
+                body.cover_line,
+                temporary,
+                profile=profile,
+                style=normalize_presentation(body.presentation).get("cover"),
+            )
+            os.replace(temporary, destination)
+            wrote_new = True
+        finally:
+            temporary.unlink(missing_ok=True)
+    if wrote_new:
+        try:
+            cutoff = time.time() - 7 * 86400
+            for old in cache_dir.glob("cover-*.png"):
+                if old.is_file() and old.stat().st_mtime < cutoff:
+                    old.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return FileResponse(destination, media_type="image/png", filename="cover.png")
 
 
 @app.post("/api/projects/open")
@@ -1706,6 +1911,9 @@ def start_render(job_id: str, body: RenderRequest):
         record["error"] = ""
         record["render_percent"] = 0
         prepared = dict(record["prepared"])
+        for key in ("waveform", "presentation", "typography"):
+            if key in body.model_fields_set:
+                prepared[key] = dict(getattr(body, key) or {})
         lines = [line.model_dump() for line in body.lines]
         export_options = {
             "output_dir": body.output_dir,
@@ -1806,6 +2014,12 @@ def _restore_record(project: dict, path: Path) -> dict:
         "background_effects": [
             dict(item) for item in project.get("background_effects") or [] if isinstance(item, dict)
         ],
+        "overlay_effects": [
+            dict(item) for item in project.get("overlay_effects") or [] if isinstance(item, dict)
+        ],
+        "waveform": dict(project.get("waveform") or {}),
+        "presentation": dict(project.get("presentation") or {}),
+        "typography": dict(project.get("typography") or {}),
         "output_profile": project.get("output_profile") or "landscape_1080p",
         "cover_image": project.get("cover_image") or "",
         "output_dir": project.get("output_dir") or "",
