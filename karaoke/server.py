@@ -32,6 +32,7 @@ from karaoke.assets import (
     known_project_paths,
     list_assets,
     load_asset,
+    missing_project_entries,
     missing_project_paths,
     referenced_asset_projects,
     register_project_path,
@@ -237,6 +238,7 @@ class SettingsRequest(BaseModel):
 class ForgetProjectsRequest(BaseModel):
     paths: list[str] = Field(default_factory=list)
     missing_only: bool = False
+    parent_exists: bool | None = None
 
 
 class BackgroundRequest(BaseModel):
@@ -1325,12 +1327,23 @@ def projects_recent(limit: int = 12):
 
 @app.get("/api/projects/registry/stale")
 def projects_registry_stale():
-    return {"paths": [str(path) for path in missing_project_paths()]}
+    entries = missing_project_entries()
+    return {
+        "paths": [str(entry["path"]) for entry in entries],
+        "entries": [
+            {"path": str(entry["path"]), "parent_exists": entry["parent_exists"]}
+            for entry in entries
+        ],
+    }
 
 
 @app.post("/api/projects/registry/forget")
 def projects_registry_forget(body: ForgetProjectsRequest):
-    removed = forget_project_paths(paths=body.paths, missing_only=body.missing_only)
+    removed = forget_project_paths(
+        paths=body.paths,
+        missing_only=body.missing_only,
+        parent_exists=body.parent_exists,
+    )
     return {"removed": removed}
 
 

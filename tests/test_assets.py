@@ -22,6 +22,7 @@ from karaoke.assets import (
     known_project_paths,
     list_assets,
     load_asset,
+    missing_project_entries,
     missing_project_paths,
     referenced_asset_projects,
     register_project_path,
@@ -271,8 +272,16 @@ class AssetQuotaTests(unittest.TestCase):
         self.assertIsNone(referenced_asset_projects())
         self.assertEqual(missing_project_paths(), [stale, external])
         self.assertEqual(
-            forget_project_paths(missing_only=True),
-            [str(stale), str(external)],
+            [(entry["path"], entry["parent_exists"]) for entry in missing_project_entries()],
+            [(stale, True), (external, False)],
+        )
+        self.assertEqual(
+            forget_project_paths(missing_only=True, parent_exists=True),
+            [str(stale)],
+        )
+        self.assertEqual(
+            forget_project_paths(missing_only=True, parent_exists=False),
+            [str(external)],
         )
         self.assertEqual(known_project_paths(), [])
         self.assertEqual(

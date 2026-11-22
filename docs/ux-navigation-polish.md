@@ -173,6 +173,8 @@ Chỉ lift `job`/`fields` là **không đủ**.
 | `/` | Dashboard: tạo mới, mở file, dự án gần đây | — |
 | `/project?project=<encoded>` | Workspace; bước Chuẩn bị/Biên tập là state | `push` từ dashboard |
 | `/project?project=…&job=…` | Giữ đúng phiên đang chạy; refresh đọc lại job nếu server còn giữ, fallback mở project nếu job đã mất | `replace` khi job id xuất hiện/đổi |
+| `/project?project=…&view=setup` | Refresh giữ màn Chuẩn bị; mở từ dashboard không có `view` sẽ vào phase tự nhiên | `replace` theo phase |
+| `/project?project=…&job=…&view=align\|restore` | Refresh trong lúc căn lời/tách giữ đúng job + màn hình | `replace` theo phase |
 | `/studio` | Editor | `push` từ nav |
 | `/studio?tab=library` | Thư viện | `replace` khi toggle tab (không tạo history rác) |
 | `/studio?tab=library&asset=<id>` | Mở chi tiết asset | `push`; Back quay lại thư viện |
@@ -774,6 +776,13 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
   usage 0.
 - API `registry/forget` bỏ qua path không hợp lệ (`~user` lạ) thay vì 500.
 - Asset picker thêm nhãn `cùng plan` để phân biệt bản mới nhất toàn ảnh với bản khớp effect plan.
+- URL có thêm `view=setup|align|restore`; refresh giữ đúng phase, còn mở từ dashboard
+  (không có `view`) vào phase tự nhiên của dự án.
+- Registry tách “file đã xoá trong thư mục còn” khỏi “đường dẫn trên ổ đĩa đang thiếu”;
+  hai nút quên riêng, confirm liệt kê path.
+- `router.replace` sau save/resume có guard: chỉ chạy khi vẫn ở đúng project workspace,
+  tránh kéo người dùng về `/project` sau khi đã rời trang.
+- Asset thiếu clip hiện placeholder “Clip lỗi” và vẫn dọn được.
 
 ## 16. Backlog ghi nhận (làm sau)
 

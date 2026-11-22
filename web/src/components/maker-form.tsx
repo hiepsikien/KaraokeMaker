@@ -31,6 +31,21 @@ import {
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project";
 
+function replaceProjectUrl(
+  router: ReturnType<typeof useRouter>,
+  path: string,
+  jobId: string,
+  expectedPath: string,
+) {
+  if (typeof window === "undefined" || window.location.pathname !== "/project") return;
+  const current = new URLSearchParams(window.location.search).get("project") || "";
+  if (!current) return;
+  if (expectedPath && !samePath(current, expectedPath)) return;
+  const query = new URLSearchParams({ project: path });
+  if (jobId) query.set("job", jobId);
+  router.replace(`/project?${query.toString()}`);
+}
+
 function samePath(left: string, right: string) {
   if (!left || !right) return false;
   try {
@@ -54,6 +69,7 @@ export function MakerForm() {
   const params = useSearchParams();
   const projectParam = params.get("project") || "";
   const jobParam = params.get("job") || "";
+  const viewParam = params.get("view") || "";
   const startNew = params.get("new") === "1";
   const { settings } = useSettings();
   const { push } = useNotices();
@@ -154,7 +170,7 @@ export function MakerForm() {
       setJob(null);
       setJobId("");
       clearSession(sessionKeys.makerJob);
-      void openProjectPath(projectParam);
+      void openProjectPath(projectParam, viewParam === "setup");
       return;
     }
     if (startNew && handledParam.current !== "new") {
@@ -162,7 +178,7 @@ export function MakerForm() {
       setOpenedProject("");
       startCreate();
     }
-  }, [projectParam, startNew, jobParam]);
+  }, [projectParam, startNew, jobParam, viewParam]);
 
   useEffect(() => {
     if (!jobParam || jobParam === job?.id) return;
@@ -181,7 +197,15 @@ export function MakerForm() {
         trackJob(data.id, data);
         setHasLines(Boolean(data.lines?.length));
         if (data.project) setFields(fieldsFromProject(data.project));
-        setPhase(data.lines?.length ? "edit" : "setup");
+        let nextPhase: Phase = data.lines?.length ? "edit" : "setup";
+        if (data.status === "running") nextPhase = "align";
+        else if (["separating", "ready", "needs_split"].includes(data.status)) {
+          nextPhase = "restore";
+        }
+        if (viewParam === "align" || viewParam === "restore" || viewParam === "setup") {
+          nextPhase = viewParam;
+        }
+        setPhase(nextPhase);
         const path = data.project_path || data.project?.path || projectParam;
         if (path) {
           setOpenedProject(path);
@@ -210,11 +234,24 @@ export function MakerForm() {
   }, [jobParam, projectParam]);
 
   useEffect(() => {
+    if (!jobParam) restoredJob.current = "";
+  }, [jobParam]);
+
+  useEffect(() => {
     if (startNew) return;
     if (projectParam && !samePath(openedProject, projectParam)) return;
     if (phase === "home" || !fields.project_path) return;
     const query = new URLSearchParams({ project: fields.project_path });
-    if (job?.id && phase === "edit") query.set("job", job.id);
+    if (phase === "setup") {
+      query.set("view", "setup");
+    } else if (phase === "align" || phase === "restore") {
+      if (job?.id) {
+        query.set("job", job.id);
+        query.set("view", phase);
+      }
+    } else if (job?.id && phase === "edit") {
+      query.set("job", job.id);
+    }
     const target = `/project?${query.toString()}`;
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== target) router.replace(target);
@@ -316,7 +353,7 @@ export function MakerForm() {
     await guardedNavigate(`/project?project=${encodeURIComponent(path)}`);
   }
 
-  async function openProjectPath(path: string) {
+  async function openProjectPath(path: string, keepSetup = false) {
     setNotice("");
     try {
       const response = await fetch("/api/projects/open", {
@@ -349,9 +386,8 @@ export function MakerForm() {
       setHasLines(Boolean(data.project.lines?.length));
       if (data.notice) push({ tone: "info", message: data.notice });
       setOpenedProject(path);
-      // Reloading while editing setup for the same project should stay in
-      // setup instead of jumping back to the editor.
-      const keepSetup = phase === "setup" && samePath(fields.project_path, path);
+      // An explicit ?view=setup (refresh/bookmark) stays in setup; opening a
+      // project from the dashboard has no view and goes to its natural phase.
       if (keepSetup) {
         setJob(null);
         setJobId("");
@@ -538,9 +574,7 @@ export function MakerForm() {
       if (path) {
         setOpenedProject(path);
         handledParam.current = `p:${path}`;
-        const query = new URLSearchParams({ project: path });
-        if (data.job?.id) query.set("job", data.job.id);
-        router.replace(`/project?${query.toString()}`);
+        replaceProjectUrl(router, path, data.job?.id || "", fields.project_path);
       }
       if (data.job) {
         setJob(data.job);
@@ -842,12 +876,10 @@ export function MakerForm() {
           onCleanupBackground={cleanupBackground}
           onResumeEditing={resumeEditing}
           onSavedPath={(path) => {
+            replaceProjectUrl(router, path, job?.id || "", fields.project_path);
             setFields((current) => ({ ...current, project_path: path }));
             setOpenedProject(path);
             handledParam.current = `p:${path}`;
-            const query = new URLSearchParams({ project: path });
-            if (job?.id) query.set("job", job.id);
-            router.replace(`/project?${query.toString()}`);
           }}
           onBrowseOutput={browseExportDir}
           onRealign={() => openAlign("edit")}

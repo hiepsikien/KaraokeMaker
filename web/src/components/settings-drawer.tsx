@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { useSettings, type AppSettings } from "@/lib/settings";
 import { Field, PathField, Select } from "@/components/ui/field";
-import { Badge, btnDanger, btnPrimary, Panel } from "@/components/ui/primitives";
+import { Badge, btnDanger, btnPrimary, btnSecondary, Panel } from "@/components/ui/primitives";
 import { Drawer, useDialog } from "@/components/ui/dialog";
 import { useNotices } from "@/components/ui/toast";
 
@@ -24,8 +24,10 @@ export function SettingsDrawer() {
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [busy, setBusy] = useState(false);
   const [browsing, setBrowsing] = useState(false);
-  const [stalePaths, setStalePaths] = useState<string[]>([]);
+  const [staleEntries, setStaleEntries] = useState<{ path: string; parent_exists: boolean }[]>([]);
   const [registryBusy, setRegistryBusy] = useState(false);
+  const safeStale = staleEntries.filter((entry) => entry.parent_exists);
+  const volumeStale = staleEntries.filter((entry) => !entry.parent_exists);
 
   useEffect(() => {
     if (open) setDraft(settings);
@@ -34,39 +36,49 @@ export function SettingsDrawer() {
   useEffect(() => {
     if (!open) return;
     fetch("/api/projects/registry/stale", { cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : { paths: [] }))
-      .then((data: { paths?: string[] }) => setStalePaths(Array.isArray(data.paths) ? data.paths : []))
-      .catch(() => setStalePaths([]));
+      .then((response) => (response.ok ? response.json() : { entries: [] }))
+      .then((data: { entries?: { path: string; parent_exists: boolean }[]; paths?: string[] }) => {
+        const entries = Array.isArray(data.entries)
+          ? data.entries
+          : (data.paths || []).map((path) => ({ path, parent_exists: true }));
+        setStaleEntries(entries);
+      })
+      .catch(() => setStaleEntries([]));
   }, [open]);
 
-  async function forgetStaleProjects() {
-    if (stalePaths.length === 0) return;
-    const visiblePaths = stalePaths.slice(0, 8);
+  async function forgetStaleProjects(parentExists: boolean) {
+    const group = parentExists ? safeStale : volumeStale;
+    if (group.length === 0) return;
+    const visiblePaths = group.slice(0, 8);
     const ok = await confirm({
-      title: "Quên đường dẫn dự án bị thiếu?",
+      title: parentExists
+        ? "Quên các file dự án đã xoá?"
+        : "Quên đường dẫn trên ổ đĩa đang thiếu?",
       description: (
         <div className="space-y-2">
           <p>
-            {stalePaths.length} đường dẫn trong danh sách dự án không còn tồn tại:
+            {group.length} đường dẫn {parentExists ? "có thư mục còn tồn tại" : "nằm trên thư mục/ổ đĩa không tồn tại"}:
           </p>
           <ul className="max-h-32 space-y-0.5 overflow-auto rounded-lg border border-[var(--line)] bg-black/20 p-2 text-[11px]">
-            {visiblePaths.map((path) => (
-              <li key={path} className="truncate" title={path}>
-                {path}
+            {visiblePaths.map((entry) => (
+              <li key={entry.path} className="truncate" title={entry.path}>
+                {entry.path}
               </li>
             ))}
-            {stalePaths.length > visiblePaths.length ? (
-              <li className="text-[var(--muted)]">…và {stalePaths.length - visiblePaths.length} đường dẫn khác</li>
+            {group.length > visiblePaths.length ? (
+              <li className="text-[var(--muted)]">…và {group.length - visiblePaths.length} đường dẫn khác</li>
             ) : null}
           </ul>
-          <p className="text-amber-200">
-            Chỉ quên khi chắc chắn các thư mục/ổ đĩa này không còn dùng. Nếu chỉ là ổ ngoài đang tháo,
-            hãy cắm lại thay vì quên.
-          </p>
+          {!parentExists ? (
+            <p className="text-amber-200">
+              Chỉ quên khi chắc chắn ổ đĩa/thư mục này không còn dùng. Nếu chỉ là ổ ngoài đang tháo,
+              hãy cắm lại thay vì quên.
+            </p>
+          ) : null}
         </div>
       ),
-      confirmLabel: "Quên đường dẫn",
-      danger: true,
+      confirmLabel: parentExists ? "Quên file đã xoá" : "Quên đường dẫn ổ đĩa",
+      danger: !parentExists,
     });
     if (!ok) return;
     setRegistryBusy(true);
@@ -74,18 +86,19 @@ export function SettingsDrawer() {
       const response = await fetch("/api/projects/registry/forget", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ missing_only: true }),
+        body: JSON.stringify({ missing_only: true, parent_exists: parentExists }),
       });
       if (!response.ok) {
         push({ tone: "error", message: "Chưa quên được đường dẫn lỗi. Kiểm tra server Python." });
         return;
       }
       const data = (await response.json()) as { removed?: string[] };
-      setStalePaths([]);
+      const removed = new Set(data.removed || []);
+      setStaleEntries((current) => current.filter((entry) => !removed.has(entry.path)));
       window.dispatchEvent(new Event("karaoke:registry-changed"));
       push({
         tone: "success",
-        message: `Đã quên ${data.removed?.length || 0} đường dẫn dự án không còn tồn tại.`,
+        message: `Đã quên ${data.removed?.length || 0} đường dẫn dự án.`,
       });
     } catch {
       push({ tone: "error", message: "Chưa quên được đường dẫn lỗi. Kiểm tra server Python." });
@@ -202,23 +215,39 @@ export function SettingsDrawer() {
             Nếu một ổ đĩa hoặc thư mục dự án bị xoá hẳn, đường dẫn còn lại trong danh sách có thể
             khiến việc xoá/dọn clip bị chặn để bảo vệ dữ liệu.
           </p>
-          {stalePaths.length > 0 ? (
+          {safeStale.length > 0 ? (
             <div className="space-y-2 rounded-xl border border-amber-900/60 bg-amber-950/30 p-3">
               <p className="text-xs leading-5 text-amber-100">
-                {stalePaths.length} đường dẫn dự án không còn tồn tại.
+                {safeStale.length} file dự án đã bị xoá trong thư mục còn tồn tại.
+              </p>
+              <button
+                type="button"
+                className={btnSecondary}
+                disabled={registryBusy}
+                onClick={() => void forgetStaleProjects(true)}
+              >
+                {registryBusy ? "Đang quên…" : "Quên file đã xoá"}
+              </button>
+            </div>
+          ) : null}
+          {volumeStale.length > 0 ? (
+            <div className="space-y-2 rounded-xl border border-red-900/60 bg-red-950/30 p-3">
+              <p className="text-xs leading-5 text-red-100">
+                {volumeStale.length} đường dẫn nằm trên thư mục/ổ đĩa không tồn tại.
               </p>
               <button
                 type="button"
                 className={btnDanger}
                 disabled={registryBusy}
-                onClick={() => void forgetStaleProjects()}
+                onClick={() => void forgetStaleProjects(false)}
               >
-                {registryBusy ? "Đang quên…" : "Quên đường dẫn lỗi"}
+                {registryBusy ? "Đang quên…" : "Quên đường dẫn ổ đĩa"}
               </button>
             </div>
-          ) : (
+          ) : null}
+          {staleEntries.length === 0 ? (
             <p className="text-xs text-emerald-200">Không có đường dẫn dự án bị thiếu.</p>
-          )}
+          ) : null}
         </div>
 
         <div className="space-y-3">

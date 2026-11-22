@@ -814,9 +814,13 @@ def known_project_paths() -> list[Path]:
     return paths
 
 
-def missing_project_paths() -> list[Path]:
-    """Registry entries whose project file no longer exists."""
-    paths: list[Path] = []
+def missing_project_entries() -> list[dict]:
+    """Registry entries whose project file no longer exists.
+
+    ``parent_exists`` separates a deleted file in a live folder from a path on
+    an unmounted/removed volume. Only the latter can hide live assets from GC.
+    """
+    entries: list[dict] = []
     seen: set[str] = set()
     for item in _registry_entries():
         try:
@@ -829,14 +833,20 @@ def missing_project_paths() -> list[Path]:
         if key in seen:
             continue
         seen.add(key)
-        paths.append(path)
-    return paths
+        entries.append({"path": path, "parent_exists": path.parent.is_dir()})
+    return entries
+
+
+def missing_project_paths() -> list[Path]:
+    """Registry entries whose project file no longer exists."""
+    return [entry["path"] for entry in missing_project_entries()]
 
 
 def forget_project_paths(
     *,
     paths: list[str] | None = None,
     missing_only: bool = False,
+    parent_exists: bool | None = None,
 ) -> list[str]:
     """Remove stale entries from ``.projects.json``.
 
@@ -862,10 +872,14 @@ def forget_project_paths(
             try:
                 path = Path(item).expanduser()
                 missing = not path.is_file()
+                has_parent = path.parent.is_dir()
             except (TypeError, ValueError, RuntimeError, OSError):
                 path = None
                 missing = True
+                has_parent = False
             remove = missing_only and missing
+            if parent_exists is not None:
+                remove = remove and has_parent == parent_exists
             if wanted and path is not None:
                 remove = remove or unicodedata.normalize("NFC", str(path)) in wanted
             if remove:

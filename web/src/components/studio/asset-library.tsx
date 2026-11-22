@@ -69,8 +69,9 @@ function AssetThumb({ asset, className = "" }: { asset: StudioAssetSummary; clas
         />
       )}
       {failed && !hover ? (
-        <div className="absolute inset-0 grid place-items-center text-[var(--muted)]">
+        <div className="absolute inset-0 grid place-items-center gap-1 text-center text-[var(--muted)]">
           <IconLibrary className="h-6 w-6" />
+          <span className="text-[10px] leading-3">Clip lỗi</span>
         </div>
       ) : null}
       <span className="absolute right-1.5 bottom-1.5 rounded-md bg-black/70 px-1.5 py-0.5 text-[10px] text-[var(--paper)]">
