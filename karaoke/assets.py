@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -728,7 +729,7 @@ def register_project_path(path: Path) -> None:
     root = assets_root()
     root.mkdir(parents=True, exist_ok=True)
     target = root / PROJECTS_FILE
-    entry = str(Path(path).expanduser().resolve())
+    entry = unicodedata.normalize("NFC", str(Path(path).expanduser().resolve()))
     with _file_lock(root / ".assets.lock"):
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
@@ -736,7 +737,11 @@ def register_project_path(path: Path) -> None:
             existing = []
         if not isinstance(existing, list):
             existing = []
-        if entry in existing:
+        if any(
+            isinstance(item, str)
+            and unicodedata.normalize("NFC", item) == entry
+            for item in existing
+        ):
             return
         existing.append(entry)
         temporary = target.with_name(
@@ -762,13 +767,19 @@ def known_project_paths() -> list[Path]:
     if not isinstance(data, list):
         return []
     paths: list[Path] = []
+    seen: set[str] = set()
     for item in data:
         try:
             path = Path(str(item)).expanduser()
         except (TypeError, ValueError):
             continue
-        if path.is_file():
-            paths.append(path)
+        if not path.is_file():
+            continue
+        key = unicodedata.normalize("NFC", str(path.resolve()))
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
     return paths
 
 
@@ -816,7 +827,9 @@ def referenced_asset_projects() -> dict[str, list[str]] | None:
     seen: set[str] = set()
     for path in known:
         try:
-            resolved = str(path.expanduser().resolve())
+            resolved = unicodedata.normalize(
+                "NFC", str(path.expanduser().resolve())
+            )
             info = path.stat()
         except OSError:
             return None

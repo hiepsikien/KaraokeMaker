@@ -40,6 +40,8 @@ export function normalizeSearch(value: string) {
     .replace(/đ/g, "d")
     .replace(/Đ/g, "D")
     .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 

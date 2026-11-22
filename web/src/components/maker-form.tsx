@@ -56,11 +56,13 @@ export function MakerForm() {
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
-  const tracked = useTrackedJob(jobId || null);
+  const shouldTrackSavedJob =
+    !projectParam || handledParam.current === `p:${projectParam}`;
+  const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
-  const exported = job?.status === "done";
+  const exported = job?.status === "done" || Boolean(job?.outputs);
   const displayPhase: Phase = phase === "edit" ? "edit" : phase;
 
   useEffect(() => {
@@ -80,13 +82,17 @@ export function MakerForm() {
       setJob(null);
       setJobId("");
       clearSession(sessionKeys.makerJob);
-      if (phase === "edit") setPhase("setup");
-      push({
-        tone: "error",
-        message: "Phiên làm việc trước đã hết (server có thể đã restart). Hãy mở lại dự án đã lưu.",
-      });
+      // Opening a project param will create a fresh job; don't alarm the user
+      // about the old in-memory job in that flow.
+      if (!projectParam && (phase === "edit" || phase === "align" || phase === "restore")) {
+        setPhase("setup");
+        push({
+          tone: "error",
+          message: "Phiên làm việc trước đã hết (server có thể đã restart). Hãy mở lại dự án đã lưu.",
+        });
+      }
     }
-  }, [tracked?.id, tracked?.status]);
+  }, [tracked?.id, tracked?.status, projectParam]);
 
   useEffect(() => {
     if (!tracked) return;
@@ -544,14 +550,6 @@ export function MakerForm() {
           onContinue={submitSetup}
           onRestore={() => void continueRestore()}
           onResumeEdit={resumeEdit}
-          onBackHome={() => {
-            setJob(null);
-            setJobId("");
-            clearSession(sessionKeys.makerJob);
-            setPhase("home");
-            setNotice("");
-            router.replace("/project");
-          }}
           onNewProject={startCreate}
         />
       )}

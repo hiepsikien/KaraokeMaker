@@ -64,7 +64,7 @@ export function wordFill(word: TimedWord, songTime: number) {
 }
 
 export function formatSeconds(value: number) {
-  const safe = Math.max(0, value);
+  const safe = Math.round(Math.max(0, value) * 10) / 10;
   const minutes = Math.floor(safe / 60);
   const seconds = safe - minutes * 60;
   return `${minutes}:${seconds.toFixed(1).padStart(4, "0")}`;

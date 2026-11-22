@@ -142,6 +142,7 @@ export function StudioWorkspace() {
             title: "Ảnh này đang có hiệu ứng khác",
             description: `Mở clip “${opened.name}” sẽ thay thế effect plan hiện tại của ${fileName(opened.source_image)}. Bản nháp đang sửa vẫn còn trong phiên nếu bạn chọn Ở lại.`,
             confirmLabel: "Mở thay thế",
+            cancelLabel: "Ở lại",
             danger: true,
           });
           if (!conflict) return;

@@ -567,7 +567,6 @@ export function AiEffects({
 
   useEffect(() => {
     setQuickPreview(null);
-    setStageTab("image");
   }, [selectedImage, outputProfile, imageDuration]);
 
   useEffect(() => {
@@ -579,6 +578,7 @@ export function AiEffects({
   useEffect(() => {
     const current = imageSignature.split("\n").filter(Boolean);
     setSelectedImage((value) => (value && current.includes(value) ? value : current[0] || ""));
+    setStageTab("image");
   }, [imageSignature]);
 
   useEffect(() => {
@@ -1346,7 +1346,10 @@ export function AiEffects({
             className={fieldClass}
             value={outputProfile}
             disabled={!onProfileChange}
-            onChange={(event) => onProfileChange?.(event.target.value)}
+            onChange={(event) => {
+              onProfileChange?.(event.target.value);
+              setStageTab("image");
+            }}
           >
             {PROFILE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
@@ -1364,7 +1367,10 @@ export function AiEffects({
             className={fieldClass}
             value={durationValue}
             disabled={!onDurationChange}
-            onChange={(event) => onDurationChange?.(Number(event.target.value))}
+            onChange={(event) => {
+              onDurationChange?.(Number(event.target.value));
+              setStageTab("image");
+            }}
           >
             <option value={8}>8 giây</option>
             <option value={16}>16 giây</option>
@@ -1894,6 +1900,11 @@ export function AiEffects({
         >
           {quickBusy ? "Đang render nhanh…" : "Xem nhanh (640px)"}
         </button>
+        {quickBusy ? (
+          <span className="self-center text-[10px] text-[var(--muted)]">
+            Đang dựng bản 640px; có thể mất vài chục giây.
+          </span>
+        ) : null}
       </div>
     ) : null;
 
@@ -1918,7 +1929,10 @@ export function AiEffects({
             paths={images}
             selected={selectedImage}
             outputProfile={outputProfile}
-            onSelect={setSelectedImage}
+            onSelect={(path) => {
+              setSelectedImage(path);
+              setStageTab("image");
+            }}
             onRemove={(path) => onRemoveImage?.(path)}
             onAdd={() => onAddImages?.()}
             busyAdd={busyImages}

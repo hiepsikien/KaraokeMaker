@@ -41,9 +41,9 @@ export function Dashboard() {
         const data = (await response.json()) as { projects?: RecentProject[] };
         if (!cancelled) setProjects(Array.isArray(data.projects) ? data.projects : []);
       })
-      .catch((reason: unknown) => {
+      .catch(() => {
         if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : "Chưa tải được dự án gần đây.");
+          setError("Không tải được dự án gần đây. Kiểm tra server Python rồi thử lại.");
         }
       })
       .finally(() => {

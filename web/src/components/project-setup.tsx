@@ -31,7 +31,6 @@ export function ProjectSetup({
   onContinue,
   onRestore,
   onResumeEdit,
-  onBackHome,
   onNewProject,
 }: {
   fields: ProjectFields;
@@ -44,7 +43,6 @@ export function ProjectSetup({
   onContinue: (event: FormEvent) => void;
   onRestore: () => void;
   onResumeEdit: () => void;
-  onBackHome: () => void;
   onNewProject?: () => void;
 }) {
   const { openSettings } = useSettings();
@@ -68,34 +66,46 @@ export function ProjectSetup({
       done: Boolean(fields.original_audio),
       href: "#audio-goc",
       detail: "",
+      optional: false,
     },
-    { label: "Vocal", done: Boolean(fields.vocal_audio), href: "#vocal", detail: "" },
+    {
+      label: "Vocal",
+      done: Boolean(fields.vocal_audio),
+      href: "#vocal",
+      detail: "",
+      optional: true,
+    },
     {
       label: "Instrumental",
       done: Boolean(fields.instrumental_audio),
       href: "#instrumental",
       detail: "",
+      optional: true,
     },
     {
       label: "Số câu lời",
       done: lines > 0,
       href: "#loi",
       detail: lines > 0 ? `${lines} câu` : "Chưa nhập lời",
+      optional: false,
     },
     {
       label: "Ảnh bìa / ảnh nền",
       done: Boolean(fields.cover_image) || fields.background_images.length > 0,
       href: "#hinh",
       detail: fields.background_images.length ? `${fields.background_images.length} ảnh nền` : "",
+      optional: false,
     },
     {
       label: "Thư mục xuất",
       done: Boolean(fields.output_dir),
       href: "#thu-muc-xuat",
       detail: "",
+      optional: false,
     },
   ];
-  const doneCount = checklist.filter((item) => item.done).length;
+  const requiredItems = checklist.filter((item) => !item.optional);
+  const doneCount = requiredItems.filter((item) => item.done).length;
   const deviceLabel = fields.device === "mps" ? "GPU Apple" : "CPU";
 
   return (
@@ -115,9 +125,6 @@ export function ProjectSetup({
                 Dự án mới
               </button>
             )}
-            <button type="button" onClick={onBackHome} className={btnGhost}>
-              Về màn hình đầu
-            </button>
           </div>
         </div>
 
@@ -422,7 +429,7 @@ export function ProjectSetup({
 
       <aside className="lg:sticky lg:top-24">
         <Panel className="space-y-3">
-          <SectionTitle action={<span className="text-xs text-[var(--muted)]">{doneCount}/{checklist.length}</span>}>
+          <SectionTitle action={<span className="text-xs text-[var(--muted)]">{doneCount}/{requiredItems.length}</span>}>
             Checklist
           </SectionTitle>
           <ul className="space-y-1">
@@ -449,7 +456,7 @@ export function ProjectSetup({
                       item.done ? "text-emerald-300" : "text-[var(--muted)]"
                     }`}
                   >
-                    {item.done ? "Đủ" : "Thiếu"}
+                    {item.done ? "Đủ" : item.optional ? "Tuỳ chọn" : "Thiếu"}
                   </span>
                 </a>
               </li>

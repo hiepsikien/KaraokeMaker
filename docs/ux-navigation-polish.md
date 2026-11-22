@@ -701,5 +701,15 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
 - `python -m unittest discover -s tests`: **202 tests OK**.
 - API smoke qua server thật: `/api/health`, `/api/settings`, `/api/projects/recent`,
   `/api/studio/assets?summary=1&usage=1`, `/api/studio/assets/usage` đều 200.
-- UI smoke bị giới hạn vì môi trường không có browser automation; đã kiểm tra SSR 200 cho
-  `/`, `/studio`, `/project`, build production, và review thủ công các luồng chính.
+- UI smoke bằng browser thật (sau khi browser tool có lại): dashboard, project editor,
+  project setup, Studio editor/library, settings drawer, export drawer, dirty guard,
+  conflict dialog, menu, search, quick preview. Không có console error ở luồng chính.
+- Các lỗi phát hiện khi QA và đã sửa:
+  - Header/stepper hiển thị “Chưa xuất” dù dự án đã có outputs → dùng `job.outputs`.
+  - `formatSeconds` in `1:60.0` → làm tròn trước khi tách phút/giây.
+  - Search “qua cam” không khớp `qua_cam...` → chuẩn hoá `_`/`-` thành khoảng trắng.
+  - Cùng một project xuất hiện 2 lần do Unicode NFC/NFD → dedupe theo inode/NFC.
+  - Checklist Setup tính cả vocal/instrumental là bắt buộc → đánh dấu tuỳ chọn, còn 4 mục bắt buộc.
+  - Toast “phiên trước đã hết” xuất hiện khi mở project sau restart server → bỏ qua khi có `?project=`.
+  - Menu thư viện không đóng bằng Escape → thêm handler.
+  - Conflict dialog ghi “chọn Ở lại” nhưng nút là “Huỷ” → đổi nhãn nút.

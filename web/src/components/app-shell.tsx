@@ -10,7 +10,7 @@ import { SettingsDrawer } from "@/components/settings-drawer";
 import { IconFilm, IconFolder, IconSettings } from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
 import { clearAllDirty, hasDirty, saveAllDirty, useHasDirty } from "@/lib/dirty";
-import { activeJobLabel, trackJob, useActiveJobs } from "@/lib/jobs";
+import { activeJobLabel, useActiveJobs } from "@/lib/jobs";
 import { clearSession, readSession, sessionKeys } from "@/lib/session";
 import { useSettings } from "@/lib/settings";
 
@@ -39,11 +39,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirty]);
-
-  useEffect(() => {
-    const jobId = readSession(sessionKeys.makerJob, "");
-    if (jobId) trackJob(jobId);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;

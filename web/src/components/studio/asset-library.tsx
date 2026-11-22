@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Badge, btnSecondary, EmptyState, Spinner } from "@/components/ui/primitives";
 import { useDialog } from "@/components/ui/dialog";
@@ -101,6 +101,15 @@ export function AssetLibrary({
   const [menu, setMenu] = useState("");
   const [busy, setBusy] = useState("");
 
+  useEffect(() => {
+    if (!menu) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenu("");
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menu]);
+
   const filtered = useMemo(() => {
     const needle = normalizeSearch(query);
     const next = assets.filter((asset) => {
@@ -156,7 +165,7 @@ export function AssetLibrary({
     if (used.length) {
       await confirm({
         title: "Không thể xoá clip đang dùng",
-        description: `Clip này đang được tham chiếu bởi: ${used.map((path) => fileName(path)).join(", ")}. Hãy bỏ clip khỏi các dự án đó trước, hoặc giữ lại để lần xuất sau dùng lại.`,
+        description: `Clip này đang được tham chiếu bởi: ${Array.from(new Set(used.map((path) => fileName(path)))).join(", ")}. Hãy bỏ clip khỏi các dự án đó trước, hoặc giữ lại để lần xuất sau dùng lại.`,
         confirmLabel: "Đã hiểu",
         cancelLabel: "Đóng",
       });
@@ -367,7 +376,7 @@ export function AssetLibrary({
                   <AssetThumb asset={asset} />
                   <span className="mt-2 block truncate px-1 text-sm font-medium">{asset.name}</span>
                   <span className="block truncate px-1 text-[11px] text-[var(--muted)]">
-                    {meta.label} · {formatSeconds(assetDuration(asset))}
+                    {meta.label}
                     {effects.length ? ` · ${effects.slice(0, 2).map(effectName).join(", ")}` : ""}
                   </span>
                 </button>

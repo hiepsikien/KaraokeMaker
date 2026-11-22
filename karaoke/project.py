@@ -291,7 +291,7 @@ def load_project(path: Path) -> tuple[dict, Path]:
 def recent_projects(paths: list[Path], limit: int = 12) -> list[dict]:
     """Return compact dashboard cards for existing project files, newest first."""
     entries: list[tuple[float, dict]] = []
-    seen: set[Path] = set()
+    seen: set[tuple[int, int]] = set()
     for raw in paths or []:
         try:
             path = Path(raw).expanduser()
@@ -302,11 +302,12 @@ def recent_projects(paths: list[Path], limit: int = 12) -> list[dict]:
                 continue
             resolved = path.resolve()
             info = path.stat()
+            identity = (int(info.st_dev), int(info.st_ino))
         except OSError:
             continue
-        if resolved in seen:
+        if identity in seen:
             continue
-        seen.add(resolved)
+        seen.add(identity)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
