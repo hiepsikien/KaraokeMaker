@@ -334,6 +334,9 @@ class RenderTests(WaveformTestBase):
         self.assertEqual(stream["height"], 18)
         self.assertAlmostEqual(float(info["format"]["duration"]), 1.4, places=1)
         self.assertEqual(int(stream["nb_frames"]), 14)
+        cache_files = list((self.cache / "waveform").glob("clip-*"))
+        self.assertTrue(cache_files)
+        self.assertFalse(any(":" in path.name for path in cache_files))
 
     @FFMPEG_REQUIRED
     def test_render_line_and_dots_styles(self) -> None:
