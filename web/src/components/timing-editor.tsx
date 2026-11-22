@@ -647,7 +647,7 @@ export function TimingEditor({
   function waveCenterFromPointer(event: React.PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     if (!drag) return null;
-    const rect = drag.frameRect;
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect() || drag.frameRect;
     if (rect.width <= 0 || rect.height <= 0) return null;
     const halfW = waveRef.current.width / 2;
     const halfH = waveRef.current.height / 2;

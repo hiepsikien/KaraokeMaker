@@ -122,7 +122,7 @@ export function PublishQueue({
           <ul className="max-h-80 space-y-2 overflow-auto pr-1">
             {history.map((job) => {
               const status = jobStatus(job.status);
-              const url = job.last_url || job.url;
+              const url = job.url;
               return (
                 <li
                   key={job.id}

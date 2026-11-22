@@ -714,6 +714,7 @@ def _outro_segment(
         height=profile.height,
         fps=profile.fps,
         log=log,
+        fade_out=float(style.get("fade") or 0.0),
     )
     pin_cache_file(destination)
     return destination, False
@@ -1055,6 +1056,13 @@ def _plan_background(
         presentation.get("cover") or {},
     )
     profile_id = profile_fingerprint(profile)
+    outro_image_text = str(outro.get("image") or "").strip() if outro_frames > 0 else ""
+    outro_photo = Path(outro_image_text).expanduser() if outro_image_text else cover_photo
+    outro_digest = (
+        _file_digest(outro_photo)
+        if outro_photo is not None and outro_photo.is_file()
+        else ""
+    )
     base_payload = {
         "schema_version": BACKGROUND_SCHEMA_VERSION,
         "builder_version": BACKGROUND_BUILDER_VERSION,
@@ -1063,7 +1071,8 @@ def _plan_background(
         "segment_encoder_version": SEGMENT_ENCODER_VERSION,
         "order": [unique[key]["clip_identity"] for key in order],
         "cover": cover_id,
-        "outro": presentation.get("outro") or {},
+        "outro": (outro if outro_frames > 0 else {}),
+        "outro_image": outro_digest,
         "profile": profile_id,
         "total_frames": total_frames,
         "cover_frames": cover_frames,
@@ -1080,7 +1089,7 @@ def _plan_background(
         PARTICLE_VERSION = 1
     overlay_payload = {
         "base": base_hex,
-        "overlay_effects": overlay_effects,
+        "overlay_effects": [spec for spec in overlay_effects if spec.get("enabled")],
         "overlay_version": OVERLAY_RENDER_VERSION,
         "overlay_encoder": OVERLAY_ENCODER_VERSION,
         "particle_version": PARTICLE_VERSION,
@@ -1890,32 +1899,46 @@ def render_videos(
             picture = picture_path
             log("Dùng lại picture đã có.")
         else:
+            if waveform_plan.get("enabled") and waveform_hash:
+                try:
+                    from karaoke.waveform import render_waveform_clip
+
+                    source_audio = (
+                        instrumental_audio
+                        if waveform_plan.get("source") != "original"
+                        else original_audio
+                    )
+                    waveform_path = render_waveform_clip(
+                        waveform_plan,
+                        source_audio,
+                        profile,
+                        build.cover_frames / build.fps,
+                        build.song_frames / build.fps,
+                        build.outro_frames / build.fps,
+                        work / "waveform.mp4",
+                        log,
+                    )
+                except Exception as error:
+                    log(f"Không tạo được waveform: {error}")
+                    waveform_path = None
+                    waveform_hash = ""
+                    # Do not cache a picture as "with waveform" when the clip
+                    # failed; recompute the identity without waveform_hash so
+                    # the next export retries.
+                    picture_identity = _picture_identity(
+                        build,
+                        lines,
+                        presentation=presentation or {},
+                        typography=typography or {},
+                        waveform=waveform_plan,
+                        waveform_hash="",
+                    )
+                    picture_path = _picture_path(output_dir, picture_identity)
+                    picture_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = picture_path.with_name(
                 f".{picture_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
             )
             try:
-                if waveform_plan.get("enabled") and waveform_hash:
-                    try:
-                        from karaoke.waveform import render_waveform_clip
-
-                        source_audio = (
-                            instrumental_audio
-                            if waveform_plan.get("source") != "original"
-                            else original_audio
-                        )
-                        waveform_path = render_waveform_clip(
-                            waveform_plan,
-                            source_audio,
-                            profile,
-                            build.cover_frames / build.fps,
-                            build.song_frames / build.fps,
-                            build.outro_frames / build.fps,
-                            work / "waveform.mp4",
-                            log,
-                        )
-                    except Exception as error:
-                        log(f"Không tạo được waveform: {error}")
-                        waveform_path = None
                 render_picture(
                     build,
                     lines,

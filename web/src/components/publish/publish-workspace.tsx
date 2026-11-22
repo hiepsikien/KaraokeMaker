@@ -176,6 +176,9 @@ export function PublishWorkspace() {
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
+      if (!event.origin.startsWith("http://127.0.0.1:8765") && !event.origin.startsWith("http://localhost:8765")) {
+        return;
+      }
       if (event.data && typeof event.data === "object" && event.data.type === "karaoke:publish-connected") {
         void loadChannels();
         void loadVideos();
@@ -474,7 +477,6 @@ export function PublishWorkspace() {
         return;
       }
       if (popup && !popup.closed) {
-        popup.opener = null;
         popup.location.href = url;
       } else {
         window.location.assign(url);

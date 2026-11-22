@@ -468,6 +468,7 @@ def interlude_ranges(
                 "text": config["text"],
                 "next_line": str(next_line.get("text") or ""),
                 "show_next_line": bool(config["show_next_line"]),
+                "fade": float(config["fade"]),
             }
         )
     return ranges

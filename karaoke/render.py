@@ -349,6 +349,7 @@ def _draw_interlude(
     *,
     lyric_color: tuple[int, int, int, int],
     bar_color: tuple[int, int, int, int],
+    alpha: float = 1.0,
 ) -> Image.Image:
     width = profile.width
     strip_height = profile.strip_rect[3]
@@ -373,6 +374,9 @@ def _draw_interlude(
         sub_x = (width - (sub_box[2] - sub_box[0])) // 2
         sub_y = title_y + (box[3] - box[1]) + 10
         draw.text((sub_x, sub_y), subtitle, font=small, fill=(220, 214, 202, 255))
+    if alpha < 0.999:
+        channel = strip.getchannel("A").point(lambda value: int(value * max(0.0, min(1.0, alpha))))
+        strip.putalpha(channel)
     return strip
 
 
@@ -404,6 +408,14 @@ def _frame_at(
         )
     for item in interludes or []:
         if item["start"] <= song_time <= item["end"]:
+            fade = float(item.get("fade") or 0.0)
+            alpha = 1.0
+            if fade > 0:
+                alpha = min(
+                    1.0,
+                    max(0.0, (song_time - item["start"]) / fade),
+                    max(0.0, (item["end"] - song_time) / fade),
+                )
             return _draw_interlude(
                 item.get("text") or "Nhạc dạo",
                 item.get("next_line") or "",
@@ -411,6 +423,7 @@ def _frame_at(
                 profile,
                 lyric_color=lyric_color,
                 bar_color=bar_color,
+                alpha=alpha,
             )
     return blank
 

@@ -51,7 +51,7 @@ from karaoke.background import (
 )
 from karaoke.director import DirectorError, analyze_scene, build_fit_transform
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
-from karaoke.media import IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
+from karaoke.media import COVER_RENDER_VERSION, IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
 from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
 from karaoke.separate_runner import separate_kim2
 from karaoke.align import fit_lines_to_voice
@@ -1440,6 +1440,7 @@ def presentation_cover_preview(body: CoverPreviewRequest):
             + body.artist
             + body.cover_line
             + profile.id
+            + f"|v{COVER_RENDER_VERSION}"
         ).encode("utf-8")
     ).hexdigest()[:24]
     destination = cache_dir / f"cover-{key}.png"
@@ -1458,6 +1459,13 @@ def presentation_cover_preview(body: CoverPreviewRequest):
             os.replace(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
+        try:
+            cutoff = time.time() - 7 * 86400
+            for old in cache_dir.glob("cover-*.png"):
+                if old.is_file() and old.stat().st_mtime < cutoff:
+                    old.unlink(missing_ok=True)
+        except OSError:
+            pass
     return FileResponse(destination, media_type="image/png", filename="cover.png")
 
 

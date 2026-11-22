@@ -171,6 +171,18 @@ class BackgroundBuildTests(unittest.TestCase):
         self.assertEqual(one.base_hash, two.base_hash)
         self.assertEqual(one.identity_hash, two.identity_hash)
 
+    def test_outro_image_digest_changes_background_identity(self):
+        outro = self.root / "outro.png"
+        make_image(outro)
+        prepared = dict(self.prepared)
+        prepared["presentation"] = {
+            "outro": {"enabled": True, "duration": 0.5, "image": str(outro)}
+        }
+        first = _plan_background(prepared, output_dir=self.root, profile=self.profile)
+        make_image(outro, color=(200, 10, 10))
+        second = _plan_background(prepared, output_dir=self.root, profile=self.profile)
+        self.assertNotEqual(first.base_hash, second.base_hash)
+
     def test_static_background_is_frame_exact_silent_and_reused(self):
         first = build_background(
             self.prepared,

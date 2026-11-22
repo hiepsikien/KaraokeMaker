@@ -173,6 +173,14 @@ export function PresentationSettings({
   const interlude = presentation.interlude;
   const outro = presentation.outro;
   const presentationKey = JSON.stringify(presentation.cover);
+  const previewAspect =
+    outputProfile === "portrait_1080x1920"
+      ? "9 / 16"
+      : outputProfile === "square_1080"
+        ? "1 / 1"
+        : outputProfile === "portrait_4x5"
+          ? "4 / 5"
+          : "16 / 9";
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState("");
@@ -249,17 +257,22 @@ export function PresentationSettings({
         <SectionTitle>Trang bìa</SectionTitle>
         {coverImage ? (
           <div className="relative overflow-hidden rounded-xl border border-[var(--line)] bg-black/40">
-            <div className="aspect-video w-full">
+            <div className="w-full" style={{ aspectRatio: previewAspect }}>
               {previewUrl ? (
                 <img src={previewUrl} alt="Preview trang bìa" className="h-full w-full object-contain" />
               ) : (
-                <div className="flex h-full items-center justify-center text-xs text-[var(--muted)]">
+                <div className="flex h-full items-center justify-center px-3 text-center text-xs text-[var(--muted)]">
                   {previewBusy ? "Đang render preview…" : previewError || "Chưa có preview."}
                 </div>
               )}
             </div>
+            {previewError && previewUrl ? (
+              <div className="absolute inset-x-2 top-2 rounded-lg bg-amber-950/80 px-2 py-1 text-[10px] text-amber-100">
+                {previewError} Đang hiện bản cũ.
+              </div>
+            ) : null}
             <span className="absolute bottom-2 right-2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] text-[var(--muted)]">
-              {previewBusy ? "Đang cập nhật…" : "Preview bìa"}
+              {previewBusy ? "Đang cập nhật…" : `Preview · ${outputProfile}`}
             </span>
           </div>
         ) : (
@@ -432,6 +445,15 @@ export function PresentationSettings({
               onChange={(value) => patchInterlude({ show_next_line: value })}
             />
           </div>
+          <SliderField
+            label="Fade"
+            value={interlude.fade}
+            min={0}
+            max={2}
+            step={0.1}
+            suffix="s"
+            onChange={(value) => patchInterlude({ fade: value })}
+          />
         </div>
       </section>
 
@@ -514,6 +536,15 @@ export function PresentationSettings({
               onChange={(value) => patchOutro({ show_artist: value })}
             />
           </div>
+          <SliderField
+            label="Fade"
+            value={outro.fade}
+            min={0}
+            max={2}
+            step={0.1}
+            suffix="s"
+            onChange={(value) => patchOutro({ fade: value })}
+          />
         </div>
       </section>
 
