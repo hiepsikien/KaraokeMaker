@@ -83,6 +83,27 @@ function effectLabel(effect: string) {
   return EFFECT_NAMES[effect] || effect;
 }
 
+function assetDateLabel(value: string | undefined) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const year = date.getFullYear() === new Date().getFullYear() ? "" : `/${date.getFullYear()}`;
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}${year} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function clipOptionLabel(asset: StudioAsset, newestId: string) {
+  const seconds =
+    asset.asset_frames && asset.fps
+      ? `${(asset.asset_frames / asset.fps).toFixed(1)}s`
+      : asset.loop_duration
+        ? `${asset.loop_duration.toFixed(1)}s`
+        : "clip";
+  const date = assetDateLabel(asset.created);
+  const latest = asset.id === newestId ? " · mới nhất" : "";
+  return `${asset.name} · ${seconds}${date ? ` · ${date}` : ""}${latest}`;
+}
+
 const PROFILE_LABELS: Record<string, string> = {
   landscape_1080p: "Ngang 16:9",
   portrait_1080x1920: "Dọc 9:16",
@@ -1256,12 +1277,19 @@ export function AiEffects({
     onEffectsChange((current) => current.filter((item) => item.image_path !== selectedImage));
   }
 
-  const imageAssets = assets.filter(
-    (asset) =>
-      asset.source_image === selectedImage ||
-      Boolean(existingEffect?.image_hash && asset.image_hash === existingEffect.image_hash) ||
-      Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
-  );
+  const imageAssets = assets
+    .filter(
+      (asset) =>
+        asset.source_image === selectedImage ||
+        Boolean(existingEffect?.image_hash && asset.image_hash === existingEffect.image_hash) ||
+        Boolean(analysis?.image_hash && asset.image_hash === analysis.image_hash),
+    )
+    .sort((left, right) => {
+      const a = Date.parse(left.created || "") || 0;
+      const b = Date.parse(right.created || "") || 0;
+      return b - a;
+    });
+  const newestAssetId = imageAssets[0]?.id || "";
   const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
   const latestMatchingAsset = existingEffect?.effect_plan
     ? imageAssets.find(
@@ -1758,7 +1786,7 @@ export function AiEffects({
             <option value="">Render từ effect plan</option>
             {imageAssets.map((asset) => (
               <option key={asset.id} value={asset.id}>
-                {asset.name} · {asset.asset_frames && asset.fps ? `${(asset.asset_frames / asset.fps).toFixed(1)}s` : "clip"}
+                {clipOptionLabel(asset, newestAssetId)}
               </option>
             ))}
           </select>
@@ -1770,6 +1798,22 @@ export function AiEffects({
             Tải lại
           </button>
         </div>
+        {imageAssets.length > 1 ? (
+          <p className="mt-1 text-[10px] leading-4 text-[var(--muted)]">
+            {imageAssets.length} clip cho ảnh này · xếp mới nhất trước.
+          </p>
+        ) : null}
+        {selectedAsset ? (
+          <p
+            className={`mt-0.5 text-[10px] leading-4 ${
+              selectedAsset.id === newestAssetId ? "text-emerald-200" : "text-amber-200"
+            }`}
+          >
+            {selectedAsset.id === newestAssetId
+              ? "Đang dùng bản mới nhất."
+              : "Đang dùng bản cũ hơn; bản mới nhất ở đầu danh sách."}
+          </p>
+        ) : null}
       </label>
       {latestMatchingAsset ? (
         <button
@@ -1778,6 +1822,7 @@ export function AiEffects({
           className="text-left text-[11px] text-[var(--gold)] hover:text-white"
         >
           Có clip mới khớp plan: dùng “{latestMatchingAsset.name}”
+          {latestMatchingAsset.created ? ` · ${assetDateLabel(latestMatchingAsset.created)}` : ""}
         </button>
       ) : null}
       {currentRenderState?.status !== "rendering" && currentRenderState?.status !== "error" ? (
@@ -1827,11 +1872,12 @@ export function AiEffects({
         <option value="">Chọn clip đã render…</option>
         {imageAssets.map((asset) => (
           <option key={asset.id} value={asset.id}>
-            {asset.name}
+            {clipOptionLabel(asset, newestAssetId)}
           </option>
         ))}
       </select>
       <p className="text-[10px] leading-4 text-[var(--muted)]">
+        {imageAssets.length > 1 ? `${imageAssets.length} clip · mới nhất ở đầu danh sách. ` : ""}
         Chọn clip sẽ tạo hiệu ứng chỉ dùng asset, không cần phân tích Gemini.
       </p>
     </div>
