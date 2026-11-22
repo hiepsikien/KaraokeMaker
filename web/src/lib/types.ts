@@ -45,6 +45,10 @@ export type DirectorAnchors = {
 export type DirectorObject = {
   id: string;
   label: string;
+  /** Unique UI label (`flag_1`, `flag_2`); falls back to `label` when absent. */
+  display_label?: string;
+  /** Optional group shared by objects that move together (e.g. `tree_1`). */
+  group_id?: string;
   box: DirectorBox;
   anchors: DirectorAnchors;
   affordances: string[];
@@ -185,11 +189,247 @@ export type BackgroundRender = {
   total_frames?: number;
   cover_frames?: number;
   song_frames?: number;
+  outro_frames?: number;
   image_frames?: number;
+  overlay_hash?: string;
+  overlay_frames?: number;
+  overlay_degraded?: boolean;
   degraded?: boolean;
   created?: string;
   segments?: unknown[];
 };
+
+export type OverlayKind = "snow" | "leaf" | "bokeh" | "lightleak";
+
+export type OverlayEffect = {
+  id: string;
+  kind: OverlayKind | string;
+  enabled: boolean;
+  params: Record<string, number | string>;
+  mask: "none" | "avoid_lyrics";
+  seed: number;
+};
+
+export type WaveformPlan = {
+  enabled: boolean;
+  source: string;
+  style: string;
+  anchor: string;
+  /** Center of the strip, 0–1 of the frame. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  accent: string;
+  opacity: number;
+  background: boolean;
+  mode: string;
+};
+
+export type CoverStyle = {
+  layout: string;
+  label: string;
+  show_label: boolean;
+  title_size: number | null;
+  artist_size: number | null;
+  line_size: number | null;
+  uppercase: boolean;
+  text_color: string;
+  line_color: string;
+  accent_color: string;
+  shadow: boolean;
+  stroke: number;
+  bg_blur: number;
+  bg_darken: number;
+  veil: number;
+  vignette: number;
+  scrim: string;
+  scrim_opacity: number;
+};
+
+export type InterludeStyle = {
+  enabled: boolean;
+  min_gap: number;
+  mode: string;
+  text: string;
+  show_next_line: boolean;
+  fade: number;
+};
+
+export type OutroStyle = {
+  enabled: boolean;
+  duration: number;
+  image: string;
+  title: string;
+  subtext: string;
+  handle: string;
+  show_title: boolean;
+  show_artist: boolean;
+  fade: number;
+};
+
+export type Presentation = {
+  cover: CoverStyle;
+  interlude: InterludeStyle;
+  outro: OutroStyle;
+};
+
+export type Typography = {
+  lyric_size: number | null;
+  lyric_color: string;
+  sung_color: string;
+  bar_color: string;
+  bar_opacity: number;
+  shadow: boolean;
+  stroke: number;
+  row_gap: number | null;
+};
+
+export const DEFAULT_COVER: CoverStyle = {
+  layout: "center",
+  label: "",
+  show_label: false,
+  title_size: null,
+  artist_size: null,
+  line_size: null,
+  uppercase: false,
+  text_color: "#fff4dc",
+  line_color: "#e8e0d2",
+  accent_color: "#e7b15a",
+  shadow: true,
+  stroke: 0,
+  bg_blur: 0,
+  bg_darken: 58,
+  veil: 70,
+  vignette: 0,
+  scrim: "none",
+  scrim_opacity: 0,
+};
+
+export const DEFAULT_INTERLUDE: InterludeStyle = {
+  enabled: false,
+  min_gap: 8,
+  mode: "strip",
+  text: "Nhạc dạo",
+  show_next_line: false,
+  fade: 0.4,
+};
+
+export const DEFAULT_OUTRO: OutroStyle = {
+  enabled: false,
+  duration: 4,
+  image: "",
+  title: "",
+  subtext: "Cảm ơn đã xem",
+  handle: "",
+  show_title: true,
+  show_artist: true,
+  fade: 0.6,
+};
+
+export const DEFAULT_WAVEFORM: WaveformPlan = {
+  enabled: false,
+  source: "instrumental",
+  style: "bars",
+  anchor: "center",
+  x: 0.5,
+  y: 0.70,
+  width: 0.32,
+  height: 0.06,
+  color: "#ffc448",
+  accent: "#ff7a59",
+  opacity: 0.9,
+  background: true,
+  mode: "progress",
+};
+
+export const DEFAULT_TYPOGRAPHY: Typography = {
+  lyric_size: null,
+  lyric_color: "#fff8ec",
+  sung_color: "#ffc448",
+  bar_color: "#080604",
+  bar_opacity: 196,
+  shadow: true,
+  stroke: 0,
+  row_gap: null,
+};
+
+export const OVERLAY_DEFAULTS: Record<OverlayKind, Record<string, number | string>> = {
+  snow: { intensity: 55, density: 100, speed: 100, size: 100 },
+  leaf: { intensity: 55, density: 100, speed: 100, size: 100, palette: "autumn" },
+  bokeh: {
+    intensity: 45,
+    density: 100,
+    size: 100,
+    speed: 100,
+    opacity: 35,
+    blend: "screen",
+    palette: "auto",
+  },
+  lightleak: {
+    intensity: 35,
+    speed: 100,
+    angle: 35,
+    opacity: 30,
+    blend: "screen",
+    palette: "warm",
+  },
+};
+
+export function defaultPresentation(): Presentation {
+  return {
+    cover: { ...DEFAULT_COVER },
+    interlude: { ...DEFAULT_INTERLUDE },
+    outro: { ...DEFAULT_OUTRO },
+  };
+}
+
+export function defaultWaveform(): WaveformPlan {
+  return { ...DEFAULT_WAVEFORM };
+}
+
+export function defaultTypography(): Typography {
+  return { ...DEFAULT_TYPOGRAPHY };
+}
+
+/** Deep-merge partial project JSON with the known defaults. */
+export function mergePresentation(value: Partial<Presentation> | null | undefined): Presentation {
+  const base = defaultPresentation();
+  if (!value || typeof value !== "object") return base;
+  return {
+    cover: { ...base.cover, ...(value.cover || {}) },
+    interlude: { ...base.interlude, ...(value.interlude || {}) },
+    outro: { ...base.outro, ...(value.outro || {}) },
+  };
+}
+
+export function mergeWaveform(value: Partial<WaveformPlan> | null | undefined): WaveformPlan {
+  if (!value || typeof value !== "object") return defaultWaveform();
+  return { ...DEFAULT_WAVEFORM, ...value };
+}
+
+export function mergeTypography(value: Partial<Typography> | null | undefined): Typography {
+  if (!value || typeof value !== "object") return defaultTypography();
+  return { ...DEFAULT_TYPOGRAPHY, ...value };
+}
+
+export function overlayEffect(kind: OverlayKind, existing?: OverlayEffect): OverlayEffect {
+  if (existing) {
+    return {
+      ...existing,
+      params: { ...OVERLAY_DEFAULTS[kind], ...existing.params },
+    };
+  }
+  return {
+    id: `ovl_${kind}_${Date.now().toString(36)}`,
+    kind,
+    enabled: true,
+    params: { ...OVERLAY_DEFAULTS[kind] },
+    mask: "avoid_lyrics",
+    seed: Math.floor(Math.random() * 1_000_000),
+  };
+}
 
 export type Project = {
   version: number;
@@ -204,6 +444,10 @@ export type Project = {
   cover_image: string;
   background_images: string[];
   background_effects: BackgroundEffect[];
+  overlay_effects: OverlayEffect[];
+  waveform: WaveformPlan;
+  presentation: Presentation;
+  typography: Typography;
   background_render?: BackgroundRender | null;
   output_profile: string;
   output_dir: string;
@@ -243,6 +487,8 @@ export type Job = {
     cover_frames?: number;
     song_frames?: number;
     image_frames?: number;
+    outro_frames?: number;
+    overlay_hash?: string;
     profile_id?: string;
   } | null;
 };
@@ -257,6 +503,10 @@ export type ProjectFields = {
   lyrics: string;
   background_images: string[];
   background_effects: BackgroundEffect[];
+  overlay_effects: OverlayEffect[];
+  waveform: WaveformPlan;
+  presentation: Presentation;
+  typography: Typography;
   output_profile: string;
   cover_image: string;
   output_dir: string;
@@ -280,6 +530,10 @@ export function emptyFields(outputDir = ""): ProjectFields {
     lyrics: "",
     background_images: [],
     background_effects: [],
+    overlay_effects: [],
+    waveform: defaultWaveform(),
+    presentation: defaultPresentation(),
+    typography: defaultTypography(),
     output_profile: "landscape_1080p",
     cover_image: "",
     output_dir: outputDir,
@@ -304,6 +558,10 @@ export function fieldsFromProject(project: Project): ProjectFields {
     lyrics: project.lyrics || "",
     background_images: project.background_images || [],
     background_effects: Array.isArray(project.background_effects) ? project.background_effects : [],
+    overlay_effects: Array.isArray(project.overlay_effects) ? project.overlay_effects : [],
+    waveform: mergeWaveform(project.waveform),
+    presentation: mergePresentation(project.presentation),
+    typography: mergeTypography(project.typography),
     output_profile: project.output_profile || "landscape_1080p",
     cover_image: project.cover_image || "",
     output_dir: project.output_dir || "",
@@ -329,6 +587,10 @@ export function fieldsPayload(fields: ProjectFields) {
     lyrics: fields.lyrics,
     background_images: fields.background_images,
     background_effects: fields.background_effects,
+    overlay_effects: fields.overlay_effects || [],
+    waveform: mergeWaveform(fields.waveform),
+    presentation: mergePresentation(fields.presentation),
+    typography: mergeTypography(fields.typography),
     output_profile: fields.output_profile,
     cover_image: fields.cover_image,
     output_dir: fields.output_dir,

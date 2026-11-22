@@ -48,12 +48,16 @@ karaoke” trung gian tái sử dụng.
    │
    ├─ (1) Effect clip  (đúng image_duration, đúng profile)
    │
-   ├─ (2) background.mp4 = cover + các clip, đúng tổng thời lượng, KHÔNG tiếng
+   ├─ (2) background.mp4 = cover + các clip + outro + manual overlay, KHÔNG tiếng
    │
-   ├─ (3) picture.mp4 = background + lời (overlay 12 fps)
+   ├─ (3) picture.mp4 = background + lời + interlude + waveform
    │
    └─ (4) mux ×2 = (có giọng) + (không lời), theo format xuất
 ```
+
+Cập nhật 2026-11-22: manual overlay (tuyết/lá/bokeh/light leak) chạy **trong**
+`build_background` sau khi concat; interlude và waveform nằm ở tầng picture. Outro
+là segment cuối của background, có `outro_frames` trong identity/status.
 
 Điểm cốt lõi:
 

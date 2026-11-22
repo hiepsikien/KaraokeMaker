@@ -38,6 +38,15 @@ Rain behaviour is preserved exactly through :func:`render_rain_loop`, which is
 now a thin compatibility wrapper around :func:`render_motion_loop` and stays
 rain-only for P0 callers.
 
+Phase 5 additions:
+
+* ``cloud`` - a feathered region warp for clouds (manual boxes or opt-in AI
+  suggestions).  Never enabled by a prompt keyword; a cloud object/region and an
+  explicit ``cloud`` item are both required.
+* shared snow sprites from :mod:`karaoke.particles` (dots + 6-armed crystals),
+* branch/foliage wind groups (``group_id``) that pivot at the branch base,
+* spark/ash embers with a capped warm glow instead of white bubbles.
+
 Only Pillow + numpy are used. The demo prototype in /tmp used OpenCV; this
 module deliberately avoids that dependency because .venv-karaoke does not
 ship it.
@@ -60,6 +69,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from karaoke.cache import cache_root, prune
 from karaoke.media import HEIGHT, WIDTH, MediaError, fit_image
+from karaoke import particles
+from karaoke.presentation import strip_display_labels
 
 CACHE_ROOT = cache_root("living")
 STRIP_HEIGHT_1080 = 280
@@ -81,8 +92,8 @@ DEFAULT_FOG_INTENSITY = 0.45
 FIRE_RGB = (1.0, 0.57, 0.24)
 FOG_RGB = (0.84, 0.88, 0.92)
 
-# Snow layers: count at 1080p, fall speed px/s at 1080p, flake radius px,
-# alpha 0..255, blur px. Flakes drift sideways with a loop-quantized sine.
+# Snow layers moved to karaoke.particles; this tuple is kept for old importers.
+# The shared particle module owns count/speed/radius/alpha/blur/kind.
 SNOW_LAYERS = (
     (240, 20.0, 1.1, 80, 0.9),
     (180, 34.0, 1.9, 120, 0.6),
@@ -173,13 +184,15 @@ SUN_LABELS = (
     "mặt trời",
 )
 
-# Every renderer recipe supported by this module. Order is the compositing
-# order (base -> rain -> snow -> water -> steam -> wind -> birds -> fire ->
-# embers -> sunrays -> fog -> light).
+# Every renderer recipe supported by this module. The tuple order is used for
+# compositing labels/cache selection; the frame loop applies water -> cloud ->
+# rain -> snow -> steam -> wind -> birds -> fire -> embers -> sunrays -> fog ->
+# light.
 SUPPORTED_EFFECTS = (
     "rain",
     "snow",
     "water",
+    "cloud",
     "steam",
     "wind",
     "birds",
@@ -193,6 +206,7 @@ EFFECT_LABELS = {
     "rain": "mưa",
     "snow": "tuyết",
     "water": "nước",
+    "cloud": "mây",
     "steam": "khói",
     "wind": "gió",
     "birds": "chim",
@@ -210,7 +224,8 @@ EFFECT_LABELS = {
 # v7: object-aware water/smoke masks.
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
 # v31: visual plan hash ignores non-visual params (audio, legacy loop_duration).
-MOTION_CACHE_VERSION = 33
+# v34: shared particle sprites, cloud warp, branch wind groups, ash/spark embers.
+MOTION_CACHE_VERSION = 34
 
 # Shared x264 parameters for motion clips. They are part of the cache key via
 # ``ENCODER_VERSION``: bump it whenever any value below changes so old clips are
@@ -290,7 +305,10 @@ WIND_LABELS = (
     "cloth",
     "noren",
     "plant",
-    "tree",
+    "branch",
+    "bough",
+    "foliage",
+    "canopy",
     "headband",
     "bandana",
     "scarf",
@@ -317,7 +335,10 @@ WIND_LABELS = (
     "cờ",
     "buồm",
     "cánh buồm",
-    "cây",
+    "cành",
+    "cành cây",
+    "tán lá",
+    "vòm lá",
     "khăn",
     "băng đô",
     "tóc",
@@ -329,6 +350,28 @@ WIND_LABELS = (
     "ống tay",
     "dải lụa",
 )
+# Branch groups (5.7). Plain `tree`/`cây`/`trunk` is only a group anchor, never
+# a rotating target: rotating a whole tree looks like the image is falling over.
+BRANCH_AFFORDANCES = ("branch", "foliage", "wind_movable")
+BRANCH_LABELS = (
+    "branch",
+    "bough",
+    "foliage",
+    "canopy",
+    "cành",
+    "cành cây",
+    "tán lá",
+    "vòm lá",
+)
+TREE_ONLY_LABELS = ("tree", "trunk", "cây", "thân cây", "gỗ", "log")
+
+# Clouds are a region warp, not falling particles. They are only rendered when
+# an explicit `cloud` item exists (manual box or opt-in AI suggestion); no
+# keyword/prompt path auto-enables them.
+CLOUD_AFFORDANCES = ("cloud", "cloud_soft", "sky")
+CLOUD_LABELS = ("cloud", "clouds", "mây", "trời", "bầu trời", "sky")
+CLOUD_REGION_HINTS = ("cloud", "mây", "sky", "trời")
+DEFAULT_CLOUD_INTENSITY = 0.55
 CLOTH_HINTS = (
     "cloth",
     "curtain",
@@ -405,12 +448,13 @@ def _active_effects(plan: dict | None) -> tuple[str, ...]:
 
 
 def plan_has_motion(plan: dict | None) -> bool:
-    """True for any supported motion item (rain/snow/water/steam/wind/birds/fire/
-    embers/sunrays/fog/light).
+    """True for any supported motion item (rain/snow/water/cloud/steam/wind/
+    birds/fire/embers/sunrays/fog/light).
 
     ``water`` counts here even when the plan has no liquid region: the renderer
     logs and falls back to a static slide, while Studio can still validate the
-    request shape.
+    request shape.  ``cloud`` behaves the same way: it counts as motion only
+    when the plan contains an explicit ``cloud`` item.
     """
     return bool(_active_effects(plan))
 
@@ -453,14 +497,17 @@ NON_VISUAL_PLAN_PARAMS = frozenset({"audio", "loop_duration"})
 
 
 def _visual_plan(plan: dict) -> dict:
-    """Return a copy of the plan with non-visual params removed.
+    """Return a copy of the plan with non-visual data removed.
 
     ``audio`` only drives the mux stage and ``loop_duration`` is legacy metadata;
     changing either must not invalidate a visual clip or change its seed.
+    ``display_label`` is UI-only and must be stripped recursively (objects in
+    ``objects``, ``inventory.objects``, item objects and item targets) while
+    ``group_id`` stays because it changes group wind behaviour.
     """
     if not isinstance(plan, dict):
         return {}
-    data = dict(plan)
+    data = strip_display_labels(dict(plan))
     items: list[dict] = []
     for item in data.get("items") or []:
         if not isinstance(item, dict):
@@ -529,7 +576,7 @@ def motion_cache_key(
         (
             f"v{MOTION_CACHE_VERSION}|{image_hash}|{visual_plan_hash(plan)}|{seconds}|"
             f"{out_width}|{out_height}|{rate}|{selection}|{mode}|{strip_key}|"
-            f"enc{ENCODER_VERSION}"
+            f"enc{ENCODER_VERSION}|particles{particles.PARTICLE_VERSION}"
         ).encode("utf-8")
     ).hexdigest()
 
@@ -1004,47 +1051,23 @@ def _make_snow_layers(
     seed: int,
     density_multiplier: float = 1.0,
     speed_multiplier: float = 1.0,
+    size_multiplier: float = 1.0,
 ) -> list[dict]:
-    """Build slow flake layers whose fall and drift both loop seamlessly."""
-    size_scale = height / HEIGHT
-    span = height + 200.0 * size_scale
-    density = max(0.25, min(1.0, math.sqrt((width * height) / (WIDTH * HEIGHT))))
-    rng = np.random.default_rng(seed ^ 0x5A0F)
-    # Integer sway cycles over the loop keep the sideways drift seamless.
-    base_sway = max(1, int(round(duration / 4.0)))
-    layers: list[dict] = []
-    for count, speed, radius, alpha, blur in SNOW_LAYERS:
-        particles = max(0, int(round(count * density * density_multiplier)))
-        if particles == 0:
-            continue
-        # Quantize so every flake travels a whole number of spans in the loop.
-        cycles = max(
-            1,
-            int(round(speed * size_scale * duration / span * speed_multiplier)),
-        )
-        quantized = cycles * span / duration
-        xs = rng.uniform(-0.05 * width, 1.05 * width, particles).astype(np.float32)
-        ys = rng.uniform(0.0, span, particles).astype(np.float32)
-        radii = (radius * size_scale * rng.uniform(0.55, 1.45, particles)).astype(np.float32)
-        drift = (
-            max(1.0, (2.5 + radius * 1.4) * size_scale)
-            * rng.uniform(0.5, 1.0, particles)
-        ).astype(np.float32)
-        layers.append(
-            {
-                "xs": xs,
-                "ys": ys,
-                "radii": radii,
-                "drift": drift,
-                "phase": rng.uniform(0.0, 2.0 * math.pi, particles).astype(np.float32),
-                "speed": quantized,
-                "span": span,
-                "sway": rng.integers(base_sway, base_sway + 2, particles).astype(np.float32),
-                "alpha": int(alpha),
-                "blur": blur * max(0.35, size_scale),
-            }
-        )
-    return layers
+    """Build slow flake layers through the shared particle module.
+
+    Kept as a thin wrapper so existing callers/tests keep the old name.  Snow
+    is crystal/dot sprites from :mod:`karaoke.particles`, so AI snow and manual
+    snow share the same artwork and ``PARTICLE_VERSION`` cache key.
+    """
+    return particles.build_snow_layers(
+        width,
+        height,
+        duration,
+        seed,
+        density=density_multiplier,
+        speed=speed_multiplier,
+        size=size_multiplier,
+    )
 
 
 def _draw_snow_layer(
@@ -1055,20 +1078,7 @@ def _draw_snow_layer(
     height: int,
 ) -> None:
     """Draw one snow layer as grayscale intensity into an ``L`` canvas."""
-    span = layer["span"]
-    ys = np.mod(layer["ys"] + layer["speed"] * t, span) - 100.0 * (height / HEIGHT)
-    xs = layer["xs"] + layer["drift"] * np.sin(
-        2.0 * math.pi * layer["sway"] * u + layer["phase"]
-    )
-    radii = layer["radii"]
-    intensity = int(round(float(layer["alpha"])))
-    visible = (ys + radii > -2.0) & (ys - radii < height + 2.0)
-    for x, y, radius in zip(xs[visible], ys[visible], radii[visible]):
-        radius = max(0.5, float(radius))
-        draw.ellipse(
-            [float(x) - radius, float(y) - radius, float(x) + radius, float(y) + radius],
-            fill=intensity,
-        )
+    particles.draw_snow_layer(draw, layer, t, u, height)
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1187,10 @@ def _plan_objects(plan: dict | None, selected_only: bool = True) -> list[dict]:
             {
                 "id": identity,
                 "label": str(entry.get("label") or ""),
+                "display_label": str(
+                    entry.get("display_label") or entry.get("label") or ""
+                ),
+                "group_id": str(entry.get("group_id") or entry.get("group") or "").strip(),
                 "box": box,
                 "anchors": {
                     "pivot": _object_anchor(entry, "pivot"),
@@ -1310,6 +1324,42 @@ def _add_alpha_sprite(
         1.0 - patch[:, :, None]
     )
     alpha_window[:] = patch + alpha_window * (1.0 - patch)
+
+
+def _max_add_sprite(
+    target: np.ndarray,
+    sprite: np.ndarray,
+    cx: float,
+    cy: float,
+    alpha: float,
+    color: np.ndarray,
+    protect: np.ndarray | None = None,
+) -> None:
+    """Per-pixel maximum additive light (prevents overlapping white blow-out)."""
+    if alpha <= 0.0:
+        return
+    out_height, out_width = target.shape[:2]
+    sprite_height, sprite_width = sprite.shape
+    x0 = int(round(cx)) - sprite_width // 2
+    y0 = int(round(cy)) - sprite_height // 2
+    x1, y1 = x0 + sprite_width, y0 + sprite_height
+    if x1 <= 0 or y1 <= 0 or x0 >= out_width or y0 >= out_height:
+        return
+    source_x0 = max(0, -x0)
+    source_y0 = max(0, -y0)
+    source_x1 = sprite_width - max(0, x1 - out_width)
+    source_y1 = sprite_height - max(0, y1 - out_height)
+    dest_x0, dest_y0 = max(0, x0), max(0, y0)
+    dest_x1 = dest_x0 + (source_x1 - source_x0)
+    dest_y1 = dest_y0 + (source_y1 - source_y0)
+    if dest_x1 <= dest_x0 or dest_y1 <= dest_y0:
+        return
+    patch = sprite[source_y0:source_y1, source_x0:source_x1] * alpha
+    if protect is not None:
+        patch = patch * protect[dest_y0:dest_y1, dest_x0:dest_x1]
+    contribution = patch[:, :, None] * color[None, None, :]
+    window = target[dest_y0:dest_y1, dest_x0:dest_x1]
+    np.maximum(window, contribution, out=window)
 
 
 def _sample_smoke_color(
@@ -1630,6 +1680,62 @@ def _cloth_candidate(entry: dict) -> bool:
     return _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS)
 
 
+def _branch_candidate(entry: dict) -> bool:
+    """True for a branch/foliage cluster that may sway.
+
+    ``wind_movable`` is not enough on its own for a flag/lantern/cloth object;
+    it only marks a branch when the label/group is tree- or foliage-like.  A
+    plain tree/trunk stays a group anchor, never a rotating target.  Manual
+    objects are handled by :func:`_wind_candidate` instead (the user chose it).
+    """
+    label = str(entry.get("label") or "").casefold()
+    if any(hint in label for hint in BRANCH_LABELS):
+        return True
+    affordances = [str(value).casefold() for value in entry.get("affordances") or []]
+    if any("branch" in value or "foliage" in value for value in affordances):
+        return True
+    if str(entry.get("source") or "").casefold() == "manual":
+        return False
+    is_tree_only = any(hint in label for hint in TREE_ONLY_LABELS) and not any(
+        hint in label for hint in BRANCH_LABELS
+    )
+    if is_tree_only:
+        return False
+    if str(entry.get("group_id") or "").strip() and any(
+        "wind_movable" in value for value in affordances
+    ):
+        return True
+    plant_like = ("plant", "shrub", "bush", "limb", "twig", "leaf", "leaves", "lá")
+    return any("wind_movable" in value for value in affordances) and any(
+        hint in label for hint in plant_like
+    )
+
+
+def _tree_only(entry: dict) -> bool:
+    label = str(entry.get("label") or "").casefold()
+    return any(hint in label for hint in TREE_ONLY_LABELS) and not any(
+        hint in label for hint in BRANCH_LABELS
+    )
+
+
+def _nearby_branch(first: dict, second: dict) -> bool:
+    """Conservative fallback grouping when an inventory omitted ``group_id``."""
+    first_box = first["box"]
+    second_box = second["box"]
+    left = max(first_box[0], second_box[0])
+    top = max(first_box[1], second_box[1])
+    right = min(first_box[2], second_box[2])
+    bottom = min(first_box[3], second_box[3])
+    if right > left and bottom > top:
+        return True
+    first_x, first_y = _object_pivot(first)
+    second_x, second_y = _object_pivot(second)
+    reach = 1.5 * max(
+        abs(first_box[3] - first_box[1]), abs(second_box[3] - second_box[1])
+    )
+    return math.hypot(first_x - second_x, first_y - second_y) <= max(0.05, reach)
+
+
 def _object_pivot(entry: dict) -> tuple[float, float]:
     pivot = entry["anchors"].get("pivot")
     if pivot is not None:
@@ -1678,6 +1784,21 @@ def _warp_crop(crop: np.ndarray, spec: dict, u: float) -> np.ndarray:
     weight = (0.25 + 0.75 * pin) if spec.get("manual") else pin ** 0.7
     sample_x = grid_x + sway * weight + spec["amplitude"] * pin * wave
     sample_y = grid_y + sway_y * weight + spec["amplitude"] * 0.35 * pin * flutter
+    if spec.get("branch"):
+        # A second, faster (still integer-cycle) jitter makes foliage shiver
+        # without the wide cloth ripple.
+        shiver = (
+            spec["amplitude"]
+            * 0.22
+            * pin
+            * np.sin(
+                2.0 * math.pi * (2 * spec["cycles"] * u + local_x * 2.4 + local_y * 1.7)
+                + phase
+                + 0.4
+            )
+        )
+        sample_y = sample_y + shiver
+        sample_x = sample_x + shiver * 0.45
 
     sample_x = np.clip(sample_x, 0.0, width - 1.0)
     sample_y = np.clip(sample_y, 0.0, height - 1.0)
@@ -1705,8 +1826,10 @@ def _wind_specs(
     items = _effect_items(plan, "wind")
     if not items:
         return []
-    objects = _plan_objects(plan)
-    if not objects:
+    # Expand groups from the full inventory: a branch that the user did not tick
+    # individually must still move with its selected sibling.
+    all_objects = _plan_objects(plan, selected_only=False)
+    if not all_objects:
         log("Bỏ qua gió: plan không có objects.")
         return []
     targets = _target_ids(items)
@@ -1721,38 +1844,114 @@ def _wind_specs(
     rng = np.random.default_rng(seed ^ 0x51D)
     size_scale = height / HEIGHT
     specs: list[dict] = []
+    selected_raw = plan.get("selected_object_ids")
+    selected_ids = (
+        {str(value) for value in selected_raw if str(value).strip()}
+        if isinstance(selected_raw, list)
+        else None
+    )
+
+    def manual_wind(entry: dict) -> bool:
+        if str(entry.get("source") or "").casefold() != "manual":
+            return False
+        return any("wind_movable" in value for value in entry.get("affordances") or [])
+
     if targets:
-        targeted = [entry for entry in objects if entry["id"] in targets]
-        wind_entries = list(targeted)
+        targeted = [entry for entry in all_objects if entry["id"] in targets]
+        accepted: list[dict] = []
+        for entry in targeted:
+            # Plain tree/trunk targets are group anchors, not moving branches.
+            # Manual objects were explicitly chosen by the user, so keep them.
+            if (
+                manual_wind(entry)
+                or _branch_candidate(entry)
+                or (_wind_candidate(entry) and not _tree_only(entry))
+            ):
+                accepted.append(entry)
+            else:
+                log(
+                    "Bỏ qua gió: target "
+                    f"{entry.get('display_label') or entry.get('label') or entry['id']} "
+                    "chỉ là thân/cây, không phải cành."
+                )
+        accepted_ids = {entry["id"] for entry in accepted}
+        group_ids = {
+            entry["group_id"]
+            for entry in accepted
+            if entry["group_id"] and _branch_candidate(entry)
+        }
+        for candidate in all_objects:
+            if candidate["id"] in accepted_ids:
+                continue
+            if (
+                candidate["group_id"]
+                and candidate["group_id"] in group_ids
+                and _branch_candidate(candidate)
+                and not _tree_only(candidate)
+            ):
+                accepted.append(candidate)
+                accepted_ids.add(candidate["id"])
+        # Fallback for inventories without group_id: group nearby branches only,
+        # never two unrelated trees (overlap or a tight pivot radius).
+        for branch in list(accepted):
+            if not _branch_candidate(branch) or branch["group_id"]:
+                continue
+            for candidate in all_objects:
+                if candidate["id"] in accepted_ids or not _branch_candidate(candidate):
+                    continue
+                if candidate["group_id"] or _tree_only(candidate):
+                    continue
+                if _nearby_branch(branch, candidate):
+                    accepted.append(candidate)
+                    accepted_ids.add(candidate["id"])
+        wind_entries = list(accepted)
         # A sail target should also move the flag on the same mast; generic
         # pivot-proximity expansion avoids per-image object ids. Only cloth
         # targets expand, so a lantern target does not pull in nearby curtains.
         cloth_targets = [target for target in targeted if _cloth_candidate(target)]
         if cloth_targets:
-            for candidate in objects:
-                if candidate["id"] in targets or not _cloth_candidate(candidate):
+            for candidate in all_objects:
+                if candidate["id"] in accepted_ids or not _cloth_candidate(candidate):
                     continue
                 if any(_same_support(candidate, target) for target in cloth_targets):
                     wind_entries.append(candidate)
     else:
-        wind_entries = [entry for entry in objects if _wind_candidate(entry)]
+        # Preserve the old fallback for legacy plans without a selection list:
+        # use every wind candidate. With a selection list, only selected
+        # objects may move (group expansion above handles targeted branches).
+        candidates = (
+            [entry for entry in all_objects if entry["id"] in selected_ids]
+            if selected_ids is not None
+            else all_objects
+        )
+        wind_entries = [
+            entry
+            for entry in candidates
+            if _wind_candidate(entry) and (not _tree_only(entry) or manual_wind(entry))
+        ]
+
     for entry in wind_entries:
         x1, y1, x2, y2 = _object_box_px(entry["box"], transform, width, height)
         box_width, box_height = x2 - x1, y2 - y1
         if box_width < 4.0 or box_height < 4.0:
             continue
         manual = str(entry.get("source") or "").casefold() == "manual"
+        branch = _branch_candidate(entry) and not _cloth_candidate(entry)
         # Manual objects are cloth only when their name says cloth/hair.
         # A hand-drawn "cây"/"hoa"/"vật thể" should sway rigidly, not ripple
         # in place. Detected wide cloth still uses the aspect heuristic.
-        cloth = _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS) or (
-            not manual and box_width > box_height * 1.15
+        cloth = (not branch) and (
+            _matches_hints(entry, CLOTH_HINTS, CLOTH_HINTS)
+            or (not manual and box_width > box_height * 1.15)
         )
         feather = max(2.0, min(box_width, box_height) * 0.06)
         amplitude = max(
             1.5,
             min(24.0 * size_scale, min(box_width, box_height) * 0.12),
         ) * (0.65 + 0.55 * intensity)
+        if branch:
+            # Branches sway about 0.6x as far as cloth and keep their base fixed.
+            amplitude *= 0.6
         if speed <= 0.0:
             # Zero speed means "wind off": keep the target selected so the plan
             # still resolves, but do not deform the pixels.
@@ -1804,6 +2003,9 @@ def _wind_specs(
         pivot = entry["anchors"].get("pivot")
         if pivot is not None:
             pivot_x, pivot_y = _map_point(pivot, transform, width, height)
+        elif branch:
+            # Branch pivot defaults to the base of the box (attachment point).
+            pivot_x, pivot_y = (x1 + x2) / 2.0, y2
         else:
             pivot_x, pivot_y = (x1 + x2) / 2.0, y1
         pivot_x = min(max(pivot_x - left, 0.0), float(max(0, right - left - 1)))
@@ -1825,19 +2027,20 @@ def _wind_specs(
                 "box": (x1, y1, x2, y2),
                 "mask": mask,
                 "cloth": cloth,
+                "branch": branch,
                 "rigid": rigid,
                 "manual": manual,
                 "pivot_local": (pivot_x, pivot_y),
                 "max_distance": max(1.0, max_distance),
                 "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
                 "cycles": cycles,
-                "angle": 0.0 if speed <= 0.0 else 1.5 + 3.0 * intensity,
+                "angle": 0.0 if speed <= 0.0 else (0.6 + 1.2 * intensity) if branch else 1.5 + 3.0 * intensity,
                 "amplitude": amplitude,
                 "sway": sway,
             }
         )
     if not specs:
-        log("Bỏ qua gió: không có object treo/vải khớp target.")
+        log("Bỏ qua gió: không có object treo/vải/cành khớp target.")
     return specs
 
 
@@ -1847,6 +2050,8 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
         crop = image.crop(crop_box)
         original = np.asarray(crop, dtype=np.float32)
         if spec["cloth"] and not spec["rigid"]:
+            warped = _warp_crop(original, spec, u)
+        elif spec.get("branch") and not spec["rigid"]:
             warped = _warp_crop(original, spec, u)
         else:
             phase = 2.0 * math.pi * spec["cycles"] * u + spec["phase"]
@@ -1876,6 +2081,244 @@ def _wind_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
         # warped). Applying `prevent` per pixel here pinned the protected
         # calligraphy and made the flag look completely static.
         image.paste(Image.fromarray(np.clip(blended, 0.0, 255.0).astype(np.uint8), "RGB"), (spec["left"], spec["top"]))
+    return image
+
+
+# --- cloud -----------------------------------------------------------------
+
+
+def _cloud_candidate(entry: dict) -> bool:
+    return _matches_hints(entry, CLOUD_AFFORDANCES, CLOUD_LABELS)
+
+
+def _cloud_shapes(plan: dict, log) -> list[tuple[str, list[tuple[float, float]]]]:
+    """Return (identity, normalized polygon) cloud regions.
+
+    Objects are the primary source (manual boxes or AI suggestions).  A broad
+    `cloud`/`sky` region is used only when it matches the same hints, so a plan
+    without cloud objects and without an explicit item never warps the sky.
+    """
+    items = _effect_items(plan, "cloud")
+    targets = _target_ids(items)
+    shapes: list[tuple[str, list[tuple[float, float]]]] = []
+    # Explicit targets always resolve, even when the UI selection list has not
+    # been refreshed; untargeted runs respect the selection list.
+    for entry in _plan_objects(plan, selected_only=not targets):
+        if targets and entry["id"] not in targets:
+            continue
+        if not _cloud_candidate(entry):
+            continue
+        x1, y1, x2, y2 = entry["box"]
+        shapes.append(
+            (
+                entry["id"],
+                [
+                    (x1, y1),
+                    (x2, y1),
+                    (x2, y2),
+                    (x1, y2),
+                ],
+            )
+        )
+    regions = plan.get("regions") if isinstance(plan, dict) else None
+    if isinstance(regions, list):
+        for entry in regions:
+            if not isinstance(entry, dict):
+                continue
+            identity = " ".join(
+                str(entry.get(key) or "") for key in ("id", "label", "kind", "type")
+            ).casefold()
+            if not any(hint in identity for hint in CLOUD_REGION_HINTS):
+                continue
+            region_id = str(entry.get("id") or "cloud")
+            if targets and region_id not in targets:
+                continue
+            points = _shape_points(entry)
+            if points:
+                shapes.append((region_id, points))
+    if not shapes:
+        log("Bỏ qua mây: không có vùng/object mây khớp target.")
+    return shapes
+
+
+def _cloud_specs(
+    plan: dict,
+    transform: dict,
+    width: int,
+    height: int,
+    seconds: float,
+    seed: int = 0,
+    prevent: np.ndarray | None = None,
+    log=None,
+) -> list[dict]:
+    """Build feathered cloud warp specs from cloud objects/regions."""
+    if log is None:
+        log = lambda _message: None  # noqa: E731
+    items = _effect_items(plan, "cloud")
+    if not items:
+        return []
+    intensity = _items_intensity(items, DEFAULT_CLOUD_INTENSITY)
+    if intensity <= 1e-3:
+        log("Bỏ qua mây: intensity bằng 0.")
+        return []
+    speed = _items_speed(items)
+    billow = _items_param(items, "billow", 0.6, 0.0, 1.0)
+    feather_setting = _items_param(items, "feather", 48.0, 0.0, 120.0)
+    shapes = _cloud_shapes(plan, log)
+    if not shapes:
+        return []
+    rng = np.random.default_rng(seed ^ 0xC10D)
+    size_scale = height / HEIGHT
+    specs: list[dict] = []
+    for identity, points in shapes:
+        mapped = [_map_point(point, transform, width, height) for point in points]
+        if len(mapped) < 3:
+            continue
+        xs = [point[0] for point in mapped]
+        ys = [point[1] for point in mapped]
+        x1, x2 = max(0.0, min(xs)), min(float(width), max(xs))
+        y1, y2 = max(0.0, min(ys)), min(float(height), max(ys))
+        box_width, box_height = x2 - x1, y2 - y1
+        if box_width < 6.0 or box_height < 6.0:
+            continue
+        amplitude = max(
+            3.0,
+            min(28.0 * size_scale, min(box_width, box_height) * 0.10),
+        ) * (0.45 + 0.9 * intensity) * (0.55 + 0.55 * billow)
+        feather = max(
+            2.0,
+            min(box_width, box_height) * 0.30,
+            feather_setting * size_scale,
+        )
+        expand = int(math.ceil(1.8 * amplitude + feather))
+        left = max(0, int(math.floor(x1)) - expand)
+        top = max(0, int(math.floor(y1)) - expand)
+        right = min(width, int(math.ceil(x2)) + expand)
+        bottom = min(height, int(math.ceil(y2)) + expand)
+        if right - left < 6 or bottom - top < 6:
+            continue
+        mask_image = Image.new("L", (right - left, bottom - top), 0)
+        draw = ImageDraw.Draw(mask_image)
+        local = [
+            (px - left, py - top) for px, py in mapped
+        ]
+        draw.polygon(local, fill=255)
+        mask = np.asarray(
+            mask_image.filter(ImageFilter.GaussianBlur(feather)), dtype=np.float32
+        ) / 255.0
+        if prevent is not None:
+            mask = mask * prevent[top:bottom, left:right]
+        if float(mask.max()) <= 1e-4:
+            continue
+        # Base-aware: a supplied pivot (the attachment/base) stays still while
+        # the top of the cloud billows; otherwise the box bottom centre is used.
+        pivot = None
+        for entry in _plan_objects(plan, selected_only=False):
+            if entry["id"] == identity:
+                pivot = entry["anchors"].get("pivot")
+                break
+        if pivot is not None:
+            pivot_x, pivot_y = _map_point(pivot, transform, width, height)
+        else:
+            pivot_x, pivot_y = (x1 + x2) / 2.0, y2
+        pivot_x = min(max(pivot_x - left, 0.0), float(max(0, right - left - 1)))
+        pivot_y = min(max(pivot_y - top, 0.0), float(max(0, bottom - top - 1)))
+        cycles = 0 if speed <= 0.0 else max(1, int(round(seconds / 6.0 * speed)))
+        specs.append(
+            {
+                "id": identity,
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+                "box": (x1, y1, x2, y2),
+                "mask": mask,
+                "pivot_local": (pivot_x, pivot_y),
+                "cycles": cycles,
+                "amplitude": 0.0 if speed <= 0.0 else amplitude,
+                "phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+                "phase2": float(rng.uniform(0.0, 2.0 * math.pi)),
+                "phase3": float(rng.uniform(0.0, 2.0 * math.pi)),
+                "brightness": 0.02 + 0.05 * billow,
+            }
+        )
+    if not specs:
+        log("Bỏ qua mây: vùng mây quá nhỏ hoặc bị chặn hoàn toàn.")
+    return specs
+
+
+def _cloud_frame(image: Image.Image, specs: list[dict], u: float) -> Image.Image:
+    """Loop-safe billow warp for cloud specs (integer time harmonics)."""
+    for spec in specs:
+        crop_box = (spec["left"], spec["top"], spec["right"], spec["bottom"])
+        crop = image.crop(crop_box)
+        original = np.asarray(crop, dtype=np.float32)
+        height, width = original.shape[:2]
+        grid_x, grid_y = np.meshgrid(
+            np.arange(width, dtype=np.float32),
+            np.arange(height, dtype=np.float32),
+        )
+        local_x = (grid_x + spec["left"] - spec["box"][0]) / max(
+            1.0, spec["box"][2] - spec["box"][0]
+        )
+        local_y = (grid_y + spec["top"] - spec["box"][1]) / max(
+            1.0, spec["box"][3] - spec["box"][1]
+        )
+        pivot_x, pivot_y = spec["pivot_local"]
+        distance = np.hypot(grid_x - pivot_x, grid_y - pivot_y)
+        max_distance = math.hypot(
+            max(pivot_x, width - 1 - pivot_x),
+            max(pivot_y, height - 1 - pivot_y),
+        )
+        pin = np.clip(distance / max(1.0, max_distance), 0.0, 1.0)
+        weight = 0.30 + 0.70 * pin
+        phase = spec["phase"]
+        cycles = spec["cycles"]
+        amplitude = spec["amplitude"]
+        wave1 = np.sin(
+            2.0 * math.pi * (local_x * 1.1 + local_y * 0.6) + phase
+        )
+        wave2 = np.sin(
+            2.0 * math.pi * (local_x * 2.2 - local_y * 1.4) + spec["phase2"]
+        )
+        wave3 = np.sin(
+            2.0 * math.pi * (local_x * 3.1 + local_y * 2.0) + spec["phase3"]
+        )
+        flow1 = np.cos(
+            2.0 * math.pi * (local_x * 0.9 - local_y * 1.3) + spec["phase2"]
+        )
+        flow2 = np.cos(
+            2.0 * math.pi * (local_x * 2.7 + local_y * 1.9) + spec["phase3"]
+        )
+        time = 2.0 * math.pi * cycles * u
+        dx = amplitude * weight * (
+            np.sin(time + wave1)
+            + 0.5 * np.sin(2.0 * time + wave2)
+            + 0.25 * np.sin(3.0 * time + wave3)
+        )
+        dy = amplitude * 0.6 * weight * (
+            np.cos(time + flow1) + 0.5 * np.cos(2.0 * time + flow2)
+        )
+        sample_x = np.clip(grid_x + dx, 0.0, width - 1.0)
+        sample_y = np.clip(grid_y + dy, 0.0, height - 1.0)
+        x0 = np.floor(sample_x).astype(np.int32)
+        y0 = np.floor(sample_y).astype(np.int32)
+        x1 = np.minimum(x0 + 1, width - 1)
+        y1 = np.minimum(y0 + 1, height - 1)
+        wx = (sample_x - x0)[:, :, None]
+        wy = (sample_y - y0)[:, :, None]
+        top = original[y0, x0] * (1.0 - wx) + original[y0, x1] * wx
+        bottom = original[y1, x0] * (1.0 - wx) + original[y1, x1] * wx
+        warped = top * (1.0 - wy) + bottom * wy
+        # Subtle "breathing" brightness; one whole cycle over the loop.
+        breathe = 1.0 + spec["brightness"] * math.sin(2.0 * math.pi * u + phase)
+        warped = warped * breathe
+        mask = spec["mask"][:, :, None]
+        blended = original * (1.0 - mask) + warped * mask
+        image.paste(
+            Image.fromarray(np.clip(blended, 0.0, 255.0).astype(np.uint8), "RGB"),
+            (spec["left"], spec["top"]),
+        )
     return image
 
 
@@ -2516,7 +2959,14 @@ def _embers_spec(
     seed: int,
     log,
 ) -> dict | None:
-    """Sparse rising sparks from fire objects/regions."""
+    """Rising sparks plus ash flakes from fire objects/regions.
+
+    Two particle kinds: a few warm sparks (small yellow core + orange halo) and
+    many dull ash flakes.  ``ash_ratio`` selects the mix, ``glow`` controls the
+    spark halo and ``flicker`` its twinkle.  Sparks are composited with a
+    per-pixel maximum (not a sum) so overlapping particles cannot saturate to
+    the old white bubbles.
+    """
     items = _effect_items(plan, "embers")
     if not items:
         return None
@@ -2556,6 +3006,9 @@ def _embers_spec(
         return None
 
     speed = _items_speed(items)
+    glow = _items_param(items, "glow", 55.0, 0.0, 100.0) / 100.0
+    ash_ratio = _items_param(items, "ash_ratio", 65.0, 0.0, 100.0) / 100.0
+    flicker = _items_param(items, "flicker", 40.0, 0.0, 100.0) / 100.0
     density = math.sqrt((width * height) / (WIDTH * HEIGHT)) * density_multiplier
     # 0.30 is the reference level: the default ember density is ~30% of the
     # old baseline, while the slider can still raise it toward the old max.
@@ -2575,42 +3028,117 @@ def _embers_spec(
             if pick <= cursor:
                 emitter = candidate
                 break
-        span_x = max(1.0, emitter["x2"] - emitter["x1"])
-        span_y = max(1.0, emitter["y2"] - emitter["y1"])
+        kind = "ash" if rng.uniform(0.0, 1.0) < ash_ratio else "spark"
+        spark = kind == "spark"
+        # Sparks are small points; ash flakes are larger dull shards.
+        size = float(
+            max(
+                1.1 if spark else 2.0,
+                (rng.uniform(1.3, 2.8) if spark else rng.uniform(2.2, 4.6))
+                * math.sqrt(height / HEIGHT),
+            )
+        )
+        core = np.asarray(
+            (
+                255.0,
+                rng.uniform(205.0, 245.0),
+                rng.uniform(105.0, 185.0),
+            ),
+            dtype=np.float32,
+        )
+        halo = np.asarray(
+            (
+                rng.uniform(220.0, 255.0),
+                rng.uniform(90.0, 150.0),
+                rng.uniform(25.0, 65.0),
+            ),
+            dtype=np.float32,
+        )
+        ash = np.asarray(
+            tuple(rng.uniform(low, high) for low, high in ((60, 82), (52, 72), (46, 64))),
+            dtype=np.float32,
+        )
         particles.append(
             {
+                "kind": kind,
                 "x": float(rng.uniform(emitter["x1"], emitter["x2"])),
                 "y": float(rng.uniform(emitter["y1"], emitter["y2"])),
-                "rise": float(rng.uniform(0.22, 0.55) * height),
+                "rise": float(
+                    rng.uniform(0.22, 0.55) * height
+                    if spark
+                    else rng.uniform(0.14, 0.38) * height
+                ),
                 "drift": float(rng.uniform(-0.035, 0.035) * width),
                 "sway": float(max(1.0, rng.uniform(2.0, 8.0) * height / HEIGHT)),
                 "phase": float(rng.uniform(0.0, 1.0)),
                 "cycles": max(1, int(round(int(rng.integers(2, 5)) * speed))),
-                # Fixed-ish pixel size: embers are point sparks, so scaling
-                # them down to sub-pixel at 640 made them invisible.
-                "size": float(
-                    max(
-                        1.2,
-                        rng.uniform(1.3, 2.8) * math.sqrt(height / HEIGHT),
-                    )
+                "flicker_cycles": max(
+                    1, int(round(int(rng.integers(3, 8)) * max(0.4, speed)))
                 ),
-                "alpha": float(rng.uniform(0.65, 1.0)),
-                "color": np.asarray(
-                    (
-                        rng.uniform(235.0, 255.0),
-                        rng.uniform(120.0, 175.0),
-                        rng.uniform(35.0, 80.0),
-                    ),
-                    dtype=np.float32,
+                "rotation": float(rng.uniform(0.0, 2.0 * math.pi)),
+                "spin": int(rng.integers(1, 3)),
+                "size": size,
+                "alpha": float(
+                    rng.uniform(0.65, 1.0) if spark else rng.uniform(0.35, 0.7)
                 ),
+                "core_color": core,
+                "halo_color": halo,
+                "ash_color": ash,
+                "rim_color": np.asarray((201.0, 106.0, 43.0), dtype=np.float32),
+                "variant": int(rng.integers(0, 4)),
             }
         )
     return {
         "particles": particles,
         "intensity": intensity,
-        "alpha_scale": 0.30,
+        "alpha_scale": 0.85,
+        "glow": glow,
+        "ash_ratio": ash_ratio,
+        "flicker": flicker,
         "prevent": prevent,
     }
+
+
+def _ash_sprite(radius: int, variant: int, angle_bucket: int, cache: dict) -> np.ndarray:
+    """Irregular translucent ash shard (alpha mask), cached per size/variant."""
+    key = ("ash", max(1, int(radius)), int(variant) % 4, int(angle_bucket) % 12)
+    sprite = cache.get(key)
+    if sprite is not None:
+        return sprite
+    scale = 4
+    side = max(3, int(radius)) * 2 + 1
+    image = Image.new("L", (side * scale, side * scale), 0)
+    draw = ImageDraw.Draw(image)
+    center = side * scale / 2.0
+    rng = np.random.default_rng(1000 + key[1] * 17 + key[2] * 101)
+    points = []
+    count = 6 + key[2]
+    for index in range(count):
+        angle = 2.0 * math.pi * index / count
+        length = center * (0.55 + 0.42 * float(rng.uniform(0.0, 1.0)))
+        points.append(
+            (
+                center + math.cos(angle) * length,
+                center + math.sin(angle) * length * 0.72,
+            )
+        )
+    draw.polygon(points, fill=255)
+    # A darker notch keeps the shard from reading as a clean round dot.
+    draw.ellipse(
+        (
+            center - center * 0.28,
+            center - center * 0.34,
+            center + center * 0.22,
+            center + center * 0.22,
+        ),
+        fill=110,
+    )
+    resized = image.resize((side, side), Image.Resampling.LANCZOS)
+    sprite = np.asarray(resized, dtype=np.float32) / 255.0
+    if key[3]:
+        sprite = particles._rotate_sprite(sprite, key[3] * 30.0)
+    cache[key] = sprite
+    return sprite
 
 
 def _apply_embers(
@@ -2622,20 +3150,23 @@ def _apply_embers(
     if spec is None:
         return frame
     height, width = frame.shape[:2]
-    layer = np.zeros_like(frame, dtype=np.float32)
-    alpha_layer = np.zeros((height, width), dtype=np.float32)
+    light = np.zeros_like(frame, dtype=np.float32)
+    ash_layer = np.zeros_like(frame, dtype=np.float32)
+    ash_alpha = np.zeros((height, width), dtype=np.float32)
     prevent = spec["prevent"]
     intensity = spec["intensity"]
+    glow = float(spec.get("glow", 0.55))
+    flicker = float(spec.get("flicker", 0.4))
     for particle in spec["particles"]:
         progress = (particle["phase"] + particle["cycles"] * u) % 1.0
         envelope = math.sin(math.pi * progress) ** 1.4
-        alpha = (
+        base_alpha = (
             particle["alpha"]
             * intensity
             * spec.get("alpha_scale", 1.0)
             * envelope
         )
-        if alpha <= 0.01:
+        if base_alpha <= 0.01:
             continue
         x = (
             particle["x"]
@@ -2647,19 +3178,76 @@ def _apply_embers(
             continue
         if prevent[int(y), int(x)] <= 0.01:
             continue
-        radius = max(2, int(round(particle["size"] * 2.5)))
-        sprite = _soft_sprite(radius, sprite_cache)
-        _add_alpha_sprite(
-            layer,
-            alpha_layer,
-            sprite,
-            x,
-            y,
-            alpha,
-            particle["color"],
-            protect=prevent,
-        )
-    return np.clip(frame + layer, 0.0, 255.0).astype(np.float32)
+        spark = particle.get("kind", "spark") == "spark"
+        if spark:
+            # Twinkle completes whole cycles (loop-safe) and fades on bright
+            # backgrounds so it does not read as a white bubble.
+            twinkle = 0.60 + 0.40 * math.sin(
+                2.0 * math.pi * particle["flicker_cycles"] * u
+                + particle["phase"] * 2.0 * math.pi
+            )
+            alpha = base_alpha * (1.0 - flicker + flicker * max(0.0, twinkle))
+            local_luma = float(
+                frame[min(height - 1, int(y)), min(width - 1, int(x))].mean()
+            ) / 255.0
+            alpha *= max(0.20, 1.0 - 0.65 * local_luma)
+            shrink = 1.0 - 0.45 * progress
+            halo_radius = max(2, int(round(particle["size"] * 3.2 * shrink)))
+            core_radius = max(1, int(round(particle["size"] * 1.05 * shrink)))
+            halo = _soft_sprite(halo_radius, sprite_cache)
+            core = _soft_sprite(core_radius, sprite_cache)
+            # Maximum (not sum) across particles caps the additive lift.
+            _max_add_sprite(
+                light,
+                halo,
+                x,
+                y,
+                alpha * (0.10 + 0.45 * glow),
+                particle["halo_color"],
+                protect=prevent,
+            )
+            _max_add_sprite(
+                light,
+                core,
+                x,
+                y,
+                alpha * (0.35 + 0.55 * glow),
+                particle["core_color"],
+                protect=prevent,
+            )
+        else:
+            radius = max(2, int(round(particle["size"] * 1.6)))
+            angle_bucket = 0
+            if radius >= 4:
+                angle = math.degrees(
+                    particle["rotation"] + 2.0 * math.pi * particle["spin"] * u
+                )
+                angle_bucket = int(round((angle % 360.0) / 30.0)) % 12
+            sprite = _ash_sprite(
+                radius, int(particle.get("variant", 0)), angle_bucket, sprite_cache
+            )
+            _add_alpha_sprite(
+                ash_layer,
+                ash_alpha,
+                sprite,
+                x,
+                y,
+                base_alpha,
+                particle["ash_color"],
+                protect=prevent,
+            )
+            # A very faint warm rim keeps ash from looking like grey confetti.
+            _max_add_sprite(
+                light,
+                sprite,
+                x,
+                y,
+                base_alpha * 0.10 * glow,
+                particle["rim_color"],
+                protect=prevent,
+            )
+    frame = frame * (1.0 - ash_alpha[:, :, None]) + ash_layer
+    return np.clip(frame + light, 0.0, 255.0).astype(np.float32)
 
 
 # --- sun rays --------------------------------------------------------------
@@ -3189,11 +3777,14 @@ def _render_loop(
                     seed,
                     density_multiplier=_items_density(snow_items),
                     speed_multiplier=_items_speed(snow_items),
+                    size_multiplier=_items_param(snow_items, "size", 100.0, 60.0, 160.0)
+                    / 100.0,
                 )
 
         prevent = None
         if effects.intersection(
             {
+                "cloud",
                 "steam",
                 "wind",
                 "birds",
@@ -3207,6 +3798,21 @@ def _render_loop(
         ):
             prevent = _build_protect_mask(plan, transform, out_width, out_height, strip_rect)
         prevent3 = prevent[:, :, None] if prevent is not None else None
+
+        cloud_specs = (
+            _cloud_specs(
+                plan,
+                transform,
+                out_width,
+                out_height,
+                seconds,
+                seed,
+                prevent,
+                log,
+            )
+            if "cloud" in effects
+            else []
+        )
 
         steam_sources = (
             _steam_sources(
@@ -3307,6 +3913,8 @@ def _render_loop(
             resolved = float(weather_mask.max()) > 1e-4
         if water_spec is not None and water_spec["amplitude"] > 0.0:
             resolved = True
+        if cloud_specs:
+            resolved = True
         if steam_sources or wind_specs:
             resolved = True
         if fire_spec is not None and fire_spec["amplitude"] > 0.0:
@@ -3338,6 +3946,13 @@ def _render_loop(
                 if water_spec is not None:
                     frame = _apply_water(frame, water_spec, u)
 
+                # Clouds are a region warp in the background, so they run
+                # before falling particles and are not affected by them.
+                if cloud_specs:
+                    frame_u8 = np.clip(frame, 0.0, 255.0).astype(np.uint8)
+                    clouded = _cloud_frame(Image.fromarray(frame_u8, "RGB"), cloud_specs, u)
+                    frame = np.asarray(clouded, dtype=np.float32)
+
                 if weather_mask is not None and rain_layers:
                     overlay = np.zeros((out_height, out_width), dtype=np.float32)
                     for layer in rain_layers:
@@ -3357,11 +3972,15 @@ def _render_loop(
                 if weather_mask is not None and snow_layers:
                     overlay = np.zeros((out_height, out_width), dtype=np.float32)
                     for layer in snow_layers:
-                        canvas = Image.new("L", (out_width, out_height), 0)
-                        _draw_snow_layer(ImageDraw.Draw(canvas), layer, t, u, out_height)
+                        canvas = particles.snow_layer_canvas(
+                            layer, out_width, out_height, t, u
+                        )
                         if layer["blur"] >= 0.3:
-                            canvas = canvas.filter(ImageFilter.GaussianBlur(layer["blur"]))
-                        overlay += np.asarray(canvas, dtype=np.float32)
+                            image = Image.fromarray(
+                                np.clip(canvas, 0.0, 255.0).astype(np.uint8), "L"
+                            ).filter(ImageFilter.GaussianBlur(layer["blur"]))
+                            canvas = np.asarray(image, dtype=np.float32)
+                        overlay += canvas
                     overlay_rgb = overlay[:, :, None] * (
                         np.asarray(SNOW_COLOR, dtype=np.float32) / 255.0
                     )
@@ -3447,8 +4066,8 @@ def render_motion_loop(
 ) -> Path | None:
     """Render all supported motion items in one loop/encode pass.
 
-    Supports rain, snow, water (W1 shimmer), steam, wind, birds, fire, embers,
-    sun rays, fog, and light.
+    Supports rain, snow, water (W1 shimmer), cloud warp, steam, wind (including
+    branch groups), birds, fire, embers (spark + ash), sun rays, fog, and light.
     Returns ``None`` when the plan has no supported motion item, and also when
     no item resolves to a visible recipe (for example a water-only plan with no
     liquid region, a fire-only plan with no fire object/region, or steam/wind

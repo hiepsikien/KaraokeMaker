@@ -190,6 +190,12 @@ LLM chỉ cần làm phần này. Nó không cần biết toạ độ pixel.
 
 ### 3.3 Planner/Compiler → effect plan
 
+> **Cập nhật 2026-11-22:** object có thể mang thêm `display_label` (duy nhất, ví dụ
+> `flag_1`, `flag_2`) và `group_id` (ví dụ `tree_1` cho nhóm cành). `display_label`
+> chỉ dùng UI, không tham gia `visual_plan_hash`; `group_id` tham gia vì nó đổi
+> chuyển động. Cành cây dùng `affordances: ["branch", "foliage", "wind_movable"]`
+> và pivot ở gốc cành; target `tree`/trunk không được xoay cả cây.
+
 Planner làm những việc mà LLM không nên làm:
 
 - "đèn lồng" → 2 object, chọn cả hai; pivot = **điểm treo/bản lề** derive từ mask +

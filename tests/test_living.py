@@ -1307,3 +1307,359 @@ class SunRaysTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParticlePlanTests(unittest.TestCase):
+    def test_plan_objects_carry_display_label_and_group_id(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["branch-1"], "params": {"intensity": 0.4}}],
+            objects=[
+                {
+                    **object_entry(
+                        "branch-1",
+                        "branch",
+                        (0.1, 0.2, 0.4, 0.6),
+                        affordances=["branch", "wind_movable"],
+                        pivot=(0.25, 0.6),
+                    ),
+                    "display_label": "branch_1",
+                    "group_id": "tree_1",
+                }
+            ],
+        )
+        objects = living._plan_objects(plan)
+        self.assertEqual(objects[0]["display_label"], "branch_1")
+        self.assertEqual(objects[0]["group_id"], "tree_1")
+
+    def test_legacy_plan_without_labels_falls_back_to_semantic_label(self):
+        plan = effect_plan(
+            [],
+            objects=[object_entry("flag-1", "flag", (0.2, 0.1, 0.5, 0.3))],
+        )
+        objects = living._plan_objects(plan)
+        self.assertEqual(objects[0]["display_label"], "flag")
+        self.assertEqual(objects[0]["group_id"], "")
+
+    def test_visual_plan_scrubs_display_label_recursively_but_keeps_group_id(self):
+        plan = effect_plan(
+            [
+                {
+                    "effect": "wind",
+                    "target_ids": ["branch-1"],
+                    "objects": [
+                        {
+                            "id": "branch-1",
+                            "label": "branch",
+                            "display_label": "branch_1",
+                            "group_id": "tree_1",
+                            "box": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.5},
+                        }
+                    ],
+                }
+            ],
+            objects=[
+                {
+                    "id": "branch-1",
+                    "label": "branch",
+                    "display_label": "branch_1",
+                    "group_id": "tree_1",
+                    "box": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.5},
+                }
+            ],
+            inventory={
+                "objects": [
+                    {
+                        "id": "branch-1",
+                        "label": "branch",
+                        "display_label": "branch_1",
+                        "group_id": "tree_1",
+                        "box": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.5},
+                    }
+                ]
+            },
+        )
+        scrubbed = living._visual_plan(plan)
+        self.assertNotIn("display_label", json.dumps(scrubbed))
+        self.assertEqual(scrubbed["objects"][0]["group_id"], "tree_1")
+        renamed = json.loads(json.dumps(plan))
+        renamed["objects"][0]["display_label"] = "renamed"
+        renamed["inventory"]["objects"][0]["display_label"] = "renamed"
+        renamed["items"][0]["objects"][0]["display_label"] = "renamed"
+        self.assertEqual(living.visual_plan_hash(plan), living.visual_plan_hash(renamed))
+        regrouped = json.loads(json.dumps(plan))
+        regrouped["objects"][0]["group_id"] = "tree_2"
+        self.assertNotEqual(living.visual_plan_hash(plan), living.visual_plan_hash(regrouped))
+
+
+class SnowParticleTests(unittest.TestCase):
+    def test_snow_layers_use_shared_particle_sprites(self):
+        layers = living._make_snow_layers(320, 180, 4.0, 1234)
+        self.assertTrue(layers)
+        kinds = np.concatenate([layer["kinds"] for layer in layers])
+        self.assertGreater(int((kinds == 0).sum()), 0)
+        self.assertGreater(int((kinds == 1).sum()), 0)
+        self.assertIn("cloud", living.SUPPORTED_EFFECTS)
+        self.assertNotIn("leaf", living.SUPPORTED_EFFECTS)
+
+
+class CloudMotionTests(unittest.TestCase):
+    def cloud_plan(self, *, targets=("cloud-1",), protect=None):
+        return effect_plan(
+            [
+                {
+                    "effect": "cloud",
+                    "target_ids": list(targets),
+                    "params": {"intensity": 0.55, "billow": 0.7, "feather": 10},
+                }
+            ],
+            objects=[
+                object_entry(
+                    "cloud-1",
+                    "mây",
+                    (0.2, 0.15, 0.8, 0.55),
+                    affordances=["cloud_soft"],
+                )
+            ],
+            protect=protect or [],
+        )
+
+    def test_cloud_specs_warp_only_the_cloud_box_and_loop(self):
+        plan = self.cloud_plan()
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = np.ones((100, 100), dtype=np.float32)
+        specs = living._cloud_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        base = Image.new("RGB", (100, 100), (20, 40, 80))
+        draw = ImageDraw.Draw(base)
+        draw.rectangle([22, 17, 78, 53], fill=(150, 170, 200))
+        first = np.asarray(living._cloud_frame(base.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._cloud_frame(base.copy(), specs, 0.25), dtype=np.float32)
+        self.assertGreater(float(np.abs(second - first)[20:52, 25:75].mean()), 0.02)
+        # Pixels outside the feathered box are untouched.
+        self.assertTrue(np.array_equal(first[90:95, 5:15], second[90:95, 5:15]))
+        # Whole integer cycles -> the seam matches.
+        seam = np.asarray(living._cloud_frame(base.copy(), specs, 1.0), dtype=np.float32)
+        self.assertTrue(np.allclose(first, seam, atol=1e-3))
+
+    def test_cloud_is_protection_aware(self):
+        plan = effect_plan(
+            [
+                {
+                    "effect": "cloud",
+                    "target_ids": ["cloud-1"],
+                    "params": {"intensity": 0.55, "billow": 0.7, "feather": 8},
+                }
+            ],
+            objects=[
+                object_entry(
+                    "cloud-1",
+                    "mây",
+                    (0.1, 0.1, 0.9, 0.6),
+                    affordances=["cloud_soft"],
+                )
+            ],
+            protect=[{"label": "face", "box": {"x1": 0.35, "y1": 0.25, "x2": 0.55, "y2": 0.45}}],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        prevent = living._build_protect_mask(plan, transform, 100, 100)
+        specs = living._cloud_specs(
+            plan, transform, 100, 100, 4.0, 1234, prevent, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+        base = Image.new("RGB", (100, 100), (20, 40, 80))
+        draw = ImageDraw.Draw(base)
+        draw.rectangle([12, 12, 88, 58], fill=(150, 170, 200))
+        first = np.asarray(living._cloud_frame(base.copy(), specs, 0.0), dtype=np.float32)
+        second = np.asarray(living._cloud_frame(base.copy(), specs, 0.25), dtype=np.float32)
+        # The protected face box is pinned to the original pixels.
+        self.assertTrue(np.array_equal(first[30:44, 40:54], second[30:44, 40:54]))
+        # Cloud pixels away from the face still billow.
+        self.assertGreater(float(np.abs(second - first)[15:24, 20:80].mean()), 0.01)
+
+    def test_cloud_region_is_used_when_the_inventory_has_no_cloud_object(self):
+        plan = effect_plan(
+            [{"effect": "cloud", "target_ids": [], "params": {"intensity": 0.55}}],
+            regions=[
+                {
+                    "id": "cloud",
+                    "polygon": [
+                        {"x": 0.1, "y": 0.1},
+                        {"x": 0.9, "y": 0.1},
+                        {"x": 0.9, "y": 0.4},
+                        {"x": 0.1, "y": 0.4},
+                    ],
+                }
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        specs = living._cloud_specs(
+            plan, transform, 100, 100, 4.0, 1234, None, lambda _m: None
+        )
+        self.assertEqual(len(specs), 1)
+
+    def test_cloud_item_without_any_cloud_region_is_a_noop(self):
+        plan = effect_plan(
+            [{"effect": "cloud", "target_ids": [], "params": {"intensity": 0.55}}],
+            objects=[object_entry("boat-1", "boat", (0.1, 0.1, 0.4, 0.4))],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        logs: list[str] = []
+        self.assertEqual(
+            living._cloud_specs(
+                plan, transform, 100, 100, 4.0, 1234, np.ones((100, 100)), logs.append
+            ),
+            [],
+        )
+        self.assertTrue(any("mây" in message for message in logs))
+
+
+class BranchWindTests(unittest.TestCase):
+    def branch(self, object_id, box, *, group=None, label="branch"):
+        entry = object_entry(
+            object_id,
+            label,
+            box,
+            affordances=["branch", "wind_movable"],
+            pivot=((box[0] + box[2]) / 2.0, box[3]),
+        )
+        if group:
+            entry["group_id"] = group
+        return entry
+
+    def test_targeting_one_branch_moves_the_whole_group(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["branch-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                self.branch("branch-1", (0.1, 0.2, 0.4, 0.6), group="tree_1"),
+                self.branch("branch-2", (0.5, 0.15, 0.9, 0.55), group="tree_1"),
+            ],
+            selected_object_ids=["branch-1"],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, np.ones((100, 100)), lambda _m: None
+        )
+        self.assertEqual({spec["id"] for spec in specs}, {"branch-1", "branch-2"})
+        self.assertTrue(all(spec["branch"] for spec in specs))
+        self.assertFalse(any(spec["cloth"] for spec in specs))
+
+    def test_nearby_branches_without_group_id_are_grouped_conservatively(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["branch-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                self.branch("branch-1", (0.10, 0.20, 0.40, 0.50)),
+                self.branch("branch-2", (0.35, 0.15, 0.65, 0.45)),
+                self.branch("branch-3", (0.85, 0.70, 0.98, 0.90)),
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, np.ones((100, 100)), lambda _m: None
+        )
+        self.assertEqual({spec["id"] for spec in specs}, {"branch-1", "branch-2"})
+
+    def test_plain_tree_target_is_skipped_instead_of_rotating_the_tree(self):
+        plan = effect_plan(
+            [{"effect": "wind", "target_ids": ["tree-1"], "params": {"intensity": 0.35}}],
+            objects=[
+                {
+                    **object_entry(
+                        "tree-1",
+                        "tree",
+                        (0.2, 0.1, 0.7, 0.9),
+                        affordances=["wind_movable"],
+                    )
+                }
+            ],
+        )
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        logs: list[str] = []
+        specs = living._wind_specs(
+            plan, transform, 100, 100, 4.0, 1234, np.ones((100, 100)), logs.append
+        )
+        self.assertEqual(specs, [])
+        self.assertTrue(any("thân/cây" in message for message in logs))
+
+    def test_selection_list_limits_untargeted_wind_but_legacy_plans_still_use_all(self):
+        objects = [
+            self.branch("branch-1", (0.1, 0.2, 0.4, 0.6), group="tree_1"),
+            self.branch("branch-2", (0.5, 0.15, 0.9, 0.55), group="tree_1"),
+        ]
+        selected_plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.35}}],
+            objects=objects,
+            selected_object_ids=["branch-1"],
+        )
+        transform = living._fit_transform(selected_plan, (100, 100), (100, 100), "contain")
+        specs = living._wind_specs(
+            selected_plan, transform, 100, 100, 4.0, 1234, np.ones((100, 100)), lambda _m: None
+        )
+        self.assertEqual({spec["id"] for spec in specs}, {"branch-1"})
+
+        legacy_plan = effect_plan(
+            [{"effect": "wind", "target_ids": [], "params": {"intensity": 0.35}}],
+            objects=objects,
+        )
+        specs = living._wind_specs(
+            legacy_plan, transform, 100, 100, 4.0, 1234, np.ones((100, 100)), lambda _m: None
+        )
+        self.assertEqual({spec["id"] for spec in specs}, {"branch-1", "branch-2"})
+
+
+class EmberLookTests(unittest.TestCase):
+    def ember_plan(self, **params):
+        return effect_plan(
+            [{"effect": "embers", "target_ids": [], "params": {"intensity": 0.6, **params}}],
+            objects=[
+                object_entry(
+                    "fire-1",
+                    "fire",
+                    (0.4, 0.5, 0.6, 0.8),
+                    affordances=["burn"],
+                )
+            ],
+        )
+
+    def spec(self, **params):
+        plan = self.ember_plan(**params)
+        transform = living._fit_transform(plan, (100, 100), (100, 100), "contain")
+        return living._embers_spec(
+            plan, transform, 100, 100, 4.0, np.ones((100, 100)), 1234, lambda _m: None
+        )
+
+    def test_default_mix_has_sparks_and_ash(self):
+        spec = self.spec()
+        kinds = {particle["kind"] for particle in spec["particles"]}
+        self.assertIn("spark", kinds)
+        self.assertIn("ash", kinds)
+
+    def test_ash_ratio_zero_is_all_sparks_and_hundred_is_all_ash(self):
+        sparks = self.spec(ash_ratio=0)
+        self.assertTrue(all(p["kind"] == "spark" for p in sparks["particles"]))
+        ash = self.spec(ash_ratio=100)
+        self.assertTrue(all(p["kind"] == "ash" for p in ash["particles"]))
+
+    def test_sparks_do_not_saturate_to_white_bubbles(self):
+        spec = self.spec(ash_ratio=0)
+        frame = np.zeros((100, 100, 3), dtype=np.float32)
+        rendered = living._apply_embers(frame, spec, 0.1, {})
+        # A white bubble would have every channel high. The warm core caps blue
+        # well below the red channel even where the core is brightest.
+        self.assertGreater(float(rendered[:, :, 0].max()), 0.0)
+        self.assertLess(float(rendered.min(axis=2).max()), 220.0)
+        self.assertGreater(
+            float(rendered[:, :, 0].max()), float(rendered[:, :, 2].max())
+        )
+        bright = np.full((100, 100, 3), 230.0, dtype=np.float32)
+        bright_rendered = living._apply_embers(bright, spec, 0.1, {})
+        self.assertEqual(int((bright_rendered.min(axis=2) > 250.0).sum()), 0)
+
+    def test_glow_zero_keeps_the_effect_dim(self):
+        dim = self.spec(glow=0, ash_ratio=0)
+        bright = self.spec(glow=100, ash_ratio=0)
+        frame = np.zeros((100, 100, 3), dtype=np.float32)
+        dim_frame = living._apply_embers(frame.copy(), dim, 0.15, {})
+        bright_frame = living._apply_embers(frame.copy(), bright, 0.15, {})
+        self.assertGreater(float(bright_frame.sum()), float(dim_frame.sum()))

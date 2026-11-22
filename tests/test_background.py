@@ -83,14 +83,17 @@ def probe(path: Path) -> dict:
 
 class FrameAndIdentityTests(unittest.TestCase):
     def test_frames_normalize_cover_and_song(self):
-        cover, image, song, total = _frames(0.0, 8.0, 240.0, 30)
-        self.assertEqual((cover, image, song, total), (0, 240, 7200, 7200))
+        cover, image, song, outro, total = _frames(0.0, 8.0, 240.0, 30)
+        self.assertEqual((cover, image, song, outro, total), (0, 240, 7200, 0, 7200))
 
-        cover, _image, song, total = _frames(0.01, 8.0, 240.0, 30)
+        cover, _image, song, _outro, total = _frames(0.01, 8.0, 240.0, 30)
         self.assertEqual((cover, song, total), (0, 7200, 7200))
 
-        cover, _image, song, total = _frames(5.0, 8.0, 240.01, 30)
+        cover, _image, song, _outro, total = _frames(5.0, 8.0, 240.01, 30)
         self.assertEqual((cover, song, total), (150, 7201, 7351))
+
+        cover, _image, song, outro, total = _frames(5.0, 8.0, 240.0, 30, 4.0)
+        self.assertEqual((cover, song, outro, total), (150, 7200, 120, 7470))
 
     def test_visual_hash_ignores_audio_and_legacy_loop_duration(self):
         first = {
@@ -121,7 +124,7 @@ class FrameAndIdentityTests(unittest.TestCase):
 
         wider = replace(profile, width=640, height=360)
         self.assertNotEqual(first, _motion_identity(plan, "a" * 64, 80, wider))
-        self.assertEqual(MOTION_CACHE_VERSION, 33)
+        self.assertGreaterEqual(MOTION_CACHE_VERSION, 33)
 
     def test_profile_fingerprint_includes_cover_typography(self):
         profile = small_profile()

@@ -28,6 +28,7 @@ import requests
 from PIL import Image, ImageOps
 
 from karaoke.cache import cache_root, prune
+from karaoke.presentation import normalize_plan_objects
 from karaoke.profiles import normalize_profile_id
 
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -100,6 +101,14 @@ boats/ships, sails, masts, flags, ropes, wooden stakes/posts, fire/flames, smoke
 embers, birds or flocks of birds (including distant silhouettes), the sun or the
 brightest light source (with the direction its rays fall), food, bowls/pots, lanterns,
 curtains, plants, liquid surfaces, sky, ground.
+Also identify tree branches, boughs, foliage clusters and vines that can sway: return
+each large branch as its own object and give branches of the same tree a shared
+`group_id` (for example `tree_1`). Put `pivot_2d` at the branch attachment point on
+the trunk/parent branch, never in the middle of the canopy. If a canopy is one
+continuous mass, return a single foliage object (group_id may be empty). Keep branch
+objects to at most 1-2 per tree and only when large and clearly visible; they must not
+crowd out faces, fire or main objects. Use affordances `wind_movable`, `branch` and/or
+`foliage`.
 Also identify wearable/clothing parts that can flutter in wind when they are visible
 and distinct enough to animate: headbands, bandanas, scarves/turbans and their trailing
 ends, loose hair strands/ponytails/braids, coat/robe/cape/sleeve/hem flaps, sashes and
@@ -122,6 +131,7 @@ pivot in the middle of a flag or a trailing scarf.
 For each object return:
 - id: a short stable slug,
 - label: a short lowercase English label,
+- group_id (optional): shared group for branches/foliage of the same tree,
 - box_2d: [ymin, xmin, ymax, xmax] on a 0..1000 grid,
 - pivot_2d (optional): [x, y] on the same grid, the support/attachment point,
 - opening_2d (optional): [x, y] on the same grid, the top opening where vapor or flow emerges,
@@ -154,6 +164,7 @@ _INVENTORY_SCHEMA = {
                 "properties": {
                     "id": {"type": "STRING"},
                     "label": {"type": "STRING"},
+                    "group_id": {"type": "STRING"},
                     "box_2d": {"type": "ARRAY", "items": {"type": "NUMBER"}},
                     "pivot_2d": {"type": "ARRAY", "items": {"type": "NUMBER"}},
                     "opening_2d": {"type": "ARRAY", "items": {"type": "NUMBER"}},
@@ -696,6 +707,9 @@ def normalize_inventory(payload: dict) -> dict:
             {
                 "id": object_id,
                 "label": label,
+                "group_id": _clean_text(
+                    _first_value(item, "group_id", "group") or ""
+                )[:80],
                 "box": box,
                 "anchors": {"pivot": pivot, "opening": opening},
                 "affordances": affordances,
@@ -725,13 +739,21 @@ def normalize_inventory(payload: dict) -> dict:
 
     scene = _clean_text(payload.get("scene"))
     style = _clean_text(payload.get("style"))
-    return {
+    inventory = {
         "scene": scene or style,
         "style": style,
         "objects": objects,
         "regions": regions,
         "protect": protect,
     }
+    # Display labels are numbered by reading order (box.y1, box.x1) inside the
+    # helper; the list keeps payload order so existing object selection/assets
+    # stay stable. group_id is carried through untouched.
+    normalized = normalize_plan_objects(inventory)
+    normalized["objects"] = [
+        entry for entry in normalized.get("objects") or [] if isinstance(entry, dict)
+    ]
+    return normalized
 
 
 def _effect_type(value: Any) -> str | None:
@@ -1019,7 +1041,7 @@ def _target_ids(labels: list[str], objects: list[dict]) -> list[str]:
                 needles.update(values)
         for item in objects:
             haystack = (
-                f"{item.get('label', '')} {item.get('id', '')}"
+                f"{item.get('label', '')} {item.get('display_label', '')} {item.get('id', '')}"
                 .casefold()
                 .replace("_", " ")
                 .replace("-", " ")
@@ -1052,6 +1074,14 @@ def build_effect_plan(
     height: int,
     output_profile: str = PROFILE_ID,
 ) -> dict:
+    prepared = normalize_plan_objects(
+        {
+            "objects": [dict(item) for item in objects],
+            "regions": [dict(item) for item in regions],
+            "protect": [dict(item) for item in protect],
+        }
+    )
+    prepared_objects = prepared.get("objects") or []
     items: list[dict] = []
     seen: set[str] = set()
     for effect in intent.get("effects") or []:
@@ -1062,7 +1092,9 @@ def build_effect_plan(
         items.append(
             {
                 "effect": effect_type,
-                "target_ids": _target_ids(_clean_list(effect.get("target_labels")), objects),
+                "target_ids": _target_ids(
+                    _clean_list(effect.get("target_labels")), prepared_objects
+                ),
                 "params": {
                     "intensity": _intensity(effect.get("intensity")),
                     # Second-axis controls; renderers treat 1.0 as the default.
@@ -1073,16 +1105,18 @@ def build_effect_plan(
                 },
             }
         )
-    return {
-        "version": 1,
-        "image_hash": image_hash,
-        "profile_id": normalize_profile_id(output_profile),
-        "fit_transform": build_fit_transform(width, height),
-        "objects": [dict(item) for item in objects],
-        "regions": [dict(item) for item in regions],
-        "protect": [dict(item) for item in protect],
-        "items": items,
-    }
+    return normalize_plan_objects(
+        {
+            "version": 1,
+            "image_hash": image_hash,
+            "profile_id": normalize_profile_id(output_profile),
+            "fit_transform": build_fit_transform(width, height),
+            "objects": prepared_objects,
+            "regions": prepared.get("regions") or [],
+            "protect": prepared.get("protect") or [],
+            "items": items,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1230,7 +1264,9 @@ def _merge_inventory(base: dict, extra: dict) -> dict:
             for existing in merged["protect"]
         ):
             merged["protect"].append(dict(item))
-    return merged
+    # Re-number display labels after the merge: the focused pass can add a
+    # second object with the same semantic label (flag_1/flag_2).
+    return normalize_plan_objects(merged)
 
 
 WIND_FOCUS_HINTS = (
@@ -1258,6 +1294,17 @@ WIND_FOCUS_HINTS = (
     "sash",
     "ribbon",
     "garment",
+    # Branches/foliage: `tree`/`cây` just hint the focused pass to look for the
+    # branches of that tree; they are not wind targets themselves.
+    "cành",
+    "cành cây",
+    "tán lá",
+    "vòm lá",
+    "branch",
+    "bough",
+    "foliage",
+    "tree",
+    "cây",
 )
 
 
@@ -1265,7 +1312,15 @@ def _wind_focus_candidate(label: str) -> bool:
     text = _clean_text(label).casefold()
     if not text or text in {"gió", "gio", "wind", "air", "không khí"}:
         return False
-    return any(hint in text for hint in WIND_FOCUS_HINTS)
+    for hint in WIND_FOCUS_HINTS:
+        if hint.isascii() and hint.isalpha():
+            # Whole-word match avoids "street" matching "tree".
+            if re.search(rf"(?<![a-z]){re.escape(hint)}(?![a-z])", text):
+                return True
+            continue
+        if hint in text:
+            return True
+    return False
 
 
 def _unresolved_wind_targets(intent: dict, objects: list[dict]) -> list[str]:

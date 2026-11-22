@@ -9,6 +9,13 @@ from karaoke.access import AccessError, ensure_allowed, grant
 from karaoke.errors import JobError
 from karaoke.media import safe_title
 from karaoke.mix import default_mix_settings, parse_mix_settings
+from karaoke.presentation import (
+    normalize_overlay_effects,
+    normalize_plan_objects,
+    normalize_presentation,
+    normalize_typography,
+    normalize_waveform,
+)
 from karaoke.profiles import normalize_profile_id
 
 
@@ -17,7 +24,7 @@ def _normalize_lines(lines: list[dict]) -> list[dict]:
 
     return normalize_edited_lines(lines)
 
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 PROJECT_SUFFIX = ".karaoke.json"
 STATUSES = frozenset({"draft", "aligned", "exported"})
 
@@ -81,6 +88,7 @@ def _effects_list(value: Any) -> list[dict]:
         effect = dict(item)
         plan = effect.get("effect_plan")
         plan = dict(plan) if isinstance(plan, dict) else {}
+        plan = normalize_plan_objects(plan)
         items = plan.get("items")
         plan["items"] = (
             [entry for entry in items if isinstance(entry, dict)]
@@ -106,6 +114,10 @@ def empty_project() -> dict:
         "cover_image": "",
         "background_images": [],
         "background_effects": [],
+        "overlay_effects": [],
+        "waveform": normalize_waveform({}),
+        "presentation": normalize_presentation({}),
+        "typography": normalize_typography({}),
         "background_render": None,
         "output_profile": "landscape_1080p",
         "output_dir": "",
@@ -153,6 +165,10 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     project["cover_image"] = str(payload.get("cover_image") or "").strip()
     project["background_images"] = _string_list(payload.get("background_images"))
     project["background_effects"] = _effects_list(payload.get("background_effects"))
+    project["overlay_effects"] = normalize_overlay_effects(payload.get("overlay_effects"))
+    project["waveform"] = normalize_waveform(payload.get("waveform"))
+    project["presentation"] = normalize_presentation(payload.get("presentation"))
+    project["typography"] = normalize_typography(payload.get("typography"))
     raw_background = payload.get("background_render")
     project["background_render"] = dict(raw_background) if isinstance(raw_background, dict) else None
     project["output_profile"] = normalize_profile_id(payload.get("output_profile"))
@@ -195,6 +211,10 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "cover_image": project.get("cover_image") or "",
         "background_images": list(project.get("background_images") or []),
         "background_effects": _effects_list(project.get("background_effects")),
+        "overlay_effects": normalize_overlay_effects(project.get("overlay_effects")),
+        "waveform": normalize_waveform(project.get("waveform")),
+        "presentation": normalize_presentation(project.get("presentation")),
+        "typography": normalize_typography(project.get("typography")),
         "background_render": (
             dict(project["background_render"])
             if isinstance(project.get("background_render"), dict)
@@ -379,6 +399,10 @@ def prepared_from_project(project: dict) -> dict:
         "instrumental_audio": str(project.get("instrumental_audio") or "").strip(),
         "background_images": list(project.get("background_images") or []),
         "background_effects": _effects_list(project.get("background_effects")),
+        "overlay_effects": normalize_overlay_effects(project.get("overlay_effects")),
+        "waveform": normalize_waveform(project.get("waveform")),
+        "presentation": normalize_presentation(project.get("presentation")),
+        "typography": normalize_typography(project.get("typography")),
         "background_render": (
             dict(project["background_render"])
             if isinstance(project.get("background_render"), dict)
