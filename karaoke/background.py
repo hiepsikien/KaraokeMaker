@@ -1060,7 +1060,7 @@ def _plan_background(
     outro_photo = Path(outro_image_text).expanduser() if outro_image_text else cover_photo
     outro_digest = (
         _file_digest(outro_photo)
-        if outro_photo is not None and outro_photo.is_file()
+        if outro_frames > 0 and outro_photo is not None and outro_photo.is_file()
         else ""
     )
     base_payload = {

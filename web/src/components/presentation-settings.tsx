@@ -188,6 +188,10 @@ export function PresentationSettings({
 
   useEffect(() => {
     if (!coverImage) {
+      if (previewRef.current) {
+        URL.revokeObjectURL(previewRef.current);
+        previewRef.current = "";
+      }
       setPreviewUrl("");
       setPreviewError("");
       return;

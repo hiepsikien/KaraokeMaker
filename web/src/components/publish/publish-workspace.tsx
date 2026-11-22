@@ -176,7 +176,8 @@ export function PublishWorkspace() {
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (!event.origin.startsWith("http://127.0.0.1:8765") && !event.origin.startsWith("http://localhost:8765")) {
+      const allowedOrigins = new Set(["http://127.0.0.1:8765", "http://localhost:8765"]);
+      if (!allowedOrigins.has(event.origin)) {
         return;
       }
       if (event.data && typeof event.data === "object" && event.data.type === "karaoke:publish-connected") {

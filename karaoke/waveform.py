@@ -613,6 +613,25 @@ def render_waveform_clip(
     song_start = cover
     song_end = cover + song
 
+    clip_cover_frames = max(0, int(round(cover * fps)))
+    clip_song_frames = max(1, int(round(song * fps)))
+    clip_outro_frames = max(0, int(round(outro * fps)))
+    identity = waveform_identity(
+        config,
+        Path(audio),
+        profile_obj,
+        clip_cover_frames,
+        clip_song_frames,
+        clip_outro_frames,
+    )
+    suffix = ".mov" if not opaque else ".mp4"
+    cached = _cache_dir() / f"clip-{identity}{suffix}"
+    if cached.is_file() and cached.stat().st_size > 0:
+        _log(log, "Dùng lại clip waveform đã có.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cached, destination)
+        return destination
+
     _log(log, f"Đang giải mã peaks waveform ({peaks['count']} mốc).")
     if opaque:
         command = [
@@ -730,5 +749,12 @@ def render_waveform_clip(
         raise WaveformError(f"Không dựng được clip waveform: {message}")
     if not destination.is_file() or destination.stat().st_size <= 0:
         raise WaveformError("Không tạo được clip waveform.")
-    _log(log, f"Đã dựng waveform: {destination.name}.")
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cached.with_name(f".{cached.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(destination, temporary)
+        os.replace(temporary, cached)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _log(log, f"Đã dựng waveform: {cached.name}.")
     return destination

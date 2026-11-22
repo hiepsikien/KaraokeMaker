@@ -332,8 +332,17 @@ def _compose_card(
     blocks: list[tuple[str, ImageFont.FreeTypeFont, tuple[int, int, int, int], bool]] = []
     label_font = load_font(max(14, int(profile.cover_artist_size * 0.45)))
     if label:
+        label_text = label.upper()
+        spacing = max(1, int(label_font.size * 0.16))
+        while label_font.size > 10:
+            label_width = sum(draw.textlength(char, font=label_font) for char in label_text)
+            label_width += spacing * max(0, len(label_text) - 1)
+            if label_width <= max_width:
+                break
+            label_font = load_font(max(10, int(label_font.size * 0.9)))
+            spacing = max(1, int(label_font.size * 0.16))
         blocks.append((
-            label.upper(),
+            label_text,
             label_font,
             _hex_rgba(style.get("accent_color", "#e7b15a")),
             True,
@@ -343,9 +352,11 @@ def _compose_card(
             continue
         font_size = size if size and size > 0 else profile.cover_title_size
         font = load_font(font_size)
-        # Auto-fit: a single long word must not spill past the card.
+        measure_text = str(text).upper() if uppercase else str(text)
+        # Auto-fit: a single long word must not spill past the card. Measure
+        # the actual rendered case (uppercase is often wider).
         for _ in range(12):
-            words = str(text).split()
+            words = measure_text.split()
             widest = max((draw.textlength(word, font=font) for word in words), default=0)
             if widest <= max_width or font_size <= 12:
                 break

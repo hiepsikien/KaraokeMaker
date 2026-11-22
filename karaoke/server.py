@@ -1459,13 +1459,13 @@ def presentation_cover_preview(body: CoverPreviewRequest):
             os.replace(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
-        try:
-            cutoff = time.time() - 7 * 86400
-            for old in cache_dir.glob("cover-*.png"):
-                if old.is_file() and old.stat().st_mtime < cutoff:
-                    old.unlink(missing_ok=True)
-        except OSError:
-            pass
+    try:
+        cutoff = time.time() - 7 * 86400
+        for old in cache_dir.glob("cover-*.png"):
+            if old.is_file() and old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+    except OSError:
+        pass
     return FileResponse(destination, media_type="image/png", filename="cover.png")
 
 
