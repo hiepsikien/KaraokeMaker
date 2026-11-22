@@ -343,6 +343,14 @@ def _compose_card(
             continue
         font_size = size if size and size > 0 else profile.cover_title_size
         font = load_font(font_size)
+        # Auto-fit: a single long word must not spill past the card.
+        for _ in range(12):
+            words = str(text).split()
+            widest = max((draw.textlength(word, font=font) for word in words), default=0)
+            if widest <= max_width or font_size <= 12:
+                break
+            font_size = max(12, int(font_size * 0.9))
+            font = load_font(font_size)
         for line, _font, _fill in _card_blocks(draw, str(text), font, fill, max_width, uppercase):
             blocks.append((line, font, fill, False))
     if not blocks:

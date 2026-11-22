@@ -1,22 +1,15 @@
 """FastAPI router for the publish feature.
 
-This module is intentionally **not** imported by ``karaoke/server.py``. Wire it
-in once the rest of the branch is ready::
-
-    from karaoke.publish.router import router as publish_router
-    app.include_router(publish_router)
-
-All routes are prefixed with ``/api/publish``.
+Registered by ``karaoke/server.py`` via ``app.include_router``. All routes are
+prefixed with ``/api/publish``.
 """
 
 from __future__ import annotations
 
-import os
-import urllib.parse
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from karaoke.publish.oauth import callback_html
@@ -138,14 +131,7 @@ def oauth_callback(
                 status_code=400,
             )
         raise
-    # The Next.js app expects ``/publish?connected=1`` after the backend
-    # callback. ``KARAOKEMAKER_WEB_URL`` lets a non-default UI port override it.
-    web_base = (
-        os.environ.get("KARAOKEMAKER_WEB_URL", "").strip()
-        or "http://127.0.0.1:3000"
-    ).rstrip("/")
-    query = urllib.parse.urlencode({"connected": "1"})
-    return RedirectResponse(f"{web_base}/publish?{query}", status_code=302)
+    return HTMLResponse(callback_html(ok=True, message="Đã kết nối kênh YouTube."))
 
 
 @router.delete("/channels/{provider}")

@@ -175,6 +175,17 @@ export function PublishWorkspace() {
   }, []);
 
   useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.data && typeof event.data === "object" && event.data.type === "karaoke:publish-connected") {
+        void loadChannels();
+        void loadVideos();
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
     if (!youtubeConnected) {
       setPlaylists([]);
       return;

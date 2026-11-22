@@ -120,7 +120,6 @@ class PublishService:
         return {
             "provider": "youtube",
             "url": request["url"],
-            "state": request["state"],
             "redirect_uri": request["redirect_uri"],
         }
 

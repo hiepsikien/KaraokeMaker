@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
+
 import { Field, Select, TextInput } from "@/components/ui/field";
 import { SectionTitle } from "@/components/ui/primitives";
 import type { Presentation, Typography } from "@/lib/types";
@@ -149,6 +151,11 @@ export function PresentationSettings({
   onTypographyChange,
   onBrowseOutro,
   outroBusy = false,
+  coverImage = "",
+  title = "",
+  artist = "",
+  coverLine = "",
+  outputProfile = "landscape_1080p",
 }: {
   presentation: Presentation;
   typography: Typography;
@@ -156,10 +163,66 @@ export function PresentationSettings({
   onTypographyChange: (updater: (current: Typography) => Typography) => void;
   onBrowseOutro?: () => void;
   outroBusy?: boolean;
+  coverImage?: string;
+  title?: string;
+  artist?: string;
+  coverLine?: string;
+  outputProfile?: string;
 }) {
   const cover = presentation.cover;
   const interlude = presentation.interlude;
   const outro = presentation.outro;
+  const presentationKey = JSON.stringify(presentation.cover);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const previewRef = useRef("");
+
+  useEffect(() => {
+    if (!coverImage) {
+      setPreviewUrl("");
+      setPreviewError("");
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setPreviewBusy(true);
+      setPreviewError("");
+      try {
+        const response = await fetch("/api/presentation/cover-preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image_path: coverImage,
+            title,
+            artist,
+            cover_line: coverLine,
+            output_profile: outputProfile,
+            presentation,
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("preview");
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        if (previewRef.current) URL.revokeObjectURL(previewRef.current);
+        previewRef.current = url;
+        setPreviewUrl(url);
+      } catch (error) {
+        if (!controller.signal.aborted) setPreviewError("Chưa render được preview bìa.");
+      } finally {
+        if (!controller.signal.aborted) setPreviewBusy(false);
+      }
+    }, 450);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [coverImage, title, artist, coverLine, outputProfile, presentationKey]);
+
+  useEffect(() => () => {
+    if (previewRef.current) URL.revokeObjectURL(previewRef.current);
+  }, []);
 
   function patchCover(patch: Partial<Presentation["cover"]>) {
     onPresentationChange((current) => ({ ...current, cover: { ...current.cover, ...patch } }));
@@ -184,6 +247,26 @@ export function PresentationSettings({
     <div className="space-y-5">
       <section className="space-y-3">
         <SectionTitle>Trang bìa</SectionTitle>
+        {coverImage ? (
+          <div className="relative overflow-hidden rounded-xl border border-[var(--line)] bg-black/40">
+            <div className="aspect-video w-full">
+              {previewUrl ? (
+                <img src={previewUrl} alt="Preview trang bìa" className="h-full w-full object-contain" />
+              ) : (
+                <div className="flex h-full items-center justify-center text-xs text-[var(--muted)]">
+                  {previewBusy ? "Đang render preview…" : previewError || "Chưa có preview."}
+                </div>
+              )}
+            </div>
+            <span className="absolute bottom-2 right-2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] text-[var(--muted)]">
+              {previewBusy ? "Đang cập nhật…" : "Preview bìa"}
+            </span>
+          </div>
+        ) : (
+          <p className="rounded-xl border border-dashed border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)]">
+            Chọn ảnh bìa để xem preview.
+          </p>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Bố cục">
             <Select value={cover.layout} onChange={(event) => patchCover({ layout: event.target.value })}>
@@ -349,15 +432,6 @@ export function PresentationSettings({
               onChange={(value) => patchInterlude({ show_next_line: value })}
             />
           </div>
-          <SliderField
-            label="Fade"
-            value={interlude.fade}
-            min={0}
-            max={2}
-            step={0.1}
-            suffix="s"
-            onChange={(value) => patchInterlude({ fade: value })}
-          />
         </div>
       </section>
 
@@ -440,15 +514,6 @@ export function PresentationSettings({
               onChange={(value) => patchOutro({ show_artist: value })}
             />
           </div>
-          <SliderField
-            label="Fade"
-            value={outro.fade}
-            min={0}
-            max={2}
-            step={0.1}
-            suffix="s"
-            onChange={(value) => patchOutro({ fade: value })}
-          />
         </div>
       </section>
 

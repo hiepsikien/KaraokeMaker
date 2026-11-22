@@ -402,6 +402,7 @@ def _browse_script(kind: str, directory: str) -> str:
         "vocal": "Chọn file vocal",
         "instrumental": "Chọn file instrumental",
         "cover": "Chọn ảnh bìa",
+        "outro": "Chọn ảnh trang kết",
         "images": "Chọn ảnh nền",
         "output": "Chọn thư mục xuất",
         "timing": "Chọn file thời gian đã lưu",
@@ -424,6 +425,11 @@ return output
     if kind == "project":
         return f'''
 set picked to choose file with prompt "{prompt}" of type {{"public.json", "JSON"}} default location POSIX file "{location}"
+return POSIX path of picked
+'''
+    if kind in {"cover", "outro"}:
+        return f'''
+set picked to choose file with prompt "{prompt}" of type {{"public.image"}} default location POSIX file "{location}"
 return POSIX path of picked
 '''
     return f'''
@@ -1438,7 +1444,7 @@ def presentation_cover_preview(body: CoverPreviewRequest):
     ).hexdigest()[:24]
     destination = cache_dir / f"cover-{key}.png"
     if not destination.is_file():
-        temporary = destination.with_suffix(".tmp.png")
+        temporary = cache_dir / f".cover-{key}.{os.getpid()}.{uuid.uuid4().hex}.tmp.png"
         try:
             make_cover(
                 photo,

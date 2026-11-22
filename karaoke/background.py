@@ -1063,19 +1063,27 @@ def _plan_background(
         "segment_encoder_version": SEGMENT_ENCODER_VERSION,
         "order": [unique[key]["clip_identity"] for key in order],
         "cover": cover_id,
+        "outro": presentation.get("outro") or {},
         "profile": profile_id,
         "total_frames": total_frames,
         "cover_frames": cover_frames,
         "song_frames": song_frames,
         "image_frames": image_frames,
         "outro_frames": outro_frames,
-        "presentation": presentation,
     }
     base_hex = _sha256_text(_canonical(base_payload))
+    try:
+        from karaoke.overlays import OVERLAY_ENCODER_VERSION
+        from karaoke.particles import PARTICLE_VERSION
+    except Exception:
+        OVERLAY_ENCODER_VERSION = 1
+        PARTICLE_VERSION = 1
     overlay_payload = {
         "base": base_hex,
         "overlay_effects": overlay_effects,
-        "version": OVERLAY_RENDER_VERSION,
+        "overlay_version": OVERLAY_RENDER_VERSION,
+        "overlay_encoder": OVERLAY_ENCODER_VERSION,
+        "particle_version": PARTICLE_VERSION,
     }
     overlay_hex = _sha256_text(_canonical(overlay_payload))
     identity_hex = _sha256_text(_canonical({"base": base_hex, "overlay": overlay_hex}))
@@ -1415,9 +1423,26 @@ def _build_background_impl(
                             final_temp = Path(overlay_path)
                     except Exception as error:
                         overlay_degraded = True
-                        degraded = True
                         log(f"Không áp được hiệu ứng thêm: {error}. Dùng nền gốc.")
                         final_temp = temporary
+                    if overlay_degraded:
+                        degraded = True
+                    if final_temp != temporary:
+                        valid_overlay, overlay_reason = _validate_background(
+                            final_temp,
+                            width=profile.width,
+                            height=profile.height,
+                            fps=profile.fps,
+                            total_frames=total_frames,
+                        )
+                        if not valid_overlay:
+                            overlay_degraded = True
+                            degraded = True
+                            log(
+                                f"Hiệu ứng thêm không hợp lệ ({overlay_reason}); dùng nền gốc."
+                            )
+                            final_temp.unlink(missing_ok=True)
+                            final_temp = temporary
                 os.replace(final_temp, target)
                 log(
                     f"Hiệu ứng: {clip_seconds:.1f}s (cache {cache_hits}/{len(unique) + (1 if cover_path else 0)}), "
@@ -1828,23 +1853,9 @@ def render_videos(
         waveform_plan = dict(waveform or {})
         if waveform_plan.get("enabled"):
             try:
-                from karaoke.waveform import render_waveform_clip, waveform_identity
+                from karaoke.waveform import waveform_identity
 
                 source_audio = instrumental_audio if waveform_plan.get("source") != "original" else original_audio
-                waveform_path = work / "waveform.mp4"
-                cover_seconds = build.cover_frames / build.fps
-                song_seconds = build.song_frames / build.fps
-                outro_seconds = build.outro_frames / build.fps
-                waveform_path = render_waveform_clip(
-                    waveform_plan,
-                    source_audio,
-                    profile,
-                    cover_seconds,
-                    song_seconds,
-                    outro_seconds,
-                    waveform_path,
-                    log,
-                )
                 waveform_hash = waveform_identity(
                     waveform_plan,
                     source_audio,
@@ -1854,8 +1865,7 @@ def render_videos(
                     build.outro_frames,
                 )
             except Exception as error:
-                log(f"Không tạo được waveform: {error}")
-                waveform_path = None
+                log(f"Không tính được waveform: {error}")
                 waveform_hash = ""
 
         picture_identity = _picture_identity(
@@ -1884,6 +1894,28 @@ def render_videos(
                 f".{picture_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp.mp4"
             )
             try:
+                if waveform_plan.get("enabled") and waveform_hash:
+                    try:
+                        from karaoke.waveform import render_waveform_clip
+
+                        source_audio = (
+                            instrumental_audio
+                            if waveform_plan.get("source") != "original"
+                            else original_audio
+                        )
+                        waveform_path = render_waveform_clip(
+                            waveform_plan,
+                            source_audio,
+                            profile,
+                            build.cover_frames / build.fps,
+                            build.song_frames / build.fps,
+                            build.outro_frames / build.fps,
+                            work / "waveform.mp4",
+                            log,
+                        )
+                    except Exception as error:
+                        log(f"Không tạo được waveform: {error}")
+                        waveform_path = None
                 render_picture(
                     build,
                     lines,

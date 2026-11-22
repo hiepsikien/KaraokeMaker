@@ -54,7 +54,11 @@ export function ProjectSetup({
 }) {
   const { openSettings } = useSettings();
   const [effectsOpen, setEffectsOpen] = useState(false);
-  const closeEffects = useCallback(() => setEffectsOpen(false), []);
+  const [effectsManual, setEffectsManual] = useState(false);
+  const closeEffects = useCallback(() => {
+    setEffectsOpen(false);
+    setEffectsManual(false);
+  }, []);
 
   const lines = useMemo(() => sungCount(fields.lyrics), [fields.lyrics]);
   const stemsReady = Boolean(fields.vocal_audio && fields.instrumental_audio);
@@ -327,7 +331,10 @@ export function ProjectSetup({
                 overlay_effects: updater(Array.isArray(current.overlay_effects) ? current.overlay_effects : []),
               }))
             }
-            onDrawCloud={() => setEffectsOpen(true)}
+            onDrawCloud={() => {
+              setEffectsManual(true);
+              setEffectsOpen(true);
+            }}
           />
         </Disclosure>
 
@@ -404,6 +411,11 @@ export function ProjectSetup({
             }
             onBrowseOutro={() => onBrowse("outro")}
             outroBusy={busyBrowse === "outro"}
+            coverImage={fields.cover_image || fields.background_images[0] || ""}
+            title={fields.title}
+            artist={fields.artist}
+            coverLine={fields.cover_line}
+            outputProfile={fields.output_profile}
           />
         </Disclosure>
 
@@ -548,6 +560,7 @@ export function ProjectSetup({
           onAssetDuration={(seconds) =>
             setFields((current) => ({ ...current, image_duration: String(seconds) }))
           }
+          initialManual={effectsManual}
         />
       </Drawer>
     </div>

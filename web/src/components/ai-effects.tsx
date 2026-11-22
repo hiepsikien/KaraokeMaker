@@ -541,6 +541,7 @@ export function AiEffects({
   busyImages = false,
   onProfileChange,
   onDurationChange,
+  initialManual = false,
 }: {
   images: string[];
   effects: BackgroundEffect[];
@@ -558,6 +559,7 @@ export function AiEffects({
   busyImages?: boolean;
   onProfileChange?: (value: string) => void;
   onDurationChange?: (value: number) => void;
+  initialManual?: boolean;
 }) {
   const imageSignature = images.join("\n");
   const { settings, save: saveSettings } = useSettings();
@@ -580,6 +582,7 @@ export function AiEffects({
   const [manualName, setManualName] = useState("");
   const [manualRole, setManualRole] = useState<"object" | "cloud" | "branch">("object");
   const [manualGroup, setManualGroup] = useState("");
+  const manualAutoRef = useRef(false);
   const [stageTab, setStageTab] = useState<"image" | "clip">("image");
   const [quickPreview, setQuickPreview] = useState<PreviewResult | null>(null);
   const [quickBusy, setQuickBusy] = useState(false);
@@ -984,6 +987,16 @@ export function AiEffects({
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!initialManual) {
+      manualAutoRef.current = false;
+      return;
+    }
+    if (manualAutoRef.current || !selectedImage || analysis || busy) return;
+    manualAutoRef.current = true;
+    void startManualPlan();
+  }, [initialManual, selectedImage, analysis, busy]);
 
   async function analyze() {
     if (!canAnalyze) return;

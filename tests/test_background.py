@@ -19,6 +19,7 @@ from karaoke.background import (
     RenderResult,
     _frames,
     _motion_identity,
+    _plan_background,
     background_status,
     build_background,
     cleanup_pictures,
@@ -159,6 +160,16 @@ class BackgroundBuildTests(unittest.TestCase):
     def tearDown(self):
         self.profile_patch.stop()
         self.folder.cleanup()
+
+    def test_interlude_does_not_change_background_identity(self):
+        first = dict(self.prepared)
+        first["presentation"] = {"interlude": {"enabled": False}}
+        second = dict(self.prepared)
+        second["presentation"] = {"interlude": {"enabled": True, "text": "Nhạc dạo"}}
+        one = _plan_background(first, output_dir=self.root, profile=self.profile)
+        two = _plan_background(second, output_dir=self.root, profile=self.profile)
+        self.assertEqual(one.base_hash, two.base_hash)
+        self.assertEqual(one.identity_hash, two.identity_hash)
 
     def test_static_background_is_frame_exact_silent_and_reused(self):
         first = build_background(

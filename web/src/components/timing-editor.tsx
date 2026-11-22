@@ -216,6 +216,7 @@ export function TimingEditor({
     pointerId: number;
     offsetX: number;
     offsetY: number;
+    frameRect: DOMRect;
   } | null>(null);
   waveRef.current = wave;
   const waveSignature = waveform ? JSON.stringify(waveform) : "";
@@ -646,7 +647,7 @@ export function TimingEditor({
   function waveCenterFromPointer(event: React.PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     if (!drag) return null;
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = drag.frameRect;
     if (rect.width <= 0 || rect.height <= 0) return null;
     const halfW = waveRef.current.width / 2;
     const halfH = waveRef.current.height / 2;
@@ -669,6 +670,7 @@ export function TimingEditor({
       pointerId: event.pointerId,
       offsetX: event.clientX - centerX,
       offsetY: event.clientY - centerY,
+      frameRect: rect,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
@@ -1279,7 +1281,7 @@ export function TimingEditor({
                     disabled={locked}
                   >
                     <option value="instrumental">Instrumental</option>
-                    <option value="vocal">Vocal</option>
+                    <option value="original">Bài gốc / có vocal</option>
                   </Select>
                 </Field>
                 <Field label="Kiểu hiển thị">
@@ -1289,7 +1291,6 @@ export function TimingEditor({
                     disabled={locked}
                   >
                     <option value="progress">Toàn bài, tô đến vị trí hiện tại</option>
-                    <option value="scroll">Cuộn 6 giây</option>
                   </Select>
                 </Field>
                 <div className="flex flex-col justify-end pb-1">

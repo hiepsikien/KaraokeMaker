@@ -289,7 +289,8 @@ def normalize_overlay_effects(payload: Any) -> list[dict[str, Any]]:
         for key, default in defaults.items():
             if key in {"palette", "blend"}:
                 continue
-            params[key] = _int(raw_params.get(key, default), int(default), 0, 200)
+            high = 360 if key == "angle" else 100 if key == "opacity" else 200
+            params[key] = _int(raw_params.get(key, default), int(default), 0, high)
         if "palette" in defaults:
             choices = LEAF_PALETTES if kind == "leaf" else OVERLAY_PALETTES
             params["palette"] = _choice(raw_params.get("palette"), choices, str(defaults["palette"]))
