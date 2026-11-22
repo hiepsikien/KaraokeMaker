@@ -1444,6 +1444,7 @@ def presentation_cover_preview(body: CoverPreviewRequest):
         ).encode("utf-8")
     ).hexdigest()[:24]
     destination = cache_dir / f"cover-{key}.png"
+    wrote_new = False
     if not destination.is_file():
         temporary = cache_dir / f".cover-{key}.{os.getpid()}.{uuid.uuid4().hex}.tmp.png"
         try:
@@ -1457,15 +1458,17 @@ def presentation_cover_preview(body: CoverPreviewRequest):
                 style=normalize_presentation(body.presentation).get("cover"),
             )
             os.replace(temporary, destination)
+            wrote_new = True
         finally:
             temporary.unlink(missing_ok=True)
-    try:
-        cutoff = time.time() - 7 * 86400
-        for old in cache_dir.glob("cover-*.png"):
-            if old.is_file() and old.stat().st_mtime < cutoff:
-                old.unlink(missing_ok=True)
-    except OSError:
-        pass
+    if wrote_new:
+        try:
+            cutoff = time.time() - 7 * 86400
+            for old in cache_dir.glob("cover-*.png"):
+                if old.is_file() and old.stat().st_mtime < cutoff:
+                    old.unlink(missing_ok=True)
+        except OSError:
+            pass
     return FileResponse(destination, media_type="image/png", filename="cover.png")
 
 

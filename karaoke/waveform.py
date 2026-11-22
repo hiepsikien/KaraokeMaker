@@ -22,13 +22,14 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from karaoke.cache import cache_root
+from karaoke.cache import cache_root, prune
 from karaoke.presentation import normalize_waveform
 from karaoke.profiles import RenderProfile, get_profile
 
@@ -625,7 +626,8 @@ def render_waveform_clip(
         clip_outro_frames,
     )
     suffix = ".mov" if not opaque else ".mp4"
-    cached = _cache_dir() / f"clip-{identity}{suffix}"
+    key = identity.split(":", 1)[-1]
+    cached = _cache_dir() / f"clip-{key}{suffix}"
     if cached.is_file() and cached.stat().st_size > 0:
         _log(log, "Dùng lại clip waveform đã có.")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -749,12 +751,24 @@ def render_waveform_clip(
         raise WaveformError(f"Không dựng được clip waveform: {message}")
     if not destination.is_file() or destination.stat().st_size <= 0:
         raise WaveformError("Không tạo được clip waveform.")
-    cached.parent.mkdir(parents=True, exist_ok=True)
-    temporary = cached.with_name(f".{cached.name}.{os.getpid()}.tmp")
     try:
-        shutil.copy2(destination, temporary)
-        os.replace(temporary, cached)
-    finally:
-        temporary.unlink(missing_ok=True)
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cached.with_name(f".{cached.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            shutil.copy2(destination, temporary)
+            os.replace(temporary, cached)
+        finally:
+            temporary.unlink(missing_ok=True)
+        try:
+            prune(
+                cached.parent,
+                max_files=100,
+                max_bytes=2 * 1024 * 1024 * 1024,
+                min_age_seconds=14 * 86400,
+            )
+        except Exception:
+            pass
+    except Exception as error:
+        _log(log, f"Không ghi được cache waveform: {error}. Vẫn dùng clip vừa render.")
     _log(log, f"Đã dựng waveform: {cached.name}.")
     return destination

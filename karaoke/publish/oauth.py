@@ -386,7 +386,7 @@ def callback_html(*, ok: bool, message: str) -> str:
         "<body style='font-family:system-ui,sans-serif;padding:3rem;line-height:1.5'>"
         f"<h1 style='color:{tone}'>{html.escape(title)}</h1>"
         f"<p>{safe}</p><p>Bạn có thể đóng tab này và quay lại KaraokeMaker.</p>"
-        "<p><a href='http://127.0.0.1:3000/publish'>Quay lại trang Đăng bài</a></p>"
+        "<p><a href='http://127.0.0.1:3000/publish?connected=1'>Quay lại trang Đăng bài</a></p>"
         "<script>"
         "try{if(window.opener){window.opener.postMessage({type:'karaoke:publish-connected'},'*')}}catch(e){}"
         "setTimeout(function(){window.close()},1500)"
