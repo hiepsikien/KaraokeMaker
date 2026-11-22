@@ -12,8 +12,11 @@ type Entry = {
 
 const entries = new Map<string, Entry>();
 const activeListeners = new Set<() => void>();
+// getServerSnapshot must return the same reference on every call, otherwise
+// React's hydration check loops forever.
+const EMPTY_JOBS: Job[] = [];
 let timer: number | null = null;
-let activeSnapshot: Job[] = [];
+let activeSnapshot: Job[] = EMPTY_JOBS;
 let polling = false;
 
 function isActive(job: Job) {
@@ -153,11 +156,19 @@ function subscribeActive(listener: () => void) {
   return () => activeListeners.delete(listener);
 }
 
+function getActiveSnapshot() {
+  return activeSnapshot;
+}
+
+function getServerActiveSnapshot() {
+  return EMPTY_JOBS;
+}
+
 export function useActiveJobs() {
   return useSyncExternalStore(
     subscribeActive,
-    () => activeSnapshot,
-    () => [],
+    getActiveSnapshot,
+    getServerActiveSnapshot,
   );
 }
 
