@@ -1,11 +1,8 @@
 import type { Phase } from "@/lib/types";
 
-// Presentation only: several internal phases share one user-facing step.
-// The state machine (Phase) stays unchanged; "home" hides the stepper.
 const STEPS: { id: string; label: string; phases: Phase[] }[] = [
   { id: "prepare", label: "Chuẩn bị", phases: ["setup", "restore", "align"] },
-  { id: "edit", label: "Biên tập", phases: ["edit"] },
-  { id: "export", label: "Xuất", phases: ["export"] },
+  { id: "edit", label: "Biên tập", phases: ["edit", "export"] },
 ];
 
 function stepIndex(phase: Phase) {
@@ -13,30 +10,51 @@ function stepIndex(phase: Phase) {
   return STEPS.findIndex((step) => step.phases.includes(phase));
 }
 
-export function PhaseStepper({ phase }: { phase: Phase }) {
+export function PhaseStepper({
+  phase,
+  rendering = false,
+  exported = false,
+}: {
+  phase: Phase;
+  rendering?: boolean;
+  exported?: boolean;
+}) {
   if (phase === "home") return null;
   const current = stepIndex(phase);
 
   return (
-    <ol className="mb-6 flex flex-wrap gap-2 border-b border-[var(--line)] pb-4">
-      {STEPS.map((step, index) => {
-        const active = index === current;
-        const done = index < current;
-        return (
-          <li
-            key={step.id}
-            className={`rounded-full px-3 py-1 text-xs font-semibold tracking-[0.12em] uppercase ${
-              active
-                ? "bg-[var(--gold)] text-[#1a1206]"
-                : done
-                  ? "border border-[var(--gold)]/50 text-[var(--gold)]"
-                  : "border border-[var(--line)] text-[var(--muted)]"
-            }`}
-          >
-            {index + 1}. {step.label}
-          </li>
-        );
-      })}
-    </ol>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <ol className="flex flex-wrap gap-2">
+        {STEPS.map((step, index) => {
+          const active = index === current;
+          const done = index < current;
+          return (
+            <li
+              key={step.id}
+              className={`rounded-full px-3 py-1 text-xs font-semibold tracking-[0.12em] uppercase ${
+                active
+                  ? "bg-[var(--gold)] text-[#1a1206]"
+                  : done
+                    ? "border border-[var(--gold)]/50 text-[var(--gold)]"
+                    : "border border-[var(--line)] text-[var(--muted)]"
+              }`}
+            >
+              {index + 1}. {step.label}
+            </li>
+          );
+        })}
+      </ol>
+      <span
+        className={`rounded-full border px-2.5 py-1 text-[11px] ${
+          rendering
+            ? "border-[var(--gold)]/60 text-[var(--gold)]"
+            : exported
+              ? "border-emerald-800 text-emerald-200"
+              : "border-[var(--line)] text-[var(--muted)]"
+        }`}
+      >
+        {rendering ? "Đang xuất video…" : exported ? "Đã xuất video" : "Chưa xuất"}
+      </span>
+    </div>
   );
 }

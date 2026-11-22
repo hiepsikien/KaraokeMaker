@@ -1,9 +1,9 @@
 "use client";
 
 import type { ProjectFields } from "@/lib/types";
+import { inputClass } from "@/components/ui/field";
 
-const fieldClass =
-  "w-full rounded-xl border border-[var(--line)] bg-black/30 px-3 py-2 text-sm outline-none focus:border-[var(--gold)]";
+const fieldClass = inputClass;
 
 const MODELS: { value: string; label: string }[] = [
   { value: "tiny", label: "Tiny, nhanh nhất" },

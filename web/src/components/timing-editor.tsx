@@ -1,9 +1,25 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AlignTimeline } from "@/components/align-timeline";
+import { Drawer, useDialog } from "@/components/ui/dialog";
+import { Field, PathField, Select } from "@/components/ui/field";
+import {
+  Badge,
+  Disclosure,
+  Panel,
+  ProgressBar,
+  SectionTitle,
+  btnGhost,
+  btnPrimary,
+  btnSecondary,
+} from "@/components/ui/primitives";
+import { useNotices } from "@/components/ui/toast";
 import { cueAt, formatSeconds, wordFill, type TimedLine } from "@/lib/cue";
+import { useDirty } from "@/lib/dirty";
+import { fileName } from "@/lib/format";
+import { clearSession, readSession, sessionKeys, writeSession } from "@/lib/session";
 
 function cloneLines(lines: TimedLine[]) {
   return lines.map((line) => ({
@@ -49,8 +65,29 @@ export type ExportOptions = {
   format: "mp4" | "mov" | "mkv";
 };
 
+type TimingDraft = {
+  version?: number;
+  savedAt?: number;
+  lines: TimedLine[];
+  removed: TimedLine[];
+  dirty: boolean;
+  selectedLine: number | null;
+  exportDir: string;
+  exportFormat: ExportOptions["format"];
+};
+
+const DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isUsableDraft(value: TimingDraft | null): value is TimingDraft {
+  if (!value || !Array.isArray(value.lines)) return false;
+  if (value.version != null && value.version !== 1) return false;
+  if (value.savedAt != null && Date.now() - value.savedAt > DRAFT_MAX_AGE_MS) return false;
+  return true;
+}
+
 export function TimingEditor({
   jobId,
+  projectPath = "",
   initialLines,
   locked,
   exported = false,
@@ -65,6 +102,7 @@ export function TimingEditor({
   onBuildBackground,
   onCleanupBackground,
   onResumeEditing,
+  onSavedPath,
   onBrowseOutput,
   onBack,
   onRealign,
@@ -73,6 +111,7 @@ export function TimingEditor({
   exportGaps = [],
 }: {
   jobId: string;
+  projectPath?: string;
   initialLines: TimedLine[];
   locked: boolean;
   exported?: boolean;
@@ -99,6 +138,7 @@ export function TimingEditor({
   onBuildBackground?: (rebuild: boolean) => void;
   onCleanupBackground?: () => void;
   onResumeEditing?: () => void;
+  onSavedPath?: (path: string) => void;
   onBrowseOutput?: () => Promise<string | null>;
   onBack: () => void;
   onRealign?: () => void;
@@ -107,19 +147,48 @@ export function TimingEditor({
   exportGaps?: string[];
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const [lines, setLines] = useState(() => cloneLines(initialLines));
+  const { push } = useNotices();
+  const { confirm } = useDialog();
+  const draftKey = sessionKeys.timingDraft(projectPath || jobId);
+  const legacyDraftKey = projectPath ? sessionKeys.timingDraft(jobId) : "";
+
+  const [restored] = useState<TimingDraft | null>(() => {
+    const draft = readSession<TimingDraft | null>(draftKey, null);
+    if (isUsableDraft(draft)) return draft;
+    if (legacyDraftKey) {
+      const legacy = readSession<TimingDraft | null>(legacyDraftKey, null);
+      if (isUsableDraft(legacy)) {
+        writeSession(draftKey, legacy);
+        clearSession(legacyDraftKey);
+        return legacy;
+      }
+    }
+    return null;
+  });
+  const [lines, setLines] = useState<TimedLine[]>(() => cloneLines(restored?.lines ?? initialLines));
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [selectedLine, setSelectedLine] = useState<number | null>(null);
+  const [selectedLine, setSelectedLine] = useState<number | null>(() => {
+    const index = restored?.selectedLine;
+    return index != null && index >= 0 && index < (restored?.lines.length ?? 0) ? index : null;
+  });
   const [selectedWord, setSelectedWord] = useState<number | null>(null);
   const [savedPath, setSavedPath] = useState("");
   const [saveError, setSaveError] = useState("");
-  const [dirty, setDirty] = useState(false);
-  const [exportDir, setExportDir] = useState(defaultOutputDir);
-  const [exportFormat, setExportFormat] = useState<ExportOptions["format"]>("mp4");
+  const [dirty, setDirty] = useState(() => Boolean(restored?.dirty));
+  const [exportDir, setExportDir] = useState(() => restored?.exportDir || defaultOutputDir);
+  const [exportFormat, setExportFormat] = useState<ExportOptions["format"]>(() => {
+    const format = restored?.exportFormat;
+    return format === "mov" || format === "mkv" ? format : "mp4";
+  });
   const [browsingOutput, setBrowsingOutput] = useState(false);
-  const [removed, setRemoved] = useState<TimedLine[]>([]);
+  const [removed, setRemoved] = useState<TimedLine[]>(() =>
+    Array.isArray(restored?.removed) ? restored.removed : []
+  );
+  const [exportOpen, setExportOpen] = useState(false);
+  const closeExport = useCallback(() => setExportOpen(false), []);
+
   const cue = cueAt(lines, time);
   const backgroundBuilding = background?.state === "building";
   const backgroundReady = background?.state === "ready";
@@ -133,6 +202,80 @@ export function TimingEditor({
           : background?.state === "error"
             ? "Dựng nền lỗi"
             : "Chưa dựng nền";
+  const exportStatusTone: "gold" | "success" | "danger" | "muted" = locked
+    ? "gold"
+    : outputs
+      ? "success"
+      : exportGaps.length
+        ? "danger"
+        : "muted";
+  const exportStatusLabel = locked
+    ? `Đang xuất${renderPercent ? ` ${renderPercent}%` : "…"}`
+    : outputs
+      ? "Đã xuất"
+      : exportGaps.length
+        ? "Thiếu file"
+        : "Chưa xuất";
+
+  const restoredNotice = useRef(false);
+  const suppressFlush = useRef(false);
+  useEffect(() => {
+    if (!restored?.dirty || restoredNotice.current) return;
+    restoredNotice.current = true;
+    push({
+      tone: "info",
+      message: "Đã khôi phục bản nháp chưa lưu",
+      action: {
+        label: "Bỏ bản nháp",
+        onClick: discardRestoredDraft,
+      },
+    });
+  }, [push, restored, initialLines, draftKey, legacyDraftKey]);
+
+  const latestDraft = useRef<TimingDraft | null>(null);
+  const dirtyRef = useRef(dirty);
+  const writeTimer = useRef<number | null>(null);
+  dirtyRef.current = dirty;
+  latestDraft.current = {
+    version: 1,
+    savedAt: Date.now(),
+    lines,
+    removed,
+    dirty,
+    selectedLine,
+    exportDir,
+    exportFormat,
+  };
+
+  useEffect(() => {
+    if (!dirty) {
+      clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
+      return;
+    }
+    if (writeTimer.current) window.clearTimeout(writeTimer.current);
+    writeTimer.current = window.setTimeout(() => {
+      if (latestDraft.current) writeSession(draftKey, latestDraft.current);
+    }, 300);
+    return () => {
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
+    };
+  }, [draftKey, legacyDraftKey, lines, removed, dirty, selectedLine, exportDir, exportFormat]);
+
+  useEffect(() => {
+    function onPageHide() {
+      if (!suppressFlush.current && dirtyRef.current && latestDraft.current) {
+        writeSession(draftKey, latestDraft.current);
+      }
+    }
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      if (!suppressFlush.current && dirtyRef.current && latestDraft.current) {
+        writeSession(draftKey, latestDraft.current);
+      }
+    };
+  }, [draftKey]);
 
   useEffect(() => {
     if (defaultOutputDir) setExportDir((current) => current || defaultOutputDir);
@@ -142,7 +285,21 @@ export function TimingEditor({
     if (outputs?.directory) setExportDir(outputs.directory);
   }, [outputs?.directory]);
 
+  function discardRestoredDraft() {
+    suppressFlush.current = true;
+    if (writeTimer.current) window.clearTimeout(writeTimer.current);
+    setLines(cloneLines(initialLines));
+    setRemoved([]);
+    setSelectedLine(null);
+    setSelectedWord(null);
+    setDirty(false);
+    clearSession(draftKey);
+    if (legacyDraftKey) clearSession(legacyDraftKey);
+    push({ tone: "info", message: "Đã bỏ bản nháp, quay về bản đã lưu." });
+  }
+
   function markDirty() {
+    suppressFlush.current = false;
     if (!dirty) setDirty(true);
     if (exported) onResumeEditing?.();
   }
@@ -206,9 +363,25 @@ export function TimingEditor({
     replaceLine(lineIndex, syncLine({ ...line, words }));
   }
 
-  function leaveIfSaved(leave: () => void) {
-    if (dirty && !window.confirm("Timing đã sửa chưa được lưu và sẽ mất. Vẫn rời màn Biên tập?")) return;
-    leave();
+  async function leaveIfSaved(leave: () => void) {
+    if (!dirty) {
+      leave();
+      return;
+    }
+    const ok = await confirm({
+      title: "Timing chưa lưu",
+      description: "Các thay đổi timing chưa được lưu và sẽ mất nếu rời màn Biên tập.",
+      confirmLabel: "Rời và bỏ thay đổi",
+      cancelLabel: "Ở lại",
+      danger: true,
+    });
+    if (ok) {
+      suppressFlush.current = true;
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
+      clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
+      leave();
+    }
   }
 
   function removeLine(lineIndex: number) {
@@ -331,17 +504,35 @@ export function TimingEditor({
       });
       if (!response.ok) {
         setSaveError("Chưa lưu được. Hãy khởi động lại server Python rồi thử lại.");
-        return;
+        return false;
       }
       const body = await response.json();
       setSavedPath(body.path || "");
+      if (body.path) onSavedPath?.(body.path);
+      suppressFlush.current = true;
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
       setDirty(false);
+      clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
+      push({ tone: "success", message: "Đã lưu dự án" });
+      return true;
     } catch {
       setSaveError("Chưa lưu được. Server Python chưa chạy.");
+      return false;
     }
   }
 
-  const fileName = (path: string) => path.split(/[/\\]/).pop() || path;
+  useDirty(
+    "karaoke.timing",
+    dirty,
+    saveTiming,
+    () => {
+      suppressFlush.current = true;
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
+      clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
+    },
+  );
 
   async function pickExportDir() {
     if (!onBrowseOutput) return;
@@ -365,391 +556,498 @@ export function TimingEditor({
 
   return (
     <div className="space-y-5">
-    <AlignTimeline
-      jobId={jobId}
-      lines={lines}
-      time={time}
-      duration={duration}
-      playing={playing}
-      locked={locked}
-      selectedLine={selectedLine}
-      selectedWord={selectedWord}
-      canSplit={splitWordIndex(selectedLine ?? lines.findIndex((line) => time >= line.start && time < line.end)) != null}
-      onSeek={seek}
-      onSelectLine={chooseLine}
-      onSelectWord={setSelectedWord}
-      onChangeLine={replaceLine}
-      onTogglePlay={togglePlay}
-      onPlayFrom={playFrom}
-      onAddLine={addLine}
-      onSplitLine={() => splitLine()}
-      onDragEnd={sortLines}
-      onRemoveLine={removeLine}
-      actions={
-        <>
-          {onRealign && (
+      <AlignTimeline
+        jobId={jobId}
+        lines={lines}
+        time={time}
+        duration={duration}
+        playing={playing}
+        locked={locked}
+        selectedLine={selectedLine}
+        selectedWord={selectedWord}
+        canSplit={splitWordIndex(selectedLine ?? lines.findIndex((line) => time >= line.start && time < line.end)) != null}
+        onSeek={seek}
+        onSelectLine={chooseLine}
+        onSelectWord={setSelectedWord}
+        onChangeLine={replaceLine}
+        onTogglePlay={togglePlay}
+        onPlayFrom={playFrom}
+        onAddLine={addLine}
+        onSplitLine={() => splitLine()}
+        onDragEnd={sortLines}
+        onRemoveLine={removeLine}
+        actions={
+          <>
+            {onRealign && (
+              <button
+                type="button"
+                disabled={locked}
+                onClick={() => void leaveIfSaved(onRealign)}
+                className="text-sm text-[var(--gold)] hover:text-white disabled:opacity-40"
+              >
+                Ghép chữ lại
+              </button>
+            )}
             <button
               type="button"
-              disabled={locked}
-              onClick={() => leaveIfSaved(onRealign)}
-              className="text-sm text-[var(--gold)] hover:text-white disabled:opacity-40"
+              onClick={() => void leaveIfSaved(onBack)}
+              className="text-sm text-[var(--muted)] hover:text-white"
             >
-              Ghép chữ lại
+              Sửa tên, ảnh, lời…
             </button>
-          )}
-          <button type="button" onClick={() => leaveIfSaved(onBack)} className="text-sm text-[var(--muted)] hover:text-white">
-            Sửa tên, ảnh, lời…
-          </button>
-          {onNewProject && (
-            <button type="button" onClick={() => leaveIfSaved(onNewProject)} className="text-sm text-[var(--muted)] hover:text-white">
-              Dự án mới
+            {onNewProject && (
+              <button
+                type="button"
+                onClick={() => void leaveIfSaved(onNewProject)}
+                className="text-sm text-[var(--muted)] hover:text-white"
+              >
+                Dự án mới
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={locked || lines.length === 0}
+              onClick={() => void saveTiming()}
+              className="rounded-full border border-[var(--gold)] px-4 py-1.5 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
+            >
+              {locked ? "Đang xuất… (lưu sau)" : dirty ? "Lưu dự án •" : "Lưu dự án"}
             </button>
-          )}
-          <button
-            type="button"
-            disabled={locked || lines.length === 0}
-            onClick={saveTiming}
-            className="rounded-full border border-[var(--gold)] px-4 py-1.5 text-sm font-semibold text-[var(--gold)] disabled:opacity-60"
-          >
-            {locked ? "Đang xuất… (lưu sau)" : dirty ? "Lưu dự án •" : "Lưu dự án"}
-          </button>
-          {saveError ? (
-            <span className="text-xs text-red-200">Chưa lưu được</span>
-          ) : savedPath && !dirty ? (
-            <button type="button" className="text-xs text-[var(--muted)] hover:text-[var(--gold)]" onClick={() => onReveal(savedPath)}>
-              Đã lưu
+            {saveError ? (
+              <span className="text-xs text-red-200">Chưa lưu được</span>
+            ) : savedPath && !dirty ? (
+              <button
+                type="button"
+                className="text-xs text-[var(--muted)] hover:text-[var(--gold)]"
+                onClick={() => onReveal(savedPath)}
+              >
+                Đã lưu
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setExportOpen(true)}
+              className="rounded-full border border-[var(--line)] px-4 py-1.5 text-sm font-semibold text-[var(--paper)] transition hover:border-[var(--gold)] hover:text-[var(--gold)]"
+            >
+              Xuất
             </button>
-          ) : null}
-        </>
-      }
-    />
-    <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
-      <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
-        <div className="mb-4">
-          <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
-          <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
-        </div>
-        {(exported || outputs) && (
-          <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
-            {exported && !dirty
-              ? "Đã xuất video. Muốn đổi tên bài, ảnh bìa, ảnh nền: bấm Sửa tên, ảnh, lời… rồi Lưu khai báo và vào biên tập, sau đó Xuất lại. Bài khác: Dự án mới."
-              : dirty
-                ? "Đang sửa sau khi xuất. Hãy Lưu dự án, rồi Xuất lại nếu cần video mới."
-                : "Có bản video đã xuất. Sửa timing tại đây; sửa tên/ảnh/lời ở Sửa tên, ảnh, lời… rồi Xuất lại."}
-          </p>
-        )}
-        <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl bg-black/45 px-4 py-5">
-          {cue.mode === "countdown" && (
-            <p className="mb-2 text-3xl font-semibold text-[var(--gold)]">{cue.number}</p>
-          )}
-          {cue.line ? (
-            <LyricLine line={cue.line} time={time} preview={cue.mode === "countdown"} />
-          ) : (
-            <p className="text-sm text-[var(--muted)]">Đoạn nhạc, chưa tới câu hát</p>
-          )}
-        </div>
-        <audio
-          ref={audioRef}
-          className="mt-4 w-full"
-          controls
-          src={`/api/jobs/${jobId}/audio`}
-          onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-        />
-        <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-          Sóng âm ở trên, chữ ở dưới. Cuộn để kéo ngang. Giữ ⌘ rồi cuộn để phóng to, giống Audacity. Câu sau hiện ngay khi câu trước ngân xong.
-        </p>
-      </section>
+            <Badge tone={exportStatusTone}>{exportStatusLabel}</Badge>
+          </>
+        }
+      />
 
-      <div className="min-w-0 space-y-3 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:pr-1">
-      <section className="space-y-3">
-        {lines.map((line, lineIndex) => (
-          <article
-            id={`karaoke-line-${lineIndex}`}
-            key={lineIndex}
-            onClick={() => chooseLine(lineIndex)}
-            className={`cursor-pointer rounded-3xl border bg-[var(--panel)] p-4 sm:p-5 ${selectedLine === lineIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
-          >
-            {line.supplemented && (
-              <p className="mb-3 rounded-xl bg-sky-950/50 px-3 py-2 text-xs leading-5 text-sky-100">
-                Whisper nghe được câu này, nhưng lời bạn nhập chưa có. Sửa chữ nếu đó là hát bè hoặc đoạn kết.
-              </p>
+      <div className="lg:grid lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)] lg:items-start lg:gap-6">
+        <section className="sticky top-0 z-10 mb-5 rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-4 sm:p-5 lg:top-4 lg:mb-0">
+          <div className="mb-4">
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
+            <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
+          </div>
+          {restored?.dirty && dirty ? (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--gold)]/60 bg-black/25 px-3 py-2 text-xs leading-5">
+              <span className="text-[var(--muted)]">Đang hiển thị bản nháp chưa lưu.</span>
+              <button type="button" onClick={discardRestoredDraft} className="font-semibold text-[var(--gold)] hover:text-white">
+                Bỏ bản nháp, về bản đã lưu
+              </button>
+            </div>
+          ) : null}
+          {(exported || outputs) && (
+            <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
+              {exported && !dirty
+                ? "Đã xuất video. Sửa tên/ảnh/lời ở “Sửa tên, ảnh, lời…” rồi Xuất lại."
+                : dirty
+                  ? "Đang sửa sau khi xuất. Lưu dự án rồi Xuất lại nếu cần video mới."
+                  : "Có bản đã xuất. Sửa timing tại đây rồi Xuất lại."}
+            </p>
+          )}
+          <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl bg-black/45 px-4 py-5">
+            {cue.mode === "countdown" && <p className="mb-2 text-3xl font-semibold text-[var(--gold)]">{cue.number}</p>}
+            {cue.line ? (
+              <LyricLine line={cue.line} time={time} preview={cue.mode === "countdown"} />
+            ) : (
+              <p className="text-sm text-[var(--muted)]">Đoạn nhạc, chưa tới câu hát</p>
             )}
-            {line.uncertain && !line.supplemented && (
-              <p className="mb-3 rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
-                Câu này được ghép ước lượng. Kéo vùng vàng trên sóng âm để dời cả câu, hoặc kéo từng chữ.
-              </p>
-            )}
-            <div className="mb-3 flex items-center justify-between gap-3 text-xs text-[var(--muted)]">
-              <span>
-                Câu {lineIndex + 1} · {formatSeconds(line.start)} – {formatSeconds(line.end)}
+          </div>
+          <audio
+            ref={audioRef}
+            className="mt-4 w-full"
+            controls
+            src={`/api/jobs/${jobId}/audio`}
+            onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+          />
+          <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+            Sóng âm ở trên, chữ ở dưới. Giữ ⌘ rồi cuộn để phóng to.
+          </p>
+          <Disclosure title="Trợ giúp" className="mt-2" summary="Cách căn">
+            <p className="text-xs leading-5 text-[var(--muted)]">
+              Cuộn để kéo ngang. Câu sau hiện ngay khi câu trước ngân xong. Bấm một câu bên phải để sửa từng chữ.
+            </p>
+          </Disclosure>
+        </section>
+
+        <div className="min-w-0 space-y-3 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:pr-1">
+          <section className="space-y-2">
+            {lines.map((line, lineIndex) => {
+              const active = selectedLine === lineIndex;
+              return (
+                <article
+                  id={`karaoke-line-${lineIndex}`}
+                  key={lineIndex}
+                  className={`scroll-mt-4 rounded-2xl border bg-[var(--panel)] transition ${
+                    active ? "border-[var(--gold)]" : "border-[var(--line)]"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 p-2 sm:gap-2 sm:p-3">
+                    <button
+                      type="button"
+                      onClick={() => chooseLine(active ? null : lineIndex)}
+                      aria-expanded={active}
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-2 text-left transition hover:bg-white/5 sm:gap-3"
+                    >
+                      <span className="w-11 shrink-0 text-xs text-[var(--muted)]">Câu {lineIndex + 1}</span>
+                      <span className="shrink-0 text-xs tabular-nums text-[var(--muted)]">
+                        {formatSeconds(line.start)}–{formatSeconds(line.end)}
+                      </span>
+                      <span className={`min-w-0 flex-1 truncate text-sm ${active ? "text-[var(--paper)]" : "text-[var(--muted)]"}`}>
+                        {line.text || "(chưa có chữ)"}
+                      </span>
+                      {line.supplemented ? (
+                        <Badge tone="info">bổ sung</Badge>
+                      ) : line.uncertain ? (
+                        <Badge tone="gold">ước lượng</Badge>
+                      ) : null}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={locked}
+                      onClick={() => {
+                        chooseLine(lineIndex);
+                        playFrom(line.start);
+                      }}
+                      aria-label={`Nghe câu ${lineIndex + 1}`}
+                      className="shrink-0 rounded-lg px-2 py-1 text-xs font-semibold text-[var(--gold)] transition hover:bg-white/5 disabled:opacity-40"
+                    >
+                      Nghe
+                    </button>
+                    <details className="relative shrink-0">
+                      <summary
+                        aria-label={`Menu câu ${lineIndex + 1}`}
+                        className="cursor-pointer list-none rounded-lg px-2 py-1 text-sm text-[var(--muted)] transition hover:bg-white/5 hover:text-white"
+                      >
+                        ⋯
+                      </summary>
+                      <div className="absolute right-0 z-20 mt-1 w-44 rounded-xl border border-[var(--line)] bg-[var(--ink)] p-1 shadow-2xl">
+                        <button
+                          type="button"
+                          disabled={locked}
+                          onClick={() => {
+                            chooseLine(lineIndex);
+                            playFrom(line.start);
+                          }}
+                          className="block w-full rounded-lg px-3 py-2 text-left text-sm text-[var(--gold)] hover:bg-white/5 disabled:opacity-40"
+                        >
+                          Nghe câu này
+                        </button>
+                        <button
+                          type="button"
+                          disabled={locked}
+                          onClick={() => removeLine(lineIndex)}
+                          className="block w-full rounded-lg px-3 py-2 text-left text-sm text-[var(--muted)] hover:bg-red-950/40 hover:text-red-200 disabled:opacity-40"
+                        >
+                          Xoá câu
+                        </button>
+                      </div>
+                    </details>
+                  </div>
+
+                  {active && (
+                    <div className="space-y-3 border-t border-[var(--line)] p-3 sm:p-4">
+                      {line.supplemented && (
+                        <p className="rounded-xl bg-sky-950/50 px-3 py-2 text-xs leading-5 text-sky-100">
+                          Whisper nghe được câu này nhưng lời bạn nhập chưa có. Sửa chữ nếu đó là hát bè hoặc đoạn kết.
+                        </p>
+                      )}
+                      {line.uncertain && !line.supplemented && (
+                        <p className="rounded-xl bg-amber-950/50 px-3 py-2 text-xs leading-5 text-amber-100">
+                          Câu này được ghép ước lượng. Kéo vùng vàng trên sóng âm để dời cả câu, hoặc kéo từng chữ.
+                        </p>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        {line.words.map((word, wordIndex) => (
+                          <div
+                            key={`${lineIndex}-${wordIndex}`}
+                            className={`flex items-center gap-1 rounded-xl border bg-black/20 px-2 py-1 ${
+                              selectedWord === wordIndex ? "border-[var(--gold)]" : "border-[var(--line)]"
+                            }`}
+                          >
+                            <input
+                              value={word.text}
+                              disabled={locked}
+                              onFocus={() => setSelectedWord(wordIndex)}
+                              onChange={(event) => changeWord(lineIndex, wordIndex, event.target.value)}
+                              aria-label={`Chữ ${wordIndex + 1} của câu ${lineIndex + 1}`}
+                              className="w-20 bg-transparent text-xs outline-none disabled:opacity-60"
+                            />
+                            <button
+                              type="button"
+                              disabled={locked}
+                              aria-label={`Xoá chữ ${word.text}`}
+                              onClick={() => removeWord(lineIndex, wordIndex)}
+                              className="text-xs text-[var(--muted)] transition hover:text-white disabled:opacity-40"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          disabled={locked}
+                          onClick={() => addWord(lineIndex)}
+                          className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] transition hover:text-[var(--paper)] disabled:opacity-40"
+                        >
+                          Thêm chữ
+                        </button>
+                        <button
+                          type="button"
+                          disabled={locked || splitWordIndex(lineIndex) == null}
+                          onClick={() => splitLine(lineIndex)}
+                          className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] transition hover:text-[var(--paper)] disabled:opacity-40"
+                        >
+                          Chia câu
+                        </button>
+                        <button
+                          type="button"
+                          disabled={locked}
+                          onClick={() => removeLine(lineIndex)}
+                          className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] transition hover:text-red-200 disabled:opacity-40"
+                        >
+                          Xoá câu
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </section>
+
+          {removed.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-sm text-[var(--muted)]">
+              <span className="min-w-0 truncate">
+                {removed.length > 1 ? `Đã xoá ${removed.length} câu. Gần nhất: ` : "Đã xoá câu: "}
+                {removed[removed.length - 1].text}
               </span>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  disabled={locked}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    chooseLine(lineIndex);
-                    playFrom(line.start);
-                  }}
-                  className="text-[var(--gold)] disabled:opacity-40"
-                >
-                  Nghe câu này
+              <div className="flex shrink-0 items-center gap-3">
+                <button type="button" disabled={locked} className="text-[var(--gold)] disabled:opacity-40" onClick={undoRemove}>
+                  Hoàn tác
                 </button>
-                <button
-                  type="button"
-                  disabled={locked}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    removeLine(lineIndex);
-                  }}
-                  className="hover:text-red-200 disabled:opacity-40"
-                >
-                  Xoá câu
+                <button type="button" className="hover:text-white" onClick={() => setRemoved([])}>
+                  Ẩn
                 </button>
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {line.words.map((word, wordIndex) => (
-                <label
-                  key={`${lineIndex}-${wordIndex}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setSelectedLine(lineIndex);
-                    setSelectedWord(wordIndex);
-                  }}
-                  className={`flex items-center gap-1 rounded-xl border bg-black/20 px-2 py-1 ${selectedLine === lineIndex && selectedWord === wordIndex ? "border-[var(--gold)]" : "border-[var(--line)]"}`}
-                >
-                  <input
-                    value={word.text}
-                    disabled={locked}
-                    onChange={(event) => changeWord(lineIndex, wordIndex, event.target.value)}
-                    className="w-20 bg-transparent text-xs outline-none"
-                  />
-                  <button type="button" disabled={locked} className="text-xs text-[var(--muted)] hover:text-white disabled:opacity-40" onClick={() => removeWord(lineIndex, wordIndex)}>
-                    ×
-                  </button>
-                </label>
-              ))}
-              <button type="button" disabled={locked} onClick={(event) => { event.stopPropagation(); setSelectedLine(lineIndex); addWord(lineIndex); }} className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] disabled:opacity-40">
-                Thêm chữ
-              </button>
-              <button
-                type="button"
-                disabled={locked || splitWordIndex(lineIndex) == null}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setSelectedLine(lineIndex);
-                  splitLine(lineIndex);
-                }}
-                className="rounded-xl border border-dashed border-[var(--line)] px-3 text-sm text-[var(--muted)] disabled:opacity-40"
-              >
-                Chia câu
-              </button>
-            </div>
-          </article>
-        ))}
-      </section>
+          )}
 
-      {error && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{error}</p>}
-      {saveError && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{saveError}</p>}
-      {savedPath && (
-        <p className="text-sm text-[var(--muted)]">
-          Đã lưu{" "}
-          <button type="button" className="text-[var(--gold)]" onClick={() => onReveal(savedPath)}>
-            {fileName(savedPath)}
-          </button>
-        </p>
-      )}
-
-      <div className="sticky bottom-3 z-20 space-y-3 rounded-3xl border border-[var(--line)] bg-[var(--panel)]/95 p-4 shadow-lg backdrop-blur">
-        {removed.length > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-black/30 px-3 py-2 text-sm text-[var(--muted)]">
-            <span className="min-w-0 truncate">
-              {removed.length > 1 ? `Đã xoá ${removed.length} câu. Gần nhất: ` : "Đã xoá câu: "}
-              {removed[removed.length - 1].text}
-            </span>
-            <div className="flex shrink-0 items-center gap-3">
-              <button type="button" disabled={locked} className="text-[var(--gold)] disabled:opacity-40" onClick={undoRemove}>
-                Hoàn tác
+          {error && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{error}</p>}
+          {saveError && <p className="rounded-xl bg-red-950/60 px-3 py-2 text-sm text-red-100">{saveError}</p>}
+          {savedPath && (
+            <p className="text-sm text-[var(--muted)]">
+              Đã lưu{" "}
+              <button type="button" className="text-[var(--gold)]" onClick={() => onReveal(savedPath)}>
+                {fileName(savedPath)}
               </button>
-              <button type="button" className="hover:text-white" onClick={() => setRemoved([])}>
-                Ẩn
-              </button>
-            </div>
-          </div>
-        )}
-        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px] sm:items-end">
-          <label className="block min-w-0">
-            <span className="mb-1.5 block text-xs font-semibold tracking-[0.14em] text-[var(--gold)] uppercase">
-              Thư mục xuất
-            </span>
-            <div className="flex gap-2">
-              <input
-                readOnly
-                value={exportDir}
-                placeholder="Chọn nơi lưu hai video"
-                className="w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none"
-              />
-              <button
-                type="button"
-                disabled={locked || browsingOutput}
-                onClick={pickExportDir}
-                className="shrink-0 rounded-xl border border-[var(--line)] px-3 text-sm hover:border-[var(--gold)] disabled:opacity-60"
-              >
-                {browsingOutput ? "…" : "Chọn"}
-              </button>
-            </div>
-          </label>
-          <label className="block">
-            <span className="mb-1.5 block text-xs font-semibold tracking-[0.14em] text-[var(--gold)] uppercase">
-              Định dạng
-            </span>
-            <select
-              disabled={locked}
-              value={exportFormat}
-              onChange={(event) => setExportFormat(event.target.value as ExportOptions["format"])}
-              className="w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none disabled:opacity-60"
-            >
-              <option value="mp4">MP4</option>
-              <option value="mov">MOV</option>
-              <option value="mkv">MKV</option>
-            </select>
-          </label>
+            </p>
+          )}
         </div>
-        <p className="text-xs leading-5 text-[var(--muted)]">
-          Tên file có hậu tố thời gian (vd. 20261019-161005) nên xuất lại không ghi đè bản trước.
-        </p>
-        {background && (
-          <div className="space-y-2 rounded-2xl border border-[var(--line)] bg-black/20 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-semibold tracking-[0.12em] text-[var(--gold)] uppercase">
-                Nền có hiệu ứng
-              </span>
-              <span
-                className={
-                  backgroundReady
-                    ? "text-xs text-emerald-200"
-                    : background?.state === "error"
-                      ? "text-xs text-red-200"
-                      : "text-xs text-[var(--muted)]"
+      </div>
+
+      <Drawer
+        open={exportOpen}
+        onClose={closeExport}
+        title="Xuất video"
+        description="Hai video: có lời và không lời. Tên file có hậu tố thời gian."
+        width="max-w-2xl"
+        footer={
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs text-[var(--muted)]">
+              {exportGaps.length > 0
+                ? "Còn thiếu file để xuất."
+                : !exportDir.trim()
+                  ? "Chọn thư mục xuất trước."
+                  : outputs
+                    ? "Xuất lại sẽ tạo bản mới."
+                    : "Sẵn sàng xuất."}
+            </span>
+            <button
+              type="button"
+              disabled={locked || backgroundBuilding || lines.length === 0 || exportGaps.length > 0 || !exportDir.trim()}
+              onClick={startExport}
+              className={btnPrimary}
+            >
+              {locked
+                ? `Đang xuất video…${renderPercent ? ` ${renderPercent}%` : ""}`
+                : outputs
+                  ? "Xuất lại hai video"
+                  : "Xuất hai video"}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <SectionTitle>Trạng thái xuất</SectionTitle>
+            <Badge tone={exportStatusTone}>{exportStatusLabel}</Badge>
+          </div>
+          <fieldset disabled={locked} className="space-y-3">
+            <PathField
+              label="Thư mục xuất"
+              value={exportDir}
+              placeholder="Chọn nơi lưu hai video"
+              onBrowse={pickExportDir}
+              busy={browsingOutput}
+              hint="Tên file có hậu tố thời gian nên xuất lại không ghi đè bản trước."
+            />
+            <Field label="Định dạng" htmlFor="export-format">
+              <Select
+                id="export-format"
+                value={exportFormat}
+                onChange={(event) => setExportFormat(event.target.value as ExportOptions["format"])}
+              >
+                <option value="mp4">MP4</option>
+                <option value="mov">MOV</option>
+                <option value="mkv">MKV</option>
+              </Select>
+            </Field>
+          </fieldset>
+
+          {locked && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs text-[var(--muted)]">
+                <span>Đang xuất video…</span>
+                <span>{renderPercent ? `${renderPercent}%` : "…"}</span>
+              </div>
+              <ProgressBar percent={renderPercent} />
+            </div>
+          )}
+
+          {exportGaps.length > 0 && (
+            <p className="rounded-xl border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-sm leading-6 text-amber-100">
+              Chưa xuất được vì còn thiếu {exportGaps.join(", ")}.{" "}
+              {onFillGaps ? (
+                <button type="button" className="text-[var(--gold)]" onClick={() => void leaveIfSaved(onFillGaps)}>
+                  Bổ sung file trong khai báo
+                </button>
+              ) : (
+                "Hãy bổ sung file trong phần khai báo."
+              )}
+            </p>
+          )}
+
+          {outputs && (
+            <div className="space-y-2">
+              <SectionTitle>Bản đã xuất</SectionTitle>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <button type="button" className={btnSecondary} onClick={() => onReveal(outputs.vocal)}>
+                  {fileName(outputs.vocal)}
+                </button>
+                <button type="button" className={btnSecondary} onClick={() => onReveal(outputs.instrumental)}>
+                  {fileName(outputs.instrumental)}
+                </button>
+                <button type="button" className={btnGhost} onClick={() => onReveal(outputs.directory)}>
+                  Mở thư mục
+                </button>
+              </div>
+            </div>
+          )}
+
+          {background && (
+            <Panel className="space-y-3 bg-black/15">
+              <SectionTitle
+                action={
+                  <span
+                    className={
+                      backgroundReady
+                        ? "text-xs text-emerald-200"
+                        : background?.state === "error"
+                          ? "text-xs text-red-200"
+                          : "text-xs text-[var(--muted)]"
+                    }
+                  >
+                    {backgroundLabel}
+                  </span>
                 }
               >
-                {backgroundLabel}
-              </span>
-            </div>
-            <details className="group">
-              <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-[var(--muted)] hover:text-white">
-                <span className="transition group-open:rotate-90">▸</span>
-                Nâng cao
-              </summary>
-              <div className="mt-2 space-y-2">
-                {background.reason && background.state !== "ready" && (
-                  <p className="text-xs leading-5 text-[var(--muted)]">{background.reason}</p>
-                )}
-                {typeof background.total_frames === "number" && background.total_frames > 0 && (
-                  <p className="text-xs text-[var(--muted)]">
-                    {background.total_frames} frame
-                    {background.fps ? ` · ${(background.total_frames / background.fps).toFixed(1)}s` : ""}
-                    {background.profile_id ? ` · ${background.profile_id}` : ""}
-                  </p>
-                )}
-                <div className="flex flex-wrap gap-2">
+                Nền có hiệu ứng
+              </SectionTitle>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={locked || backgroundBuilding || exportGaps.length > 0}
+                  onClick={() => onBuildBackground?.(backgroundReady || background?.state === "stale")}
+                  className="rounded-xl border border-[var(--gold)] px-3 py-2 text-xs font-semibold text-[var(--gold)] disabled:opacity-50"
+                >
+                  {backgroundBuilding ? "Đang dựng…" : backgroundReady ? "Dựng lại nền" : "Dựng nền"}
+                </button>
+                {background.path && (
                   <button
                     type="button"
-                    disabled={locked || backgroundBuilding || exportGaps.length > 0}
-                    onClick={() => onBuildBackground?.(backgroundReady || background?.state === "stale")}
-                    className="rounded-xl border border-[var(--gold)] px-3 py-2 text-xs font-semibold text-[var(--gold)] disabled:opacity-50"
+                    onClick={() => onReveal(background.path!.replace(/[\\/][^\\/]+$/, ""))}
+                    className={btnSecondary}
                   >
-                    {backgroundBuilding ? "Đang dựng…" : backgroundReady ? "Dựng lại nền" : "Dựng nền"}
+                    Mở thư mục nền
                   </button>
-                  {background.path && (
-                    <button
-                      type="button"
-                      onClick={() => onReveal(background.path!.replace(/[\\/][^\\/]+$/, ""))}
-                      className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)]"
-                    >
-                      Mở thư mục nền
-                    </button>
+                )}
+                {onCleanupBackground && (
+                  <button
+                    type="button"
+                    disabled={locked || backgroundBuilding}
+                    onClick={onCleanupBackground}
+                    className={btnSecondary}
+                  >
+                    Dọn bản nền cũ
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] leading-4 text-[var(--muted)]">
+                Xuất video tự dựng nền nếu chưa có. Dựng trước giúp kiểm tra nền.
+              </p>
+              <Disclosure
+                title="Nâng cao"
+                summary={
+                  typeof background.total_frames === "number" && background.total_frames > 0
+                    ? `${background.total_frames} frame`
+                    : undefined
+                }
+              >
+                <div className="space-y-2">
+                  {background.reason && background.state !== "ready" && (
+                    <p className="text-xs leading-5 text-[var(--muted)]">{background.reason}</p>
                   )}
-                  {onCleanupBackground && (
-                    <button
-                      type="button"
-                      disabled={locked || backgroundBuilding}
-                      onClick={onCleanupBackground}
-                      className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)] hover:border-[var(--gold)] disabled:opacity-50"
-                    >
-                      Dọn bản nền cũ
-                    </button>
+                  {typeof background.total_frames === "number" && background.total_frames > 0 && (
+                    <p className="text-xs text-[var(--muted)]">
+                      {background.total_frames} frame
+                      {background.fps ? ` · ${(background.total_frames / background.fps).toFixed(1)}s` : ""}
+                      {background.profile_id ? ` · ${background.profile_id}` : ""}
+                    </p>
                   )}
                 </div>
-                <p className="text-[11px] leading-4 text-[var(--muted)]">
-                  Xuất video vẫn tự dựng nền nếu chưa có. Dựng trước giúp kiểm tra nền và tách khỏi bước ghép lời.
-                </p>
-              </div>
-            </details>
-          </div>
-        )}
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            disabled={
-              locked ||
-              backgroundBuilding ||
-              lines.length === 0 ||
-              exportGaps.length > 0 ||
-              !exportDir.trim()
-            }
-            onClick={startExport}
-            className="rounded-2xl bg-[var(--gold)] px-5 py-3 text-sm font-semibold text-[#1a1206] disabled:opacity-60"
-          >
-            {locked
-              ? `Đang xuất video…${renderPercent ? ` ${renderPercent}%` : ""}`
-              : outputs
-                ? "Xuất lại hai video"
-                : "Xuất hai video"}
-          </button>
-        </div>
-        {exportGaps.length > 0 && (
-          <p className="text-sm text-[var(--muted)]">
-            Chưa xuất được vì còn thiếu {exportGaps.join(", ")}.{" "}
-            {onFillGaps ? (
-              <button type="button" className="text-[var(--gold)]" onClick={() => leaveIfSaved(onFillGaps)}>
-                Bổ sung file trong khai báo
-              </button>
-            ) : (
-              "Hãy bổ sung file trong phần khai báo."
-            )}
-          </p>
-        )}
-        {outputs && (
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="text-[var(--muted)]">Bản đã xuất:</span>
-            <button type="button" className="hover:text-[var(--gold)]" onClick={() => onReveal(outputs.vocal)}>
-              {fileName(outputs.vocal)}
-            </button>
-            <button type="button" className="hover:text-[var(--gold)]" onClick={() => onReveal(outputs.instrumental)}>
-              {fileName(outputs.instrumental)}
-            </button>
-            <button type="button" className="text-[var(--gold)]" onClick={() => onReveal(outputs.directory)}>
-              Mở thư mục
-            </button>
-          </div>
-        )}
-      </div>
+              </Disclosure>
+            </Panel>
+          )}
 
-      <section className="rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-5">
-        <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--gold)] uppercase">Tiến trình</h2>
-        <ol className="mt-3 max-h-48 space-y-1 overflow-auto text-sm leading-6 text-[var(--muted)]">
-          {log.map((line, index) => (
-            <li key={`${index}-${line}`}>{line}</li>
-          ))}
-        </ol>
-      </section>
-      </div>
-    </div>
+          <Disclosure title="Nhật ký" summary={`${log.length} dòng`}>
+            {log.length === 0 ? (
+              <p className="text-xs text-[var(--muted)]">Chưa có nhật ký.</p>
+            ) : (
+              <ol className="max-h-56 space-y-1 overflow-auto text-xs leading-5 text-[var(--muted)]">
+                {log.map((line, index) => (
+                  <li key={`${index}-${line}`}>{line}</li>
+                ))}
+              </ol>
+            )}
+          </Disclosure>
+        </div>
+      </Drawer>
     </div>
   );
 }

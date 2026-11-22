@@ -3,9 +3,9 @@
 import { useEffect, useState } from "react";
 
 import type { Job, RestoreSettings } from "@/lib/types";
+import { inputClass } from "@/components/ui/field";
 
-const fieldClass =
-  "w-full rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2.5 text-sm outline-none transition focus:border-[var(--gold)]";
+const fieldClass = inputClass;
 
 function settingsFrom(restore: RestoreSettings | null | undefined): RestoreSettings {
   return {

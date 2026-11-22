@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -21,13 +22,21 @@ from karaoke.assets import (
     ASSET_MAX_BYTES,
     ASSET_MAX_FILES,
     AssetError,
+    asset_dir,
     assets_usage,
     cleanup_assets,
+    clip_path,
     delete_asset,
+    ensure_asset_thumbnail,
+    forget_project_paths,
     known_project_paths,
     list_assets,
     load_asset,
+    missing_project_entries,
+    missing_project_paths,
+    referenced_asset_projects,
     register_project_path,
+    rename_asset,
     save_asset_from_preview,
 )
 from karaoke.background import (
@@ -62,10 +71,12 @@ from karaoke.project import (
     project_from_fields,
     project_path_for,
     public_project,
+    recent_projects,
     restore_from_payload,
     save_project,
     sync_project_file,
 )
+from karaoke.settings import load_settings, save_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -210,6 +221,24 @@ class StudioAssetRequest(BaseModel):
     effect_plan: dict = Field(default_factory=dict)
     duration: float = 16
     output_profile: str = "landscape_1080p"
+    reuse: bool = True
+
+
+class StudioAssetRenameRequest(BaseModel):
+    name: str = ""
+
+
+class SettingsRequest(BaseModel):
+    gemini_consent: bool | None = None
+    device: str | None = None
+    model_name: str | None = None
+    output_dir: str | None = None
+
+
+class ForgetProjectsRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+    missing_only: bool = False
+    parent_exists: bool | None = None
 
 
 class BackgroundRequest(BaseModel):
@@ -546,7 +575,7 @@ def _prune_studio_jobs() -> None:
     stale = [
         job_id
         for job_id, record in _studio_jobs.items()
-        if record["status"] in {"done", "error"}
+        if record["status"] in {"done", "error", "cancelled"}
         and now - record["created"] > _STUDIO_JOB_TTL_SECONDS
     ]
     for job_id in stale:
@@ -556,7 +585,7 @@ def _prune_studio_jobs() -> None:
     finished = sorted(
         (record["created"], job_id)
         for job_id, record in _studio_jobs.items()
-        if record["status"] in {"done", "error"}
+        if record["status"] in {"done", "error", "cancelled"}
     )
     for _created, job_id in finished:
         if len(_studio_jobs) <= _STUDIO_JOB_LIMIT:
@@ -573,12 +602,18 @@ def _run_studio_job(
         with _lock:
             record = _studio_jobs.get(job_id)
             if record is not None:
+                if record.get("status") == "cancelled":
+                    raise StudioError("Đã huỷ render.")
                 record["done"] = done
                 record["total"] = total
                 record["percent"] = round(100.0 * done / max(1, total))
 
     try:
         with _STUDIO_RENDER_SEMAPHORE:
+            with _lock:
+                record = _studio_jobs.get(job_id)
+                if record is None or record.get("status") == "cancelled":
+                    raise StudioError("Đã huỷ render.")
             result = render_preview(
                 path,
                 body.effect_plan,
@@ -587,20 +622,39 @@ def _run_studio_job(
                 full_resolution=True,
                 progress=progress,
             )
+            with _lock:
+                record = _studio_jobs.get(job_id)
+                if record is None or record.get("status") == "cancelled":
+                    raise StudioError("Đã huỷ render.")
         payload = _preview_payload(result)
         with _lock:
             record = _studio_jobs.get(job_id)
-            if record is not None:
+            if record is not None and record.get("status") != "cancelled":
                 record["status"] = "done"
                 record["result"] = payload
                 record["percent"] = 100
     except Exception as error:
-        traceback.print_exc()
         with _lock:
             record = _studio_jobs.get(job_id)
-            if record is not None:
+            cancelled = record is not None and record.get("status") == "cancelled"
+            if record is not None and not cancelled:
                 record["status"] = "error"
                 record["error"] = f"Không render được bản chuẩn: {error}"
+        if not cancelled:
+            traceback.print_exc()
+
+
+def _studio_job_public(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "created": record["created"],
+        "error": record["error"],
+        "result": record["result"],
+        "done": record.get("done", 0),
+        "total": record.get("total", 0),
+        "percent": record.get("percent", 0),
+    }
 
 
 @app.post("/api/studio/render")
@@ -671,16 +725,27 @@ def studio_render_job(job_id: str):
         record = _studio_jobs.get(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
-        return {
-            "id": record["id"],
-            "status": record["status"],
-            "created": record["created"],
-            "error": record["error"],
-            "result": record["result"],
-            "done": record.get("done", 0),
-            "total": record.get("total", 0),
-            "percent": record.get("percent", 0),
-        }
+        return _studio_job_public(record)
+
+
+@app.post("/api/studio/render-job/{job_id}/cancel")
+def studio_render_job_cancel(job_id: str):
+    """Request cancellation of a running background render.
+
+    FFmpeg itself cannot be interrupted mid-encode, so the worker checks the
+    record between progress callbacks and discards the result.
+    """
+    if not _STUDIO_JOB_PATTERN.fullmatch(str(job_id or "")):
+        raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
+    with _lock:
+        _prune_studio_jobs()
+        record = _studio_jobs.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Không thấy tác vụ render.")
+        if record["status"] == "rendering":
+            record["status"] = "cancelled"
+            record["error"] = ""
+        return _studio_job_public(record)
 
 
 @app.get("/api/studio/preview/{preview_id}")
@@ -772,6 +837,32 @@ def _referenced_asset_ids() -> set[str] | None:
     return ids
 
 
+def _referenced_asset_projects() -> dict[str, list[str]] | None:
+    """Map asset id -> project paths, including currently open jobs."""
+    mapping = referenced_asset_projects()
+    if mapping is None:
+        return None
+    with _lock:
+        records = list(_jobs.values())
+    for record in records:
+        prepared = record.get("prepared") or {}
+        label = str(prepared.get("project_path") or "").strip() or "dự án đang mở"
+        effects = list(prepared.get("background_effects") or [])
+        project = record.get("project")
+        if isinstance(project, dict):
+            effects.extend(project.get("background_effects") or [])
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            asset_id = str(effect.get("asset_id") or "").strip()
+            if not asset_id:
+                continue
+            paths = mapping.setdefault(asset_id, [])
+            if label not in paths:
+                paths.append(label)
+    return mapping
+
+
 @app.post("/api/studio/assets")
 def studio_asset_create(body: StudioAssetRequest):
     text = str(body.image_path or "").strip()
@@ -792,6 +883,7 @@ def studio_asset_create(body: StudioAssetRequest):
             effect_plan=body.effect_plan,
             duration=body.duration,
             output_profile=body.output_profile,
+            reuse=body.reuse,
         )
     except AssetError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -813,8 +905,16 @@ def studio_asset_create(body: StudioAssetRequest):
 
 
 @app.get("/api/studio/assets")
-def studio_assets():
-    return {"assets": list_assets()}
+def studio_assets(summary: int = 0, usage: int = 0):
+    assets = list_assets(summary=bool(summary))
+    if usage:
+        refs = _referenced_asset_projects()
+        known = refs is not None
+        for asset in assets:
+            asset_id = str(asset.get("id") or "")
+            asset["used_projects"] = list(refs.get(asset_id, [])) if known else []
+            asset["usage_known"] = known
+    return {"assets": assets}
 
 
 @app.get("/api/studio/assets/usage")
@@ -823,7 +923,7 @@ def studio_asset_usage():
 
 
 @app.post("/api/studio/assets/cleanup")
-def studio_asset_cleanup():
+def studio_asset_cleanup(dry_run: int = 0):
     try:
         referenced = _referenced_asset_ids()
         if referenced is None:
@@ -831,7 +931,9 @@ def studio_asset_cleanup():
                 status_code=409,
                 detail="Không quét được toàn bộ dự án; giữ nguyên asset để an toàn.",
             )
-        return cleanup_assets(keep_ids=referenced)
+        result = cleanup_assets(keep_ids=referenced, dry_run=bool(dry_run))
+        result["dry_run"] = bool(dry_run)
+        return result
     except AssetError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -852,10 +954,60 @@ def studio_asset_open(asset_id: str):
     return {"asset": meta, "image": str(image)}
 
 
+@app.post("/api/studio/assets/{asset_id}/edit")
+def studio_asset_edit(asset_id: str):
+    """Alias of ``/open`` while clients migrate to the "edit" wording."""
+    return studio_asset_open(asset_id)
+
+
+@app.post("/api/studio/assets/{asset_id}/reveal")
+def studio_asset_reveal(asset_id: str):
+    meta = load_asset(asset_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    try:
+        clip = clip_path(meta)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not clip.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy clip asset.")
+    subprocess.run(["open", "-R", str(clip)], check=False)
+    return {"ok": True}
+
+
+@app.get("/api/studio/assets/{asset_id}/thumb")
+def studio_asset_thumb(asset_id: str):
+    meta = load_asset(asset_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    try:
+        clip = clip_path(meta)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not clip.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy clip asset.")
+    try:
+        thumb = ensure_asset_thumbnail(meta)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not thumb.is_file():
+        raise HTTPException(status_code=404, detail="Không thấy thumbnail asset.")
+    return FileResponse(thumb, media_type="image/jpeg", filename=f"{asset_id}.jpg")
+
+
+@app.patch("/api/studio/assets/{asset_id}")
+def studio_asset_rename(asset_id: str, body: StudioAssetRenameRequest):
+    if load_asset(asset_id) is None:
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    try:
+        meta = rename_asset(asset_id, body.name)
+    except AssetError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"asset": meta}
+
+
 @app.get("/api/studio/assets/{asset_id}/clip")
 def studio_asset_clip(asset_id: str):
-    from karaoke.assets import clip_path, load_asset
-
     meta = load_asset(asset_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Không thấy asset.")
@@ -868,8 +1020,62 @@ def studio_asset_clip(asset_id: str):
     return FileResponse(path, media_type="video/mp4", filename=f"{asset_id}.mp4")
 
 
+def _asset_reference_labels(asset_id: str) -> list[str]:
+    labels: list[str] = []
+
+    def add(value: str) -> None:
+        text = str(value or "").strip() or "dự án đang mở"
+        if text == "dự án đang mở":
+            label = text
+        else:
+            label = Path(text).name or text
+        if label not in labels:
+            labels.append(label)
+
+    mapping = referenced_asset_projects()
+    for path in (mapping or {}).get(asset_id, []):
+        add(path)
+    with _lock:
+        records = list(_jobs.values())
+    for record in records:
+        prepared = record.get("prepared") or {}
+        project = record.get("project") if isinstance(record.get("project"), dict) else {}
+        effects = list(prepared.get("background_effects") or [])
+        effects.extend(project.get("background_effects") or [])
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            if str(effect.get("asset_id") or "").strip() != asset_id:
+                continue
+            add(str(prepared.get("project_path") or ""))
+            break
+    return labels
+
+
 @app.delete("/api/studio/assets/{asset_id}")
-def studio_asset_delete(asset_id: str):
+def studio_asset_delete(asset_id: str, force: bool = False):
+    try:
+        folder = asset_dir(asset_id)
+    except AssetError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if not folder.is_dir():
+        raise HTTPException(status_code=404, detail="Không thấy asset.")
+    referenced = _referenced_asset_ids()
+    if referenced is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Không quét được toàn bộ dự án; giữ nguyên asset để an toàn.",
+        )
+    if asset_id in referenced and not force:
+        labels = _asset_reference_labels(asset_id)[:3]
+        used_in = ", ".join(labels) or "dự án đang mở"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Clip đang được dùng trong {used_in}. "
+                "Bỏ clip khỏi các dự án đó trước khi xoá."
+            ),
+        )
     try:
         deleted = delete_asset(asset_id)
     except AssetError as error:
@@ -1103,6 +1309,58 @@ def open_project(body: OpenProjectRequest):
         "project": project_public,
         "job": _store_job(record),
     }
+
+
+@app.get("/api/projects/recent")
+def projects_recent(limit: int = 12):
+    """Compact cards for the dashboard, newest project file first."""
+    try:
+        cap = max(1, min(50, int(limit)))
+    except (TypeError, ValueError):
+        cap = 12
+    try:
+        paths = known_project_paths()
+    except Exception:
+        paths = []
+    return {"projects": recent_projects(paths, limit=cap)}
+
+
+@app.get("/api/projects/registry/stale")
+def projects_registry_stale():
+    entries = missing_project_entries()
+    return {
+        "paths": [str(entry["path"]) for entry in entries],
+        "entries": [
+            {"path": str(entry["path"]), "parent_exists": entry["parent_exists"]}
+            for entry in entries
+        ],
+    }
+
+
+@app.post("/api/projects/registry/forget")
+def projects_registry_forget(body: ForgetProjectsRequest):
+    removed = forget_project_paths(
+        paths=body.paths,
+        missing_only=body.missing_only,
+        parent_exists=body.parent_exists,
+    )
+    return {"removed": removed}
+
+
+@app.get("/api/settings")
+def get_settings():
+    return {"settings": load_settings()}
+
+
+@app.put("/api/settings")
+def update_settings(body: SettingsRequest):
+    current = load_settings()
+    updates = body.model_dump(exclude_unset=True)
+    merged = {**current}
+    for key, value in updates.items():
+        if value is not None:
+            merged[key] = value
+    return {"settings": save_settings(merged)}
 
 
 @app.post("/api/jobs")
