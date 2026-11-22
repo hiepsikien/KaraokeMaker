@@ -66,6 +66,8 @@ export type ExportOptions = {
 };
 
 type TimingDraft = {
+  version?: number;
+  savedAt?: number;
   lines: TimedLine[];
   removed: TimedLine[];
   dirty: boolean;
@@ -74,8 +76,18 @@ type TimingDraft = {
   exportFormat: ExportOptions["format"];
 };
 
+const DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isUsableDraft(value: TimingDraft | null): value is TimingDraft {
+  if (!value || !Array.isArray(value.lines)) return false;
+  if (value.version != null && value.version !== 1) return false;
+  if (value.savedAt != null && Date.now() - value.savedAt > DRAFT_MAX_AGE_MS) return false;
+  return true;
+}
+
 export function TimingEditor({
   jobId,
+  projectPath = "",
   initialLines,
   locked,
   exported = false,
@@ -98,6 +110,7 @@ export function TimingEditor({
   exportGaps = [],
 }: {
   jobId: string;
+  projectPath?: string;
   initialLines: TimedLine[];
   locked: boolean;
   exported?: boolean;
@@ -134,11 +147,21 @@ export function TimingEditor({
   const audioRef = useRef<HTMLAudioElement>(null);
   const { push } = useNotices();
   const { confirm } = useDialog();
-  const draftKey = sessionKeys.timingDraft(jobId);
+  const draftKey = sessionKeys.timingDraft(projectPath || jobId);
+  const legacyDraftKey = projectPath ? sessionKeys.timingDraft(jobId) : "";
 
   const [restored] = useState<TimingDraft | null>(() => {
     const draft = readSession<TimingDraft | null>(draftKey, null);
-    return draft && Array.isArray(draft.lines) ? draft : null;
+    if (isUsableDraft(draft)) return draft;
+    if (legacyDraftKey) {
+      const legacy = readSession<TimingDraft | null>(legacyDraftKey, null);
+      if (isUsableDraft(legacy)) {
+        writeSession(draftKey, legacy);
+        clearSession(legacyDraftKey);
+        return legacy;
+      }
+    }
+    return null;
   });
   const [lines, setLines] = useState<TimedLine[]>(() => cloneLines(restored?.lines ?? initialLines));
   const [time, setTime] = useState(0);
@@ -193,19 +216,71 @@ export function TimingEditor({
         : "Chưa xuất";
 
   const restoredNotice = useRef(false);
+  const suppressFlush = useRef(false);
   useEffect(() => {
     if (!restored?.dirty || restoredNotice.current) return;
     restoredNotice.current = true;
-    push({ tone: "info", message: "Đã khôi phục bản nháp chưa lưu" });
-  }, [push, restored]);
+    push({
+      tone: "info",
+      message: "Đã khôi phục bản nháp chưa lưu",
+      action: {
+        label: "Bỏ bản nháp",
+        onClick: () => {
+          suppressFlush.current = true;
+          setLines(cloneLines(initialLines));
+          setRemoved([]);
+          setDirty(false);
+          clearSession(draftKey);
+          if (legacyDraftKey) clearSession(legacyDraftKey);
+        },
+      },
+    });
+  }, [push, restored, initialLines, draftKey, legacyDraftKey]);
+
+  const latestDraft = useRef<TimingDraft | null>(null);
+  const dirtyRef = useRef(dirty);
+  const writeTimer = useRef<number | null>(null);
+  dirtyRef.current = dirty;
+  latestDraft.current = {
+    version: 1,
+    savedAt: Date.now(),
+    lines,
+    removed,
+    dirty,
+    selectedLine,
+    exportDir,
+    exportFormat,
+  };
 
   useEffect(() => {
     if (!dirty) {
       clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
       return;
     }
-    writeSession<TimingDraft>(draftKey, { lines, removed, dirty, selectedLine, exportDir, exportFormat });
-  }, [draftKey, lines, removed, dirty, selectedLine, exportDir, exportFormat]);
+    if (writeTimer.current) window.clearTimeout(writeTimer.current);
+    writeTimer.current = window.setTimeout(() => {
+      if (latestDraft.current) writeSession(draftKey, latestDraft.current);
+    }, 300);
+    return () => {
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
+    };
+  }, [draftKey, legacyDraftKey, lines, removed, dirty, selectedLine, exportDir, exportFormat]);
+
+  useEffect(() => {
+    function onPageHide() {
+      if (!suppressFlush.current && dirtyRef.current && latestDraft.current) {
+        writeSession(draftKey, latestDraft.current);
+      }
+    }
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      if (!suppressFlush.current && dirtyRef.current && latestDraft.current) {
+        writeSession(draftKey, latestDraft.current);
+      }
+    };
+  }, [draftKey]);
 
   useEffect(() => {
     if (defaultOutputDir) setExportDir((current) => current || defaultOutputDir);
@@ -216,6 +291,7 @@ export function TimingEditor({
   }, [outputs?.directory]);
 
   function markDirty() {
+    suppressFlush.current = false;
     if (!dirty) setDirty(true);
     if (exported) onResumeEditing?.();
   }
@@ -292,7 +368,10 @@ export function TimingEditor({
       danger: true,
     });
     if (ok) {
+      suppressFlush.current = true;
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
       clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
       leave();
     }
   }
@@ -421,8 +500,11 @@ export function TimingEditor({
       }
       const body = await response.json();
       setSavedPath(body.path || "");
+      suppressFlush.current = true;
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
       setDirty(false);
       clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
       push({ tone: "success", message: "Đã lưu dự án" });
       return true;
     } catch {
@@ -431,7 +513,17 @@ export function TimingEditor({
     }
   }
 
-  useDirty("karaoke.timing", dirty, saveTiming);
+  useDirty(
+    "karaoke.timing",
+    dirty,
+    saveTiming,
+    () => {
+      suppressFlush.current = true;
+      if (writeTimer.current) window.clearTimeout(writeTimer.current);
+      clearSession(draftKey);
+      if (legacyDraftKey) clearSession(legacyDraftKey);
+    },
+  );
 
   async function pickExportDir() {
     if (!onBrowseOutput) return;

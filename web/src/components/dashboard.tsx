@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 
 import { PageHeader } from "@/components/ui/page-header";
 import { Badge, btnPrimary, btnSecondary, EmptyState, Panel, Spinner } from "@/components/ui/primitives";
 import { IconFolder, IconPlay, IconPlus, IconSparkles } from "@/components/ui/icons";
 import { useNotices } from "@/components/ui/toast";
 import { readError } from "@/lib/api";
+import { useGuardedNavigate } from "@/lib/navigation";
 import { formatRelative, profileMeta } from "@/lib/format";
 
 type RecentProject = {
@@ -26,7 +26,7 @@ const STATUS: Record<string, { label: string; tone: "muted" | "gold" | "success"
 };
 
 export function Dashboard() {
-  const router = useRouter();
+  const navigate = useGuardedNavigate();
   const { push } = useNotices();
   const [projects, setProjects] = useState<RecentProject[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,7 +69,7 @@ export function Dashboard() {
       const data = (await response.json()) as { paths?: string[] };
       const path = data.paths?.[0];
       if (!path) return;
-      router.push(`/project?project=${encodeURIComponent(path)}`);
+      await navigate(`/project?project=${encodeURIComponent(path)}`);
     } catch {
       push({ tone: "error", message: "Không mở được hộp thoại chọn dự án. Kiểm tra server Python." });
     } finally {
@@ -88,7 +88,7 @@ export function Dashboard() {
               <IconFolder />
               {busy ? "Đang mở…" : "Mở file dự án"}
             </button>
-            <button type="button" className={btnPrimary} onClick={() => router.push("/project?new=1")}>
+            <button type="button" className={btnPrimary} onClick={() => void navigate("/project?new=1")}>
               <IconPlus />
               Tạo dự án mới
             </button>
@@ -120,7 +120,7 @@ export function Dashboard() {
               title="Chưa có dự án nào"
               description="Tạo dự án mới để khai báo audio, lời và ảnh. Dự án đã lưu sẽ xuất hiện ở đây để mở lại bằng một click."
               action={
-                <button type="button" className={btnPrimary} onClick={() => router.push("/project?new=1")}>
+                <button type="button" className={btnPrimary} onClick={() => void navigate("/project?new=1")}>
                   <IconPlus /> Tạo dự án mới
                 </button>
               }
@@ -134,7 +134,7 @@ export function Dashboard() {
                   <li key={project.path}>
                     <button
                       type="button"
-                      onClick={() => router.push(`/project?project=${encodeURIComponent(project.path)}`)}
+                      onClick={() => void navigate(`/project?project=${encodeURIComponent(project.path)}`)}
                       className="group flex h-full w-full flex-col gap-2 rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 text-left transition hover:border-[var(--gold)] hover:bg-black/20"
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -194,7 +194,7 @@ export function Dashboard() {
             </p>
             <button
               type="button"
-              onClick={() => router.push("/studio")}
+              onClick={() => void navigate("/studio")}
               className="text-left text-[var(--gold)] hover:text-white"
             >
               Mở AI Studio →

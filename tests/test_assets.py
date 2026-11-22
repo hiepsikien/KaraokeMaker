@@ -63,6 +63,10 @@ def make_audio(path: Path, seconds: float = 1.0) -> Path:
     return path
 
 
+def folder_bytes(folder: Path) -> int:
+    return sum(path.stat().st_size for path in folder.rglob("*") if path.is_file())
+
+
 def make_asset(
     data_root: Path,
     hex_id: str,
@@ -111,6 +115,10 @@ class AssetQuotaTests(unittest.TestCase):
         referenced = make_asset(self.data_root, "2" * 32, age_days=30)
         middle = make_asset(self.data_root, "3" * 32, age_days=20)
         newest = make_asset(self.data_root, "4" * 32, age_days=10)
+        referenced_bytes = folder_bytes(referenced)
+        newest_bytes = folder_bytes(newest)
+        oldest_bytes = folder_bytes(oldest)
+        middle_bytes = folder_bytes(middle)
 
         result = cleanup_assets(
             keep_ids={referenced.name},
@@ -128,17 +136,20 @@ class AssetQuotaTests(unittest.TestCase):
         self.assertTrue(referenced.exists())
         self.assertTrue(newest.exists())
         self.assertEqual(result["count"], 2)
-        self.assertEqual(result["bytes"], 200)
-        self.assertEqual(result["freed_bytes"], 200)
+        self.assertEqual(result["bytes"], referenced_bytes + newest_bytes)
+        self.assertEqual(result["freed_bytes"], oldest_bytes + middle_bytes)
 
     def test_cleanup_enforces_byte_quota_oldest_first(self):
         oldest = make_asset(self.data_root, "a" * 32, size=200, age_days=50)
         older = make_asset(self.data_root, "b" * 32, size=200, age_days=40)
         newest = make_asset(self.data_root, "c" * 32, size=200, age_days=30)
+        kept_bytes = folder_bytes(newest)
+        oldest_bytes = folder_bytes(oldest)
+        older_bytes = folder_bytes(older)
 
         result = cleanup_assets(
             max_files=100,
-            max_bytes=250,
+            max_bytes=kept_bytes + 10,
             min_age_days=0,
         )
 
@@ -149,9 +160,9 @@ class AssetQuotaTests(unittest.TestCase):
         self.assertFalse(oldest.exists())
         self.assertFalse(older.exists())
         self.assertTrue(newest.exists())
-        self.assertEqual(result["freed_bytes"], 400)
+        self.assertEqual(result["freed_bytes"], oldest_bytes + older_bytes)
         self.assertEqual(result["count"], 1)
-        self.assertEqual(result["bytes"], 200)
+        self.assertEqual(result["bytes"], kept_bytes)
 
     def test_cleanup_never_deletes_assets_newer_than_min_age(self):
         old = make_asset(self.data_root, "d" * 32, age_days=10)
@@ -215,7 +226,13 @@ class AssetQuotaTests(unittest.TestCase):
         usage = assets_usage()
 
         self.assertEqual(usage["count"], 3)
-        self.assertEqual(usage["bytes"], 100 + 250 + 75)
+        self.assertEqual(
+            usage["bytes"],
+            sum(
+                folder_bytes(self.assets_root / self.asset_id(hex_id))
+                for hex_id in ("a" * 32, "b" * 32, "c" * 32)
+            ),
+        )
 
 
     def test_project_registry_round_trips_existing_paths(self):
@@ -224,6 +241,20 @@ class AssetQuotaTests(unittest.TestCase):
         register_project_path(project)
         register_project_path(project)
         self.assertEqual(known_project_paths(), [project.resolve()])
+
+    def test_project_registry_keeps_paths_on_missing_volumes(self):
+        stale = self.data_root / "deleted.karaoke.json"
+        external = self.data_root / "unmounted" / "song.karaoke.json"
+        (self.assets_root / ".projects.json").write_text(
+            json.dumps([str(stale), str(external)]),
+            encoding="utf-8",
+        )
+
+        paths = known_project_paths()
+
+        self.assertIn(external, paths)
+        self.assertNotIn(stale, paths)
+        self.assertIsNone(referenced_asset_projects())
 
     def test_list_assets_summary_omits_effect_plan(self):
         folder = make_asset(self.data_root, "a" * 32, age_days=1)
@@ -304,7 +335,7 @@ class AssetQuotaTests(unittest.TestCase):
         result = cleanup_assets(max_files=1, max_bytes=10**9, min_age_days=0, dry_run=True)
 
         self.assertEqual(result["deleted"], [self.asset_id("a" * 32)])
-        self.assertEqual(result["freed_bytes"], 120)
+        self.assertEqual(result["freed_bytes"], folder_bytes(oldest))
         self.assertTrue(oldest.exists())
         self.assertTrue(newest.exists())
 
@@ -412,6 +443,10 @@ class AssetStoreTests(unittest.TestCase):
         second = save_asset_from_preview(**kwargs)
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(len(list_assets()), 1)
+
+        forced = save_asset_from_preview(**kwargs, reuse=False)
+        self.assertNotEqual(forced["id"], first["id"])
+        self.assertEqual(len(list_assets()), 2)
 
     def test_save_list_validate_and_delete_asset(self):
         meta = save_asset_from_preview(

@@ -698,7 +698,7 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
 
 - `npx tsc --noEmit`: pass.
 - `npm run build`: pass (4 route: `/`, `/project`, `/studio`, `/_not-found`).
-- `python -m unittest discover -s tests`: **202 tests OK**.
+- `python -m unittest discover -s tests`: **203 tests OK**.
 - API smoke qua server thật: `/api/health`, `/api/settings`, `/api/projects/recent`,
   `/api/studio/assets?summary=1&usage=1`, `/api/studio/assets/usage` đều 200.
 - UI smoke bằng browser thật (sau khi browser tool có lại): dashboard, project editor,
@@ -713,3 +713,38 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
   - Toast “phiên trước đã hết” xuất hiện khi mở project sau restart server → bỏ qua khi có `?project=`.
   - Menu thư viện không đóng bằng Escape → thêm handler.
   - Conflict dialog ghi “chọn Ở lại” nhưng nút là “Huỷ” → đổi nhãn nút.
+
+
+---
+
+## 14. Sửa theo review PR #9
+
+### Blocker / high
+
+- Chặn URL sync ghi đè `?project=` bằng session cũ: URL sync chỉ chạy khi
+  `openedProject` khớp `projectParam`, và bỏ qua khi `?new=1`.
+- Tạo `useGuardedNavigate()` dùng chung cho top nav, PageHeader “Danh sách dự án”,
+  dashboard card và “Mở file”. Mọi chuyển route đều đi qua dirty dialog.
+- Draft timing đổi key sang `projectPath` (fallback `jobId`), có migrate key legacy,
+  `version`, `savedAt`, TTL 7 ngày, debounce 300ms và flush khi `pagehide`/unmount.
+  Toast khôi phục có action `Bỏ bản nháp`.
+- Discard đi qua `discard` callback của dirty registry, và suppress flush khi unmount
+  để không “hồi sinh” bản nháp vừa bỏ.
+- `openProjectPath`/`startCreate` clear `jobId` cũ; tracked job chỉ được nhận nếu
+  `project_path` khớp project hiện tại (so sánh NFC).
+
+### Cải thiện theo review
+
+- Thumbnail có semaphore toàn cục (mặc định 2), dọn thumb cũ khi clip hash đổi.
+- Dialog: focus input trước, ưu tiên primary; resolve promise ngoài state updater;
+  dialog thứ hai resolve promise cũ thay vì treo.
+- Thông điệp 409 không còn lộ `force=true`.
+- Quota asset tính cả `meta.json` và thumbnail; registry giữ path trên volume đang
+  unmount để cleanup fail-closed.
+- `Tạo lại clip chuẩn` gửi `reuse=false` để thực sự tạo asset mới.
+- Nút `Huỷ` khi render gọi endpoint cancel; unmount/đổi profile cũng cancel job.
+- Đổi profile/thời lượng xoá `renderStates` + preview cũ để không hiện clip stale.
+- `_SHA_CACHE` có cap 512 entry.
+- Settings rollback giá trị cũ nếu PUT thất bại.
+- `formatSeconds`, search underscore, Unicode path dedupe, checklist tuỳ chọn,
+  trạng thái xuất theo `outputs`, toast stale-job sau restart đã sửa ở vòng QA trước.

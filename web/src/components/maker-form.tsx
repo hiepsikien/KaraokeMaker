@@ -16,6 +16,7 @@ import type { TimedLine } from "@/lib/cue";
 import { clearSession, sessionKeys, useSessionState } from "@/lib/session";
 import { trackJob, useTrackedJob } from "@/lib/jobs";
 import { useSettings } from "@/lib/settings";
+import { useGuardedNavigate } from "@/lib/navigation";
 import {
   emptyFields,
   fieldsFromProject,
@@ -29,6 +30,15 @@ import {
 } from "@/lib/types";
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project";
+
+function samePath(left: string, right: string) {
+  if (!left || !right) return false;
+  try {
+    return left.normalize("NFC") === right.normalize("NFC");
+  } catch {
+    return left === right;
+  }
+}
 
 async function readError(response: Response) {
   try {
@@ -46,7 +56,9 @@ export function MakerForm() {
   const startNew = params.get("new") === "1";
   const { settings } = useSettings();
   const { push } = useNotices();
+  const guardedNavigate = useGuardedNavigate();
   const handledParam = useRef("");
+  const [openedProject, setOpenedProject] = useState("");
 
   const [phase, setPhase] = useSessionState<Phase>(sessionKeys.makerPhase, "home");
   const [fields, setFields] = useSessionState<ProjectFields>(sessionKeys.makerFields, () => emptyFields());
@@ -56,8 +68,7 @@ export function MakerForm() {
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
-  const shouldTrackSavedJob =
-    !projectParam || handledParam.current === `p:${projectParam}`;
+  const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
   const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
 
   const aligning = job?.status === "running";
@@ -67,8 +78,15 @@ export function MakerForm() {
 
   useEffect(() => {
     if (!tracked) return;
+    if (
+      tracked.project_path &&
+      fields.project_path &&
+      !samePath(tracked.project_path, fields.project_path)
+    ) {
+      return;
+    }
     setJob(tracked);
-  }, [tracked]);
+  }, [tracked, fields.project_path]);
 
   useEffect(() => {
     if (!job?.id) return;
@@ -96,6 +114,13 @@ export function MakerForm() {
 
   useEffect(() => {
     if (!tracked) return;
+    if (
+      tracked.project_path &&
+      fields.project_path &&
+      !samePath(tracked.project_path, fields.project_path)
+    ) {
+      return;
+    }
     if (tracked.status === "editing" || tracked.status === "done") {
       setPhase("edit");
       setHasLines(Boolean(tracked.lines?.length));
@@ -121,20 +146,27 @@ export function MakerForm() {
       const key = `p:${projectParam}`;
       if (handledParam.current === key) return;
       handledParam.current = key;
+      setOpenedProject("");
+      setJob(null);
+      setJobId("");
+      clearSession(sessionKeys.makerJob);
       void openProjectPath(projectParam);
       return;
     }
     if (startNew && handledParam.current !== "new") {
       handledParam.current = "new";
+      setOpenedProject("");
       startCreate();
     }
   }, [projectParam, startNew]);
 
   useEffect(() => {
+    if (startNew) return;
+    if (projectParam && !samePath(openedProject, projectParam)) return;
     if (phase === "home" || !fields.project_path) return;
-    if (projectParam === fields.project_path) return;
+    if (samePath(projectParam, fields.project_path)) return;
     router.replace(`/project?project=${encodeURIComponent(fields.project_path)}`);
-  }, [fields.project_path, phase, projectParam, router]);
+  }, [fields.project_path, phase, projectParam, openedProject, startNew, router]);
 
   async function browse(kind: BrowseKind) {
     setNotice("");
@@ -218,6 +250,8 @@ export function MakerForm() {
     });
     setAlignReturn("setup");
     setPhase("setup");
+    setOpenedProject("");
+    setJobId("");
     clearSession(sessionKeys.makerJob);
     router.replace("/project");
   }
@@ -227,7 +261,7 @@ export function MakerForm() {
     const paths = await browse("project");
     const path = paths[0];
     if (!path) return;
-    router.push(`/project?project=${encodeURIComponent(path)}`);
+    await guardedNavigate(`/project?project=${encodeURIComponent(path)}`);
   }
 
   async function openProjectPath(path: string) {
@@ -241,6 +275,16 @@ export function MakerForm() {
       if (!response.ok) {
         setNotice(await readError(response));
         handledParam.current = "";
+        setOpenedProject("");
+        setJob(null);
+        setJobId("");
+        setHasLines(false);
+        setFields({
+          ...emptyFields(settings.output_dir),
+          device: settings.device || "cpu",
+          model_name: settings.model_name || "small",
+        });
+        setPhase("home");
         return;
       }
       const data = (await response.json()) as {
@@ -252,11 +296,14 @@ export function MakerForm() {
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
       if (data.notice) push({ tone: "info", message: data.notice });
+      setOpenedProject(path);
       if (data.phase === "edit" && data.job) {
         setJob(data.job);
+        setJobId(data.job.id);
         setPhase("edit");
       } else {
         setJob(null);
+        setJobId("");
         setPhase("setup");
       }
       handledParam.current = `p:${path}`;
@@ -264,6 +311,16 @@ export function MakerForm() {
     } catch {
       setNotice("Không mở được dự án. Server Python chưa chạy bản mới.");
       handledParam.current = "";
+      setOpenedProject("");
+      setJob(null);
+      setJobId("");
+      setHasLines(false);
+      setFields({
+        ...emptyFields(settings.output_dir),
+        device: settings.device || "cpu",
+        model_name: settings.model_name || "small",
+      });
+      setPhase("home");
     }
   }
 
@@ -525,7 +582,7 @@ export function MakerForm() {
             <Badge tone={exported ? "success" : hasLines ? "info" : "muted"}>
               {exported ? "Đã xuất" : hasLines ? "Đã ghép lời" : "Nháp"}
             </Badge>
-            <button type="button" className={btnGhost} onClick={() => router.push("/")}>
+            <button type="button" className={btnGhost} onClick={() => void guardedNavigate("/")}>
               Danh sách dự án
             </button>
           </>
@@ -697,6 +754,7 @@ export function MakerForm() {
         <TimingEditor
           key={job.id}
           jobId={job.id}
+          projectPath={fields.project_path || job.project_path || ""}
           initialLines={job.lines}
           locked={rendering}
           exported={exported}

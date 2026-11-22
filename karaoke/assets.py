@@ -59,6 +59,13 @@ _PROJECT_REFS_SNAPSHOT: tuple[
     tuple[tuple[str, int, int], ...], dict[str, list[str]]
 ] | None = None
 _THUMB_LOCKS: dict[str, threading.Lock] = {}
+# Thumbnail generation is cheap individually but expensive when the library
+# requests 100 posters at once. Keep it behind the same kind of bound as render.
+try:
+    _THUMB_WORKERS = max(1, int(os.environ.get("KARAOKE_THUMB_WORKERS", "2") or "2"))
+except ValueError:
+    _THUMB_WORKERS = 2
+_THUMB_SEMAPHORE = threading.Semaphore(_THUMB_WORKERS)
 
 
 @contextmanager
@@ -109,6 +116,8 @@ def _sha256(path: Path) -> str:
             digest.update(chunk)
     value = "sha256:" + digest.hexdigest()
     with _LOCK:
+        if len(_SHA_CACHE) >= 512:
+            _SHA_CACHE.clear()
         _SHA_CACHE[key] = value
     return value
 
@@ -271,6 +280,9 @@ def _find_reusable_asset(
             path = clip_path(meta)
             if not path.is_file() or path.stat().st_size <= 0:
                 continue
+            expected_sha = str(meta.get("clip_sha256") or "")
+            if expected_sha and _sha256(path) != expected_sha:
+                continue
         except (OSError, AssetError, TypeError, ValueError):
             continue
         return meta
@@ -363,23 +375,30 @@ def ensure_asset_thumbnail(meta: dict) -> Path:
         tmp = folder / f".{thumb.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.jpg"
         last_error: AssetError | None = None
         try:
-            for seek in (0.5, 0.0):
-                try:
-                    _run_thumbnail_ffmpeg(clip, tmp, seek)
-                    break
-                except AssetError as error:
-                    last_error = error
-                    tmp.unlink(missing_ok=True)
-            else:
-                raise AssetError(
-                    str(last_error) if last_error else "Không tạo được thumbnail."
-                )
+            with _THUMB_SEMAPHORE:
+                for seek in (0.5, 0.0):
+                    try:
+                        _run_thumbnail_ffmpeg(clip, tmp, seek)
+                        break
+                    except AssetError as error:
+                        last_error = error
+                        tmp.unlink(missing_ok=True)
+                else:
+                    raise AssetError(
+                        str(last_error) if last_error else "Không tạo được thumbnail."
+                    )
             try:
                 if not tmp.is_file() or tmp.stat().st_size <= 0:
                     raise AssetError("ffmpeg không tạo được thumbnail.")
                 os.replace(tmp, thumb)
             except OSError as error:
                 raise AssetError("Không lưu được thumbnail.") from error
+            for old in folder.glob(f"{THUMB_VERSION}-*.jpg"):
+                if old != thumb:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
         finally:
             tmp.unlink(missing_ok=True)
     return thumb
@@ -394,6 +413,7 @@ def _save_asset_from_preview_impl(
     effect_plan: dict,
     duration: float,
     output_profile: str,
+    reuse: bool = True,
 ) -> dict:
     """Copy a rendered Studio preview into the stable asset store."""
     if not is_preview_id(preview_id):
@@ -431,14 +451,15 @@ def _save_asset_from_preview_impl(
     if probe["frames"] and abs(probe["duration"] - frames / profile.fps) > 1.5 / profile.fps:
         raise AssetError("Clip preview có duration không khớp số frame.")
 
-    reusable = _find_reusable_asset(
-        image_hash=image_hash,
-        plan_hash=plan_hash,
-        profile=profile,
-        frames=frames,
-    )
-    if reusable is not None:
-        return reusable
+    if reuse:
+        reusable = _find_reusable_asset(
+            image_hash=image_hash,
+            plan_hash=plan_hash,
+            profile=profile,
+            frames=frames,
+        )
+        if reusable is not None:
+            return reusable
 
     asset_id = "bg_" + uuid.uuid4().hex
     folder = asset_dir(asset_id)
@@ -661,31 +682,9 @@ def _asset_usage_entry(folder: Path) -> dict | None:
         meta_path = folder / META_FILE
         if meta_path.is_symlink():
             return None
-        bytes_used: int | None = None
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                meta = None
-            if isinstance(meta, dict):
-                name = str(meta.get("clip_file") or CLIP_FILE)
-                if Path(name).name != name:
-                    return None
-                clip = folder / name
-                if clip.is_symlink():
-                    return None
-                try:
-                    info = clip.stat()
-                except OSError:
-                    return None
-                if not S_ISREG(info.st_mode):
-                    return None
-                bytes_used = info.st_size
+        bytes_used = _folder_size(folder)
         if bytes_used is None:
-            # Missing/corrupt metadata: fall back to the whole directory.
-            bytes_used = _folder_size(folder)
-            if bytes_used is None:
-                return None
+            return None
         info = meta_path.stat() if meta_path.is_file() else folder.stat()
         return {
             "id": folder.name,
@@ -774,7 +773,11 @@ def known_project_paths() -> list[Path]:
         except (TypeError, ValueError):
             continue
         if not path.is_file():
-            continue
+            # A deleted project in an existing folder is stale registry data;
+            # a missing parent usually means an unmounted volume, so keep it as
+            # "unknown" and let cleanup fail closed.
+            if path.parent.is_dir():
+                continue
         key = unicodedata.normalize("NFC", str(path.resolve()))
         if key in seen:
             continue

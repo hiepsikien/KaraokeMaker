@@ -70,6 +70,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   const save = useCallback(
     async (patch: Partial<AppSettings>) => {
+      const previous = settings;
       const next = { ...settings, ...patch };
       setSettings(next);
       try {
@@ -80,6 +81,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         });
         if (!response.ok) {
           push({ tone: "error", message: await readError(response) });
+          setSettings(previous);
           setAvailable(false);
           return false;
         }
@@ -93,6 +95,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
           tone: "error",
           message: "Chưa lưu được cài đặt. Server Python chưa chạy hoặc chưa có API settings.",
         });
+        setSettings(previous);
         setAvailable(false);
         return false;
       }

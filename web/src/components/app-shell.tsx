@@ -1,18 +1,16 @@
 "use client";
 
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/primitives";
-import { useDialog } from "@/components/ui/dialog";
-import { useNotices } from "@/components/ui/toast";
 import { SettingsDrawer } from "@/components/settings-drawer";
 import { IconFilm, IconFolder, IconSettings } from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
-import { clearAllDirty, hasDirty, saveAllDirty, useHasDirty } from "@/lib/dirty";
+import { useHasDirty } from "@/lib/dirty";
 import { activeJobLabel, useActiveJobs } from "@/lib/jobs";
-import { clearSession, readSession, sessionKeys } from "@/lib/session";
 import { useSettings } from "@/lib/settings";
+import { useGuardedNavigate } from "@/lib/navigation";
 
 const NAV = [
   { href: "/", label: "Dự án", icon: IconFolder },
@@ -21,9 +19,7 @@ const NAV = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/";
-  const router = useRouter();
-  const { choose } = useDialog();
-  const { push } = useNotices();
+  const navigate = useGuardedNavigate();
   const { openSettings } = useSettings();
   const activeJobs = useActiveJobs();
   const dirty = useHasDirty();
@@ -60,38 +56,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       window.clearInterval(timer);
     };
   }, []);
-
-  async function navigate(href: string) {
-    if (href === pathname && !window.location.search) return;
-    if (!hasDirty()) {
-      router.push(href);
-      return;
-    }
-    const result = await choose({
-      title: "Còn thay đổi chưa lưu",
-      description:
-        "Timing đang sửa chưa được lưu. Chọn Lưu rồi rời để giữ thay đổi, hoặc rời và bỏ bản nháp trong phiên này.",
-      choices: [
-        { label: "Lưu rồi rời", value: "save", tone: "primary" },
-        { label: "Rời không lưu", value: "discard", tone: "danger" },
-        { label: "Ở lại", value: "stay" },
-      ],
-    });
-    if (!result || result.value === "stay") return;
-    if (result.value === "save") {
-      const ok = await saveAllDirty();
-      if (!ok) {
-        push({ tone: "error", message: "Chưa lưu được. Hãy thử lại trước khi rời trang." });
-        return;
-      }
-    }
-    if (result.value === "discard") {
-      const jobId = readSession(sessionKeys.makerJob, "");
-      if (jobId) clearSession(sessionKeys.timingDraft(jobId));
-    }
-    clearAllDirty();
-    router.push(href);
-  }
 
   return (
     <div className="min-h-screen">

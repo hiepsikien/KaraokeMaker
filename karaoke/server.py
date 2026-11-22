@@ -218,6 +218,7 @@ class StudioAssetRequest(BaseModel):
     effect_plan: dict = Field(default_factory=dict)
     duration: float = 16
     output_profile: str = "landscape_1080p"
+    reuse: bool = True
 
 
 class StudioAssetRenameRequest(BaseModel):
@@ -865,6 +866,7 @@ def studio_asset_create(body: StudioAssetRequest):
             effect_plan=body.effect_plan,
             duration=body.duration,
             output_profile=body.output_profile,
+            reuse=body.reuse,
         )
     except AssetError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1053,8 +1055,8 @@ def studio_asset_delete(asset_id: str, force: bool = False):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Asset đang được dùng trong {used_in}. "
-                "Dùng force=true nếu vẫn muốn xoá."
+                f"Clip đang được dùng trong {used_in}. "
+                "Bỏ clip khỏi các dự án đó trước khi xoá."
             ),
         )
     try:

@@ -55,22 +55,29 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   const [inputValue, setInputValue] = useState("");
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
+  const pendingRef = useRef<Pending | null>(null);
 
-  const close = useCallback(
-    (result: DialogResult | null) => {
-      setPending((current) => {
-        current?.resolve(result);
-        return null;
-      });
-      window.setTimeout(() => previousFocus.current?.focus?.(), 0);
-    },
-    [],
-  );
+  const close = useCallback((result: DialogResult | null) => {
+    const current = pendingRef.current;
+    if (!current) return;
+    pendingRef.current = null;
+    current.resolve(result);
+    setPending(null);
+    window.setTimeout(() => previousFocus.current?.focus?.(), 0);
+  }, []);
 
   const choose = useCallback<(config: DialogConfig) => Promise<DialogResult | null>>((config) => {
+    // A second dialog must not leave the first promise pending forever.
+    if (pendingRef.current) {
+      pendingRef.current.resolve(null);
+      pendingRef.current = null;
+    }
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setInputValue(config.input?.defaultValue ?? "");
-    return new Promise((resolve) => setPending({ config, resolve }));
+    return new Promise((resolve) => {
+      pendingRef.current = { config, resolve };
+      setPending(pendingRef.current);
+    });
   }, []);
 
   const confirm = useCallback<DialogContextValue["confirm"]>(
@@ -106,9 +113,12 @@ export function DialogProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!pending) return;
     const panel = panelRef.current;
-    const focusable = panel?.querySelector<HTMLElement>(
-      "input, textarea, button:not([disabled]), [tabindex]:not([tabindex='-1'])",
-    );
+    const focusable =
+      panel?.querySelector<HTMLElement>("input, textarea") ||
+      panel?.querySelector<HTMLElement>("[data-dialog-primary='true']") ||
+      panel?.querySelector<HTMLElement>(
+        "button:not([disabled]), [tabindex]:not([tabindex='-1'])",
+      );
     focusable?.focus();
   }, [pending]);
 
@@ -193,6 +203,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
                 <button
                   key={choice.value}
                   type="button"
+                  data-dialog-primary={choice.tone === "primary" ? "true" : undefined}
                   className={cn(
                     choice.tone === "primary" && btnPrimary,
                     choice.tone === "danger" && btnDanger,

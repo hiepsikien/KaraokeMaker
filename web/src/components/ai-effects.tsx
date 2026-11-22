@@ -560,6 +560,7 @@ export function AiEffects({
   const [quickBusy, setQuickBusy] = useState(false);
   const renderAbortRef = useRef<AbortController | null>(null);
   const renderTargetRef = useRef("");
+  const renderJobRef = useRef("");
 
   useEffect(() => {
     setConsentState(settings.gemini_consent);
@@ -567,7 +568,21 @@ export function AiEffects({
 
   useEffect(() => {
     setQuickPreview(null);
+    setRenderStates({});
+    renderAbortRef.current?.abort();
+    renderAbortRef.current = null;
+    renderTargetRef.current = "";
+    if (renderJobRef.current) void cancelRenderJob(renderJobRef.current);
+    renderJobRef.current = "";
+    setStageTab("image");
   }, [selectedImage, outputProfile, imageDuration]);
+
+  useEffect(() => {
+    return () => {
+      const jobId = renderJobRef.current;
+      if (jobId) void cancelRenderJob(jobId);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -929,6 +944,28 @@ export function AiEffects({
     });
   }
 
+  async function cancelRenderJob(jobId: string) {
+    try {
+      await fetch(`/api/studio/render-job/${jobId}/cancel`, {
+        method: "POST",
+        keepalive: true,
+      });
+    } catch {
+      /* the render process may already be gone */
+    }
+  }
+
+  function cancelRender() {
+    const jobId = renderJobRef.current;
+    renderAbortRef.current?.abort();
+    renderAbortRef.current = null;
+    const target = renderTargetRef.current;
+    renderTargetRef.current = "";
+    renderJobRef.current = "";
+    if (jobId) void cancelRenderJob(jobId);
+    if (target) setImageRender(target, null);
+  }
+
   // Renders the full-resolution clip for one applied effect, then saves it as a
   // Studio asset so export can reuse it instead of rendering inline.
   async function startRender(effect: BackgroundEffect, force = false) {
@@ -991,6 +1028,7 @@ export function AiEffects({
       let payload = (await response.json()) as PreviewResult | { job_id?: string };
       if ("job_id" in payload && payload.job_id) {
         const jobId = payload.job_id;
+        renderJobRef.current = jobId;
         let result: PreviewResult | null = null;
         // Full renders run in a background job; poll until done.
         for (let attempt = 0; attempt < 480; attempt += 1) {
@@ -1058,6 +1096,7 @@ export function AiEffects({
           effect_plan: plan,
           duration: preview.duration,
           output_profile: outputProfile,
+          reuse: !force,
         }),
         signal: controller.signal,
       });
@@ -1079,6 +1118,7 @@ export function AiEffects({
           item.image_path === imagePath ? { ...item, asset_id: assetId } : item,
         ),
       );
+      renderJobRef.current = "";
       setImageRender(imagePath, { status: "done", preview });
       setStageTab("clip");
       push({
@@ -1684,9 +1724,14 @@ export function AiEffects({
       {currentRenderState?.status === "rendering" ? (
         <div className="space-y-1">
           <ProgressBar percent={currentRenderState.percent || 0} />
-          <p className="text-[11px] text-[var(--muted)]">
-            Đang tạo clip…{currentRenderState.percent ? ` ${currentRenderState.percent}%` : ""}
-          </p>
+          <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--muted)]">
+            <span>
+              Đang tạo clip…{currentRenderState.percent ? ` ${currentRenderState.percent}%` : ""}
+            </span>
+            <button type="button" onClick={cancelRender} className="text-red-200 hover:text-white">
+              Huỷ
+            </button>
+          </div>
         </div>
       ) : null}
       {currentRenderState?.status === "error" ? (
