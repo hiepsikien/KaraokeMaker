@@ -237,6 +237,18 @@ class AssetQuotaTests(unittest.TestCase):
         )
 
 
+    def test_assets_usage_and_cleanup_include_folders_with_missing_clip(self):
+        folder = make_asset(self.data_root, "a" * 32, age_days=10)
+        (folder / "loop.mp4").unlink()
+
+        usage = assets_usage()
+        self.assertEqual(usage["count"], 1)
+        self.assertEqual(usage["bytes"], folder_bytes(folder))
+
+        result = cleanup_assets(max_files=0, max_bytes=10**9, min_age_days=0)
+        self.assertEqual(result["deleted"], [folder.name])
+        self.assertFalse(folder.exists())
+
     def test_project_registry_round_trips_existing_paths(self):
         project = self.data_root / "song.karaoke.json"
         project.write_text("{}", encoding="utf-8")
@@ -263,6 +275,10 @@ class AssetQuotaTests(unittest.TestCase):
             [str(stale), str(external)],
         )
         self.assertEqual(known_project_paths(), [])
+        self.assertEqual(
+            forget_project_paths(paths=["~karaoke_user_that_does_not_exist/file"]),
+            [],
+        )
 
     def test_list_assets_summary_omits_effect_plan(self):
         folder = make_asset(self.data_root, "a" * 32, age_days=1)

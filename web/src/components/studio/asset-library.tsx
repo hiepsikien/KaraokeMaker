@@ -113,6 +113,12 @@ export function AssetLibrary({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [menu]);
 
+  useEffect(() => {
+    const refresh = () => onRefresh();
+    window.addEventListener("karaoke:registry-changed", refresh);
+    return () => window.removeEventListener("karaoke:registry-changed", refresh);
+  }, [onRefresh]);
+
   const filtered = useMemo(() => {
     const needle = normalizeSearch(query);
     const next = assets.filter((asset) => {

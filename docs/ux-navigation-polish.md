@@ -698,7 +698,7 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
 
 - `npx tsc --noEmit`: pass.
 - `npm run build`: pass (4 route: `/`, `/project`, `/studio`, `/_not-found`).
-- `python -m unittest discover -s tests`: **203 tests OK**.
+- `python -m unittest discover -s tests`: **204 tests OK**.
 - API smoke qua server thật: `/api/health`, `/api/settings`, `/api/projects/recent`,
   `/api/studio/assets?summary=1&usage=1`, `/api/studio/assets/usage` đều 200.
 - UI smoke bằng browser thật (sau khi browser tool có lại): dashboard, project editor,
@@ -756,3 +756,39 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
 - Settings rollback giá trị cũ nếu PUT thất bại.
 - `formatSeconds`, search underscore, Unicode path dedupe, checklist tuỳ chọn,
   trạng thái xuất theo `outputs`, toast stale-job sau restart đã sửa ở vòng QA trước.
+
+
+---
+
+## 15. Sửa theo review `13d2c45`
+
+- URL sync không còn chặn thay đổi path do app khởi tạo: sau rename/move (setup save hoặc
+  timing save), URL được cập nhật ngay sang path mới + job hiện tại. Đã test cả 2 nhánh.
+- `?job=` 404 fallback chỉ mở project **một lần**: bỏ `job?.id` khỏi deps của effect restore
+  và giữ `restoredJob.current` để không retry job đã chết.
+- Refresh ở màn Chuẩn bị giữ nguyên Chuẩn bị (không tự nhảy sang Biên tập) khi cùng project;
+  URL chỉ mang `?job=` khi đang ở phase edit.
+- Settings confirm “Quên đường dẫn lỗi” liệt kê path cụ thể, cảnh báo ổ ngoài; sau khi quên,
+  phát event để Thư viện tự refresh banner `usage_known`.
+- Folder asset thiếu clip vẫn được tính vào usage/quota và có thể dọn, thay vì hiện grid nhưng
+  usage 0.
+- API `registry/forget` bỏ qua path không hợp lệ (`~user` lạ) thay vì 500.
+- Asset picker thêm nhãn `cùng plan` để phân biệt bản mới nhất toàn ảnh với bản khớp effect plan.
+
+## 16. Backlog ghi nhận (làm sau)
+
+| Ưu tiên | Việc |
+|---|---|
+| P1 | Left navigation thật (icon rail 72px), thay top bar |
+| P1 | Persist `analysis/prompt/objects` của Studio qua route change |
+| P1 | Focus trap đầy đủ cho Drawer (Tab cycle, restore focus) |
+| P1 | Vòng đời asset: upsert theo `asset_id`, quota UI, soft-delete/trash |
+| P1 | Tách `AiEffects` thành components/hook dùng chung (file vẫn ~2.000 dòng) |
+| P2 | Công cụ dọn asset trùng cũ trong Thư viện |
+| P2 | Dirty registry cho Studio/Setup, không chỉ timing |
+| P2 | Thumbnail dự án gần đây trên dashboard |
+| P2 | Bulk select/xoá asset; xem chi tiết “dùng trong dự án nào” |
+| P2 | Playwright/e2e cho deep link, draft, asset flows |
+| P3 | Command palette, keyboard shortcuts |
+| P3 | `open -R` fallback Windows/Linux (app hiện macOS-only) |
+| P3 | Mobile phone layout (non-goal hiện tại) |

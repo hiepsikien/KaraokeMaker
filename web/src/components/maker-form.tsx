@@ -189,7 +189,8 @@ export function MakerForm() {
         }
       } catch {
         if (cancelled) return;
-        restoredJob.current = "";
+        // Keep the attempted param in the ref: the fallback opens a new job,
+        // which changes job?.id, and we must not retry the dead job in a loop.
         setJob(null);
         setJobId("");
         if (projectParam) {
@@ -206,15 +207,14 @@ export function MakerForm() {
     return () => {
       cancelled = true;
     };
-  }, [jobParam, projectParam, job?.id]);
+  }, [jobParam, projectParam]);
 
   useEffect(() => {
     if (startNew) return;
     if (projectParam && !samePath(openedProject, projectParam)) return;
-    if (projectParam && !samePath(fields.project_path, projectParam)) return;
     if (phase === "home" || !fields.project_path) return;
     const query = new URLSearchParams({ project: fields.project_path });
-    if (job?.id) query.set("job", job.id);
+    if (job?.id && phase === "edit") query.set("job", job.id);
     const target = `/project?${query.toString()}`;
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== target) router.replace(target);
@@ -349,7 +349,14 @@ export function MakerForm() {
       setHasLines(Boolean(data.project.lines?.length));
       if (data.notice) push({ tone: "info", message: data.notice });
       setOpenedProject(path);
-      if (data.phase === "edit" && data.job) {
+      // Reloading while editing setup for the same project should stay in
+      // setup instead of jumping back to the editor.
+      const keepSetup = phase === "setup" && samePath(fields.project_path, path);
+      if (keepSetup) {
+        setJob(null);
+        setJobId("");
+        setPhase("setup");
+      } else if (data.phase === "edit" && data.job) {
         setJob(data.job);
         setJobId(data.job.id);
         setPhase("edit");
@@ -527,6 +534,14 @@ export function MakerForm() {
       const data = (await response.json()) as { phase: string; project: Project; job: Job | null };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
+      const path = data.project.path || fields.project_path;
+      if (path) {
+        setOpenedProject(path);
+        handledParam.current = `p:${path}`;
+        const query = new URLSearchParams({ project: path });
+        if (data.job?.id) query.set("job", data.job.id);
+        router.replace(`/project?${query.toString()}`);
+      }
       if (data.job) {
         setJob(data.job);
         setPhase("edit");
@@ -830,6 +845,9 @@ export function MakerForm() {
             setFields((current) => ({ ...current, project_path: path }));
             setOpenedProject(path);
             handledParam.current = `p:${path}`;
+            const query = new URLSearchParams({ project: path });
+            if (job?.id) query.set("job", job.id);
+            router.replace(`/project?${query.toString()}`);
           }}
           onBrowseOutput={browseExportDir}
           onRealign={() => openAlign("edit")}

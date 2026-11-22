@@ -41,9 +41,30 @@ export function SettingsDrawer() {
 
   async function forgetStaleProjects() {
     if (stalePaths.length === 0) return;
+    const visiblePaths = stalePaths.slice(0, 8);
     const ok = await confirm({
       title: "Quên đường dẫn dự án bị thiếu?",
-      description: `${stalePaths.length} đường dẫn trong danh sách dự án không còn tồn tại. Chỉ quên khi chắc chắn ổ đĩa/thư mục đó không còn dùng; nếu chỉ là ổ ngoài đang tháo, hãy cắm lại thay vì quên.`,
+      description: (
+        <div className="space-y-2">
+          <p>
+            {stalePaths.length} đường dẫn trong danh sách dự án không còn tồn tại:
+          </p>
+          <ul className="max-h-32 space-y-0.5 overflow-auto rounded-lg border border-[var(--line)] bg-black/20 p-2 text-[11px]">
+            {visiblePaths.map((path) => (
+              <li key={path} className="truncate" title={path}>
+                {path}
+              </li>
+            ))}
+            {stalePaths.length > visiblePaths.length ? (
+              <li className="text-[var(--muted)]">…và {stalePaths.length - visiblePaths.length} đường dẫn khác</li>
+            ) : null}
+          </ul>
+          <p className="text-amber-200">
+            Chỉ quên khi chắc chắn các thư mục/ổ đĩa này không còn dùng. Nếu chỉ là ổ ngoài đang tháo,
+            hãy cắm lại thay vì quên.
+          </p>
+        </div>
+      ),
       confirmLabel: "Quên đường dẫn",
       danger: true,
     });
@@ -61,6 +82,7 @@ export function SettingsDrawer() {
       }
       const data = (await response.json()) as { removed?: string[] };
       setStalePaths([]);
+      window.dispatchEvent(new Event("karaoke:registry-changed"));
       push({
         tone: "success",
         message: `Đã quên ${data.removed?.length || 0} đường dẫn dự án không còn tồn tại.`,

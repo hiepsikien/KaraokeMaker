@@ -700,9 +700,11 @@ def _asset_usage_entry(folder: Path) -> dict | None:
                     return None
                 try:
                     if not S_ISREG(clip.stat().st_mode):
-                        return None
+                        # A missing/non-regular clip still occupies a folder;
+                        # count it so quota and cleanup can deal with it.
+                        pass
                 except OSError:
-                    return None
+                    pass
         bytes_used = _folder_size(folder)
         if bytes_used is None:
             return None
@@ -800,7 +802,7 @@ def known_project_paths() -> list[Path]:
     for item in _registry_entries():
         try:
             path = Path(item).expanduser()
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RuntimeError, OSError):
             continue
         if not path.is_file() and path.parent.is_dir():
             continue
@@ -819,7 +821,7 @@ def missing_project_paths() -> list[Path]:
     for item in _registry_entries():
         try:
             path = Path(item).expanduser()
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RuntimeError, OSError):
             continue
         if path.is_file():
             continue
@@ -844,19 +846,27 @@ def forget_project_paths(
     root = assets_root()
     root.mkdir(parents=True, exist_ok=True)
     target = root / PROJECTS_FILE
-    wanted = {
-        unicodedata.normalize("NFC", str(Path(item).expanduser()))
-        for item in (paths or [])
-        if str(item or "").strip()
-    }
+    wanted: set[str] = set()
+    for item in paths or []:
+        if not str(item or "").strip():
+            continue
+        try:
+            wanted.add(unicodedata.normalize("NFC", str(Path(item).expanduser())))
+        except (TypeError, ValueError, RuntimeError, OSError):
+            continue
     with _file_lock(root / ".assets.lock"):
         entries = _registry_entries()
         removed: list[str] = []
         kept: list[str] = []
         for item in entries:
-            path = Path(item).expanduser()
-            remove = missing_only and not path.is_file()
-            if wanted:
+            try:
+                path = Path(item).expanduser()
+                missing = not path.is_file()
+            except (TypeError, ValueError, RuntimeError, OSError):
+                path = None
+                missing = True
+            remove = missing_only and missing
+            if wanted and path is not None:
                 remove = remove or unicodedata.normalize("NFC", str(path)) in wanted
             if remove:
                 removed.append(item)

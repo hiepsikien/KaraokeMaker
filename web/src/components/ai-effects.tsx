@@ -92,7 +92,7 @@ function assetDateLabel(value: string | undefined) {
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}${year} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function clipOptionLabel(asset: StudioAsset, newestId: string) {
+function clipOptionLabel(asset: StudioAsset, newestId: string, samePlan = false) {
   const seconds =
     asset.asset_frames && asset.fps
       ? `${(asset.asset_frames / asset.fps).toFixed(1)}s`
@@ -101,7 +101,8 @@ function clipOptionLabel(asset: StudioAsset, newestId: string) {
         : "clip";
   const date = assetDateLabel(asset.created);
   const latest = asset.id === newestId ? " · mới nhất" : "";
-  return `${asset.name} · ${seconds}${date ? ` · ${date}` : ""}${latest}`;
+  const matching = samePlan ? " · cùng plan" : "";
+  return `${asset.name} · ${seconds}${date ? ` · ${date}` : ""}${latest}${matching}`;
 }
 
 const PROFILE_LABELS: Record<string, string> = {
@@ -1290,6 +1291,11 @@ export function AiEffects({
       return b - a;
     });
   const newestAssetId = imageAssets[0]?.id || "";
+  const planKey = existingEffect?.effect_plan
+    ? JSON.stringify(existingEffect.effect_plan)
+    : "";
+  const isSamePlan = (asset: StudioAsset) =>
+    Boolean(planKey && asset.effect_plan && JSON.stringify(asset.effect_plan) === planKey);
   const selectedAsset = imageAssets.find((asset) => asset.id === existingEffect?.asset_id);
   const latestMatchingAsset = existingEffect?.effect_plan
     ? imageAssets.find(
@@ -1786,7 +1792,7 @@ export function AiEffects({
             <option value="">Render từ effect plan</option>
             {imageAssets.map((asset) => (
               <option key={asset.id} value={asset.id}>
-                {clipOptionLabel(asset, newestAssetId)}
+                {clipOptionLabel(asset, newestAssetId, isSamePlan(asset))}
               </option>
             ))}
           </select>
@@ -1811,7 +1817,7 @@ export function AiEffects({
           >
             {selectedAsset.id === newestAssetId
               ? "Đang dùng bản mới nhất."
-              : "Đang dùng bản cũ hơn; bản mới nhất ở đầu danh sách."}
+              : "Đang dùng bản cũ hơn; bản mới nhất trong danh sách ở phía trên."}
           </p>
         ) : null}
       </label>
@@ -1872,7 +1878,7 @@ export function AiEffects({
         <option value="">Chọn clip đã render…</option>
         {imageAssets.map((asset) => (
           <option key={asset.id} value={asset.id}>
-            {clipOptionLabel(asset, newestAssetId)}
+            {clipOptionLabel(asset, newestAssetId, isSamePlan(asset))}
           </option>
         ))}
       </select>
