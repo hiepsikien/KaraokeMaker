@@ -18,9 +18,11 @@ from karaoke.assets import (
     cleanup_assets,
     delete_asset,
     ensure_asset_thumbnail,
+    forget_project_paths,
     known_project_paths,
     list_assets,
     load_asset,
+    missing_project_paths,
     referenced_asset_projects,
     register_project_path,
     rename_asset,
@@ -255,6 +257,12 @@ class AssetQuotaTests(unittest.TestCase):
         self.assertIn(external, paths)
         self.assertNotIn(stale, paths)
         self.assertIsNone(referenced_asset_projects())
+        self.assertEqual(missing_project_paths(), [stale, external])
+        self.assertEqual(
+            forget_project_paths(missing_only=True),
+            [str(stale), str(external)],
+        )
+        self.assertEqual(known_project_paths(), [])
 
     def test_list_assets_summary_omits_effect_plan(self):
         folder = make_asset(self.data_root, "a" * 32, age_days=1)

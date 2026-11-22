@@ -102,6 +102,7 @@ export function TimingEditor({
   onBuildBackground,
   onCleanupBackground,
   onResumeEditing,
+  onSavedPath,
   onBrowseOutput,
   onBack,
   onRealign,
@@ -137,6 +138,7 @@ export function TimingEditor({
   onBuildBackground?: (rebuild: boolean) => void;
   onCleanupBackground?: () => void;
   onResumeEditing?: () => void;
+  onSavedPath?: (path: string) => void;
   onBrowseOutput?: () => Promise<string | null>;
   onBack: () => void;
   onRealign?: () => void;
@@ -225,14 +227,7 @@ export function TimingEditor({
       message: "Đã khôi phục bản nháp chưa lưu",
       action: {
         label: "Bỏ bản nháp",
-        onClick: () => {
-          suppressFlush.current = true;
-          setLines(cloneLines(initialLines));
-          setRemoved([]);
-          setDirty(false);
-          clearSession(draftKey);
-          if (legacyDraftKey) clearSession(legacyDraftKey);
-        },
+        onClick: discardRestoredDraft,
       },
     });
   }, [push, restored, initialLines, draftKey, legacyDraftKey]);
@@ -289,6 +284,19 @@ export function TimingEditor({
   useEffect(() => {
     if (outputs?.directory) setExportDir(outputs.directory);
   }, [outputs?.directory]);
+
+  function discardRestoredDraft() {
+    suppressFlush.current = true;
+    if (writeTimer.current) window.clearTimeout(writeTimer.current);
+    setLines(cloneLines(initialLines));
+    setRemoved([]);
+    setSelectedLine(null);
+    setSelectedWord(null);
+    setDirty(false);
+    clearSession(draftKey);
+    if (legacyDraftKey) clearSession(legacyDraftKey);
+    push({ tone: "info", message: "Đã bỏ bản nháp, quay về bản đã lưu." });
+  }
 
   function markDirty() {
     suppressFlush.current = false;
@@ -500,6 +508,7 @@ export function TimingEditor({
       }
       const body = await response.json();
       setSavedPath(body.path || "");
+      if (body.path) onSavedPath?.(body.path);
       suppressFlush.current = true;
       if (writeTimer.current) window.clearTimeout(writeTimer.current);
       setDirty(false);
@@ -632,6 +641,14 @@ export function TimingEditor({
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Biên tập</p>
             <h2 className="mt-1 text-xl font-semibold">Chỉnh chữ và lúc từng chữ hiện ra</h2>
           </div>
+          {restored?.dirty && dirty ? (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--gold)]/60 bg-black/25 px-3 py-2 text-xs leading-5">
+              <span className="text-[var(--muted)]">Đang hiển thị bản nháp chưa lưu.</span>
+              <button type="button" onClick={discardRestoredDraft} className="font-semibold text-[var(--gold)] hover:text-white">
+                Bỏ bản nháp, về bản đã lưu
+              </button>
+            </div>
+          ) : null}
           {(exported || outputs) && (
             <p className="mb-4 rounded-xl border border-[var(--line)] bg-black/25 px-3 py-2 text-sm leading-6 text-[var(--muted)]">
               {exported && !dirty

@@ -172,7 +172,7 @@ Chỉ lift `job`/`fields` là **không đủ**.
 |---|---|---|
 | `/` | Dashboard: tạo mới, mở file, dự án gần đây | — |
 | `/project?project=<encoded>` | Workspace; bước Chuẩn bị/Biên tập là state | `push` từ dashboard |
-| `/project?project=…&job=…` | Giữ đúng phiên đang chạy | `replace` sau khi tạo job |
+| `/project?project=…&job=…` | Giữ đúng phiên đang chạy; refresh đọc lại job nếu server còn giữ, fallback mở project nếu job đã mất | `replace` khi job id xuất hiện/đổi |
 | `/studio` | Editor | `push` từ nav |
 | `/studio?tab=library` | Thư viện | `replace` khi toggle tab (không tạo history rác) |
 | `/studio?tab=library&asset=<id>` | Mở chi tiết asset | `push`; Back quay lại thư viện |
@@ -732,6 +732,14 @@ Icon rail 72px, tooltip, badge job; **không** dùng 240px ở 1280.
   để không “hồi sinh” bản nháp vừa bỏ.
 - `openProjectPath`/`startCreate` clear `jobId` cũ; tracked job chỉ được nhận nếu
   `project_path` khớp project hiện tại (so sánh NFC).
+- URL có thêm `?job=`; refresh giữa render/export đọc lại job, fallback mở project nếu
+  server đã restart.
+- Settings có mục quên đường dẫn dự án bị thiếu; Thư viện hiện banner khi
+  `usage_known=false` để người dùng mở Settings thay vì chỉ thấy 409.
+- “Bỏ bản nháp” có nút persistent trong editor, không chỉ toast 4.5s.
+- Lưu timing trả path mới được propagate về fields/URL khi file dự án bị đổi tên.
+- Discard không clear registry trước khi điều hướng; entry chỉ mất khi editor unmount.
+- Cancel render kiểm tra trước/sau khi acquire semaphore.
 
 ### Cải thiện theo review
 

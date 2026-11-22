@@ -51,10 +51,6 @@ export async function saveAllDirty() {
   return true;
 }
 
-export function clearDirty(key: string) {
-  if (entries.delete(key)) notify();
-}
-
 export function discardAllDirty() {
   if (entries.size === 0) return;
   for (const entry of entries.values()) {
@@ -64,14 +60,8 @@ export function discardAllDirty() {
       /* keep discarding the rest */
     }
   }
-  entries.clear();
-  notify();
-}
-
-export function clearAllDirty() {
-  if (entries.size === 0) return;
-  entries.clear();
-  notify();
+  // Keep the registry until the editors actually unmount. If navigation is
+  // cancelled or fails, the dirty guard must still be active.
 }
 
 function subscribe(listener: () => void) {

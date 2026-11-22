@@ -53,12 +53,15 @@ export function MakerForm() {
   const router = useRouter();
   const params = useSearchParams();
   const projectParam = params.get("project") || "";
+  const jobParam = params.get("job") || "";
   const startNew = params.get("new") === "1";
   const { settings } = useSettings();
   const { push } = useNotices();
   const guardedNavigate = useGuardedNavigate();
   const handledParam = useRef("");
+  const restoredJob = useRef("");
   const [openedProject, setOpenedProject] = useState("");
+  const [restoringJob, setRestoringJob] = useState(false);
 
   const [phase, setPhase] = useSessionState<Phase>(sessionKeys.makerPhase, "home");
   const [fields, setFields] = useSessionState<ProjectFields>(sessionKeys.makerFields, () => emptyFields());
@@ -142,6 +145,7 @@ export function MakerForm() {
   }, []);
 
   useEffect(() => {
+    if (jobParam) return;
     if (projectParam) {
       const key = `p:${projectParam}`;
       if (handledParam.current === key) return;
@@ -158,15 +162,63 @@ export function MakerForm() {
       setOpenedProject("");
       startCreate();
     }
-  }, [projectParam, startNew]);
+  }, [projectParam, startNew, jobParam]);
+
+  useEffect(() => {
+    if (!jobParam || jobParam === job?.id) return;
+    if (restoredJob.current === jobParam) return;
+    restoredJob.current = jobParam;
+    setRestoringJob(true);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/jobs/${jobParam}`, { cache: "no-store" });
+        if (!response.ok) throw new Error("job");
+        const data = (await response.json()) as Job;
+        if (cancelled) return;
+        setJob(data);
+        setJobId(data.id);
+        trackJob(data.id, data);
+        setHasLines(Boolean(data.lines?.length));
+        if (data.project) setFields(fieldsFromProject(data.project));
+        setPhase(data.lines?.length ? "edit" : "setup");
+        const path = data.project_path || data.project?.path || projectParam;
+        if (path) {
+          setOpenedProject(path);
+          handledParam.current = `p:${path}`;
+        }
+      } catch {
+        if (cancelled) return;
+        restoredJob.current = "";
+        setJob(null);
+        setJobId("");
+        if (projectParam) {
+          handledParam.current = "";
+          setOpenedProject("");
+          void openProjectPath(projectParam);
+        } else {
+          setPhase("home");
+        }
+      } finally {
+        if (!cancelled) setRestoringJob(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobParam, projectParam, job?.id]);
 
   useEffect(() => {
     if (startNew) return;
     if (projectParam && !samePath(openedProject, projectParam)) return;
+    if (projectParam && !samePath(fields.project_path, projectParam)) return;
     if (phase === "home" || !fields.project_path) return;
-    if (samePath(projectParam, fields.project_path)) return;
-    router.replace(`/project?project=${encodeURIComponent(fields.project_path)}`);
-  }, [fields.project_path, phase, projectParam, openedProject, startNew, router]);
+    const query = new URLSearchParams({ project: fields.project_path });
+    if (job?.id) query.set("job", job.id);
+    const target = `/project?${query.toString()}`;
+    const current = `${window.location.pathname}${window.location.search}`;
+    if (current !== target) router.replace(target);
+  }, [fields.project_path, phase, projectParam, openedProject, startNew, job?.id, router]);
 
   async function browse(kind: BrowseKind) {
     setNotice("");
@@ -307,7 +359,6 @@ export function MakerForm() {
         setPhase("setup");
       }
       handledParam.current = `p:${path}`;
-      router.replace(`/project?project=${encodeURIComponent(path)}`);
     } catch {
       setNotice("Không mở được dự án. Server Python chưa chạy bản mới.");
       handledParam.current = "";
@@ -591,6 +642,12 @@ export function MakerForm() {
         <PhaseStepper phase={displayPhase} rendering={rendering} exported={exported} />
       </PageHeader>
 
+      {restoringJob ? (
+        <p className="mb-3 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-2 text-xs text-[var(--muted)]">
+          Đang khôi phục phiên làm việc từ URL…
+        </p>
+      ) : null}
+
       {phase === "home" && (
         <HomeGate onCreate={startCreate} onOpen={openProject} busy={busyBrowse === "project"} notice={notice} />
       )}
@@ -769,6 +826,11 @@ export function MakerForm() {
           onBuildBackground={buildBackground}
           onCleanupBackground={cleanupBackground}
           onResumeEditing={resumeEditing}
+          onSavedPath={(path) => {
+            setFields((current) => ({ ...current, project_path: path }));
+            setOpenedProject(path);
+            handledParam.current = `p:${path}`;
+          }}
           onBrowseOutput={browseExportDir}
           onRealign={() => openAlign("edit")}
           onBack={() => {

@@ -28,9 +28,11 @@ from karaoke.assets import (
     clip_path,
     delete_asset,
     ensure_asset_thumbnail,
+    forget_project_paths,
     known_project_paths,
     list_assets,
     load_asset,
+    missing_project_paths,
     referenced_asset_projects,
     register_project_path,
     rename_asset,
@@ -230,6 +232,11 @@ class SettingsRequest(BaseModel):
     device: str | None = None
     model_name: str | None = None
     output_dir: str | None = None
+
+
+class ForgetProjectsRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+    missing_only: bool = False
 
 
 class BackgroundRequest(BaseModel):
@@ -601,6 +608,10 @@ def _run_studio_job(
 
     try:
         with _STUDIO_RENDER_SEMAPHORE:
+            with _lock:
+                record = _studio_jobs.get(job_id)
+                if record is None or record.get("status") == "cancelled":
+                    raise StudioError("Đã huỷ render.")
             result = render_preview(
                 path,
                 body.effect_plan,
@@ -609,6 +620,10 @@ def _run_studio_job(
                 full_resolution=True,
                 progress=progress,
             )
+            with _lock:
+                record = _studio_jobs.get(job_id)
+                if record is None or record.get("status") == "cancelled":
+                    raise StudioError("Đã huỷ render.")
         payload = _preview_payload(result)
         with _lock:
             record = _studio_jobs.get(job_id)
@@ -1306,6 +1321,17 @@ def projects_recent(limit: int = 12):
     except Exception:
         paths = []
     return {"projects": recent_projects(paths, limit=cap)}
+
+
+@app.get("/api/projects/registry/stale")
+def projects_registry_stale():
+    return {"paths": [str(path) for path in missing_project_paths()]}
+
+
+@app.post("/api/projects/registry/forget")
+def projects_registry_forget(body: ForgetProjectsRequest):
+    removed = forget_project_paths(paths=body.paths, missing_only=body.missing_only)
+    return {"removed": removed}
 
 
 @app.get("/api/settings")

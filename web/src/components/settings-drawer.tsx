@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 
 import { useSettings, type AppSettings } from "@/lib/settings";
 import { Field, PathField, Select } from "@/components/ui/field";
-import { Badge, btnPrimary, Panel } from "@/components/ui/primitives";
-import { Drawer } from "@/components/ui/dialog";
+import { Badge, btnDanger, btnPrimary, Panel } from "@/components/ui/primitives";
+import { Drawer, useDialog } from "@/components/ui/dialog";
 import { useNotices } from "@/components/ui/toast";
 
 const MODELS = [
@@ -19,14 +19,58 @@ const MODELS = [
 
 export function SettingsDrawer() {
   const { settings, open, closeSettings, save, available, loading } = useSettings();
+  const { confirm } = useDialog();
   const { push } = useNotices();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [busy, setBusy] = useState(false);
   const [browsing, setBrowsing] = useState(false);
+  const [stalePaths, setStalePaths] = useState<string[]>([]);
+  const [registryBusy, setRegistryBusy] = useState(false);
 
   useEffect(() => {
     if (open) setDraft(settings);
   }, [open, settings]);
+
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/projects/registry/stale", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : { paths: [] }))
+      .then((data: { paths?: string[] }) => setStalePaths(Array.isArray(data.paths) ? data.paths : []))
+      .catch(() => setStalePaths([]));
+  }, [open]);
+
+  async function forgetStaleProjects() {
+    if (stalePaths.length === 0) return;
+    const ok = await confirm({
+      title: "Quên đường dẫn dự án bị thiếu?",
+      description: `${stalePaths.length} đường dẫn trong danh sách dự án không còn tồn tại. Chỉ quên khi chắc chắn ổ đĩa/thư mục đó không còn dùng; nếu chỉ là ổ ngoài đang tháo, hãy cắm lại thay vì quên.`,
+      confirmLabel: "Quên đường dẫn",
+      danger: true,
+    });
+    if (!ok) return;
+    setRegistryBusy(true);
+    try {
+      const response = await fetch("/api/projects/registry/forget", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ missing_only: true }),
+      });
+      if (!response.ok) {
+        push({ tone: "error", message: "Chưa quên được đường dẫn lỗi. Kiểm tra server Python." });
+        return;
+      }
+      const data = (await response.json()) as { removed?: string[] };
+      setStalePaths([]);
+      push({
+        tone: "success",
+        message: `Đã quên ${data.removed?.length || 0} đường dẫn dự án không còn tồn tại.`,
+      });
+    } catch {
+      push({ tone: "error", message: "Chưa quên được đường dẫn lỗi. Kiểm tra server Python." });
+    } finally {
+      setRegistryBusy(false);
+    }
+  }
 
   async function pickOutput() {
     setBrowsing(true);
@@ -128,6 +172,31 @@ export function SettingsDrawer() {
           <p className="text-xs leading-5 text-[var(--muted)]">
             Có thể đổi riêng trong màn Ghép chữ nếu dự án cần model khác.
           </p>
+        </div>
+
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold">Dữ liệu dự án</h3>
+          <p className="text-xs leading-5 text-[var(--muted)]">
+            Nếu một ổ đĩa hoặc thư mục dự án bị xoá hẳn, đường dẫn còn lại trong danh sách có thể
+            khiến việc xoá/dọn clip bị chặn để bảo vệ dữ liệu.
+          </p>
+          {stalePaths.length > 0 ? (
+            <div className="space-y-2 rounded-xl border border-amber-900/60 bg-amber-950/30 p-3">
+              <p className="text-xs leading-5 text-amber-100">
+                {stalePaths.length} đường dẫn dự án không còn tồn tại.
+              </p>
+              <button
+                type="button"
+                className={btnDanger}
+                disabled={registryBusy}
+                onClick={() => void forgetStaleProjects()}
+              >
+                {registryBusy ? "Đang quên…" : "Quên đường dẫn lỗi"}
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-emerald-200">Không có đường dẫn dự án bị thiếu.</p>
+          )}
         </div>
 
         <div className="space-y-3">

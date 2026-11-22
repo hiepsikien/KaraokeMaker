@@ -7,6 +7,7 @@ import { useDialog } from "@/components/ui/dialog";
 import { useNotices } from "@/components/ui/toast";
 import { IconDownload, IconExternal, IconGrid, IconLibrary, IconList, IconMore, IconPencil, IconRefresh, IconSearch, IconTrash } from "@/components/ui/icons";
 import { readError } from "@/lib/api";
+import { useSettings } from "@/lib/settings";
 import { effectName, fileName, formatBytes, formatRelative, formatSeconds, normalizeSearch, profileMeta } from "@/lib/format";
 import type { StudioAsset } from "@/lib/types";
 
@@ -94,12 +95,14 @@ export function AssetLibrary({
 }) {
   const { confirm, prompt } = useDialog();
   const { push } = useNotices();
+  const { openSettings } = useSettings();
   const [query, setQuery] = useState("");
   const [profile, setProfile] = useState("all");
   const [sort, setSort] = useState("new");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [menu, setMenu] = useState("");
   const [busy, setBusy] = useState("");
+  const usageKnown = assets.length === 0 || assets.every((asset) => asset.usage_known !== false);
 
   useEffect(() => {
     if (!menu) return;
@@ -274,6 +277,16 @@ export function AssetLibrary({
 
   return (
     <div className="space-y-4">
+      {!usageKnown ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs leading-5 text-amber-100">
+          <span>
+            Không quét được toàn bộ dự án, nên việc xoá/dọn clip tạm thời bị chặn để bảo vệ dữ liệu.
+          </span>
+          <button type="button" onClick={openSettings} className="font-semibold text-[var(--gold)] hover:text-white">
+            Mở Cài đặt
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-[12rem] flex-1">
           <IconSearch className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-[var(--muted)]" />

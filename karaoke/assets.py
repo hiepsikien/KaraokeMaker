@@ -293,6 +293,10 @@ def _thumb_lock(asset_id: str) -> threading.Lock:
     with _LOCK:
         lock = _THUMB_LOCKS.get(asset_id)
         if lock is None:
+            if len(_THUMB_LOCKS) >= 256:
+                for key, value in list(_THUMB_LOCKS.items()):
+                    if not value.locked():
+                        del _THUMB_LOCKS[key]
             lock = threading.Lock()
             _THUMB_LOCKS[asset_id] = lock
         return lock
@@ -682,6 +686,23 @@ def _asset_usage_entry(folder: Path) -> dict | None:
         meta_path = folder / META_FILE
         if meta_path.is_symlink():
             return None
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                meta = None
+            if isinstance(meta, dict):
+                name = str(meta.get("clip_file") or CLIP_FILE)
+                if Path(name).name != name:
+                    return None
+                clip = folder / name
+                if clip.is_symlink():
+                    return None
+                try:
+                    if not S_ISREG(clip.stat().st_mode):
+                        return None
+                except OSError:
+                    return None
         bytes_used = _folder_size(folder)
         if bytes_used is None:
             return None
@@ -756,8 +777,7 @@ def register_project_path(path: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def known_project_paths() -> list[Path]:
-    """Return existing project files recorded by :func:`register_project_path`."""
+def _registry_entries() -> list[str]:
     target = assets_root() / PROJECTS_FILE
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -765,25 +785,96 @@ def known_project_paths() -> list[Path]:
         return []
     if not isinstance(data, list):
         return []
+    return [str(item) for item in data if isinstance(item, str) and item.strip()]
+
+
+def known_project_paths() -> list[Path]:
+    """Return project paths recorded by :func:`register_project_path`.
+
+    Existing files and paths whose parent is missing (usually an unmounted
+    volume) are returned. A missing file in an existing folder is treated as
+    stale registry data and skipped.
+    """
     paths: list[Path] = []
     seen: set[str] = set()
-    for item in data:
+    for item in _registry_entries():
         try:
-            path = Path(str(item)).expanduser()
+            path = Path(item).expanduser()
         except (TypeError, ValueError):
             continue
-        if not path.is_file():
-            # A deleted project in an existing folder is stale registry data;
-            # a missing parent usually means an unmounted volume, so keep it as
-            # "unknown" and let cleanup fail closed.
-            if path.parent.is_dir():
-                continue
+        if not path.is_file() and path.parent.is_dir():
+            continue
         key = unicodedata.normalize("NFC", str(path.resolve()))
         if key in seen:
             continue
         seen.add(key)
         paths.append(path)
     return paths
+
+
+def missing_project_paths() -> list[Path]:
+    """Registry entries whose project file no longer exists."""
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for item in _registry_entries():
+        try:
+            path = Path(item).expanduser()
+        except (TypeError, ValueError):
+            continue
+        if path.is_file():
+            continue
+        key = unicodedata.normalize("NFC", str(path.resolve()))
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def forget_project_paths(
+    *,
+    paths: list[str] | None = None,
+    missing_only: bool = False,
+) -> list[str]:
+    """Remove stale entries from ``.projects.json``.
+
+    This is explicit user action: removing an entry for an unmounted volume
+    would make asset cleanup treat its clips as unreferenced.
+    """
+    root = assets_root()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / PROJECTS_FILE
+    wanted = {
+        unicodedata.normalize("NFC", str(Path(item).expanduser()))
+        for item in (paths or [])
+        if str(item or "").strip()
+    }
+    with _file_lock(root / ".assets.lock"):
+        entries = _registry_entries()
+        removed: list[str] = []
+        kept: list[str] = []
+        for item in entries:
+            path = Path(item).expanduser()
+            remove = missing_only and not path.is_file()
+            if wanted:
+                remove = remove or unicodedata.normalize("NFC", str(path)) in wanted
+            if remove:
+                removed.append(item)
+            else:
+                kept.append(item)
+        if removed:
+            temporary = target.with_name(
+                f".{PROJECTS_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temporary.write_text(
+                    json.dumps(kept, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return removed
 
 
 def _project_asset_ids(path: Path, mtime_ns: int, size: int) -> tuple[str, ...]:
