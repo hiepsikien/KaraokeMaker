@@ -477,7 +477,7 @@ def sync_project_file(
     saved = save_project(desired, project)
     if source is not None:
         try:
-            if source.resolve() != saved.resolve() and source.is_file():
+            if _path_key(source) != _path_key(saved) and source.is_file():
                 source.unlink()
         except OSError:
             pass
