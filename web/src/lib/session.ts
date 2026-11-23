@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const PREFIX = "karaoke.ux.v1.";
 
@@ -31,16 +31,30 @@ export function clearSession(key: string) {
   }
 }
 
-/** State that survives route changes and refreshes within the same tab. */
+/** State that survives route changes and refreshes within the same tab.
+ *
+ * The first render always uses the server-safe fallback; sessionStorage is
+ * loaded after mount. Reading it in the state initializer caused hydration
+ * mismatches because the server has no sessionStorage.
+ */
 export function useSessionState<T>(
   key: string,
   initial: T | (() => T),
 ): [T, React.Dispatch<React.SetStateAction<T>>] {
-  const [value, setValue] = useState<T>(() => {
-    const fallback = typeof initial === "function" ? (initial as () => T)() : initial;
-    return readSession(key, fallback);
-  });
+  const fallbackRef = useRef<T | undefined>(undefined);
+  if (fallbackRef.current === undefined) {
+    fallbackRef.current = typeof initial === "function" ? (initial as () => T)() : initial;
+  }
+  const [value, setValue] = useState<T>(fallbackRef.current as T);
+  const hydrated = useRef(false);
+
   useEffect(() => {
+    setValue(readSession(key, fallbackRef.current as T));
+    hydrated.current = true;
+  }, [key]);
+
+  useEffect(() => {
+    if (!hydrated.current) return;
     writeSession(key, value);
   }, [key, value]);
 
