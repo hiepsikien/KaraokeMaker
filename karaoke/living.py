@@ -3798,6 +3798,16 @@ def _render_loop(
         ):
             prevent = _build_protect_mask(plan, transform, out_width, out_height, strip_rect)
         prevent3 = prevent[:, :, None] if prevent is not None else None
+        # Smoke needs a soft edge around protected faces/text. A binary mask
+        # leaves a visible rectangular hole when the plume drifts past a face.
+        steam_prevent = None
+        steam_prevent3 = None
+        if prevent is not None:
+            feather = max(6, int(round(min(out_width, out_height) * 0.020)))
+            soft = Image.fromarray((np.clip(prevent, 0.0, 1.0) * 255.0).astype(np.uint8), "L")
+            soft = soft.filter(ImageFilter.GaussianBlur(feather))
+            steam_prevent = np.asarray(soft, dtype=np.float32) / 255.0
+            steam_prevent3 = steam_prevent[:, :, None]
 
         cloud_specs = (
             _cloud_specs(
@@ -3993,8 +4003,9 @@ def _render_loop(
                     plume = _steam_frame(steam_sources, u, sprite_cache)
                     if plume is not None:
                         steam_rgb, steam_alpha = plume
-                        steam_rgb *= prevent3
-                        steam_alpha *= prevent
+                        if steam_prevent3 is not None and steam_prevent is not None:
+                            steam_rgb *= steam_prevent3
+                            steam_alpha *= steam_prevent
                         frame = (
                             frame * (1.0 - steam_alpha[:, :, None])
                             + steam_rgb
