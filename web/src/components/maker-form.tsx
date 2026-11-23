@@ -83,6 +83,7 @@ export function MakerForm() {
   const guardedNavigate = useGuardedNavigate();
   const handledParam = useRef("");
   const restoredJob = useRef("");
+  const recoveredJob = useRef("");
   const [openedProject, setOpenedProject] = useState("");
   const [restoringJob, setRestoringJob] = useState(false);
 
@@ -98,8 +99,10 @@ export function MakerForm() {
   const [exportRequest, setExportRequest] = useState<number | null>(null);
   const [projectExported, setProjectExported] = useState(false);
   const clearExportRequest = useCallback(() => setExportRequest(null), []);
-  const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
-  const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
+  // Track the saved job id unconditionally: gating it on the URL/project path
+  // froze the align log whenever the two spellings differed. The effect below
+  // still refuses to copy another project's job into this one.
+  const tracked = useTrackedJob(jobId || null);
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
@@ -107,12 +110,16 @@ export function MakerForm() {
   const canReExport =
     exported && hasLines && !aligning && !rendering && (phase === "edit" || phase === "setup");
   const displayPhase: Phase = phase === "edit" ? "edit" : phase;
-  const alignElapsed = job?.created && alignNow ? Math.max(0, Math.floor((alignNow - job.created * 1000) / 1000)) : 0;
+  const alignStart = job?.started ?? job?.created;
+  const alignElapsed = alignStart && alignNow ? Math.max(0, Math.floor((alignNow - alignStart * 1000) / 1000)) : 0;
   const alignClock = `${Math.floor(alignElapsed / 60)}:${String(alignElapsed % 60).padStart(2, "0")}`;
   const alignStep = job?.log?.length ? job.log[job.log.length - 1] : "Đang chuẩn bị…";
 
   useEffect(() => {
     if (!tracked) return;
+    // The tracked job is always the one driven by jobId; when it is the job we
+    // are already showing, never drop its updates on a path mismatch.
+    if (job?.id && tracked.id !== job.id) return;
     if (
       tracked.project_path &&
       fields.project_path &&
@@ -121,7 +128,7 @@ export function MakerForm() {
       return;
     }
     setJob(tracked);
-  }, [tracked, fields.project_path]);
+  }, [tracked, job?.id, fields.project_path]);
 
   useEffect(() => {
     if (phase !== "align" || job?.status !== "running") return;
@@ -139,21 +146,31 @@ export function MakerForm() {
 
   useEffect(() => {
     if (!tracked) return;
-    if (tracked.status === "error" && tracked.error.includes("Không thấy tác vụ")) {
-      setJob(null);
-      setJobId("");
-      clearSession(sessionKeys.makerJob);
-      // Opening a project param will create a fresh job; don't alarm the user
-      // about the old in-memory job in that flow.
-      if (!projectParam && (phase === "edit" || phase === "align" || phase === "restore")) {
+    if (tracked.status !== "error" || !tracked.error.includes("Không thấy tác vụ")) return;
+    if (recoveredJob.current === tracked.id) return;
+    recoveredJob.current = tracked.id;
+    setJob(null);
+    setJobId("");
+    clearSession(sessionKeys.makerJob);
+    if (!projectParam) {
+      if (phase === "edit" || phase === "align" || phase === "restore") {
         setPhase("setup");
         push({
           tone: "error",
           message: "Phiên làm việc trước đã hết (server có thể đã restart). Hãy mở lại dự án đã lưu.",
         });
       }
+      return;
     }
-  }, [tracked?.id, tracked?.status, projectParam]);
+    // The server restarted (or pruned the job) while a project is open. Reopen
+    // it from the saved file instead of leaving a dead editor/align screen.
+    handledParam.current = `p:${projectParam}`;
+    void openProjectPath(projectParam);
+    push({
+      tone: "info",
+      message: "Server đã khởi động lại. Đã mở lại dự án từ file đã lưu.",
+    });
+  }, [tracked?.id, tracked?.status, projectParam, phase, push]);
 
   useEffect(() => {
     if (!tracked) return;
@@ -557,6 +574,7 @@ export function MakerForm() {
             ? {
                 ...current,
                 status: "running",
+                started: Date.now() / 1000,
                 error: "",
                 log: [...current.log, `Đã gửi lệnh ghép chữ lại bằng ${payload.model_name}.`],
               }
@@ -577,6 +595,8 @@ export function MakerForm() {
       setJob({
         id: data.id,
         status: "running",
+        created: Date.now() / 1000,
+        started: Date.now() / 1000,
         log: [`Đã gửi việc căn lời bằng ${payload.model_name}.`],
         error: "",
         outputs: null,
@@ -633,12 +653,15 @@ export function MakerForm() {
 
   async function requestExportAgain() {
     if (!canReExport) return;
-    setExportRequest(Date.now());
-    setPhase("edit");
     if (!job) {
       const ok = await resumeEdit();
-      if (!ok) setExportRequest(null);
+      if (!ok) {
+        setExportRequest(null);
+        return;
+      }
     }
+    setExportRequest(Date.now());
+    setPhase("edit");
   }
 
   function resumeEditing() {
@@ -870,7 +893,7 @@ export function MakerForm() {
           {job.status === "running" ? (
             <div className="mt-4 space-y-2 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-3">
               <div className="flex items-center justify-between text-xs text-[var(--muted)]">
-                <span className="truncate pr-3">{alignStep}</span>
+                <span className="min-w-0 flex-1 truncate pr-3">{alignStep}</span>
                 <span className="shrink-0 tabular-nums">{alignClock}</span>
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
@@ -879,6 +902,11 @@ export function MakerForm() {
               <p className="text-[11px] leading-4 text-[var(--muted)]">
                 Whisper đang nghe toàn bộ vocal. Bài dài có thể mất vài phút; log bên dưới cập nhật theo từng bước.
               </p>
+              {job.connectionLost ? (
+                <p className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[11px] leading-4 text-amber-100">
+                  Mất kết nối với server Python. Đang thử lại — nếu server đã tắt, hãy chạy lại rồi mở lại dự án.
+                </p>
+              ) : null}
             </div>
           ) : null}
           <ol className="mt-5 max-h-[28rem] space-y-2 overflow-auto text-sm leading-6 text-[var(--muted)]">
