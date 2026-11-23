@@ -233,10 +233,28 @@ class DirectorError(RuntimeError):
 
 
 def _api_key() -> str:
+    try:
+        from karaoke.settings import load_settings
+
+        stored = str(load_settings().get("gemini_api_key") or "").strip()
+        if stored:
+            return stored
+    except Exception:
+        pass
+    # The app-level .env should beat a stale key exported by the user's shell
+    # (a common cause of "API key not valid" after rotating the key).
+    try:
+        from dotenv import dotenv_values
+
+        file_key = str(dotenv_values(Path(__file__).resolve().parents[1] / ".env").get("GEMINI_API_KEY") or "").strip()
+        if file_key:
+            return file_key
+    except Exception:
+        pass
     key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
     if not key:
         raise DirectorError(
-            "Chưa có GEMINI_API_KEY. Đặt GEMINI_API_KEY trong .env hoặc biến môi trường "
+            "Chưa có GEMINI_API_KEY. Nhập trong Cài đặt, hoặc đặt GEMINI_API_KEY trong .env "
             "trước khi phân tích ảnh (xem .env.example)."
         )
     return key

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { useSettings, type AppSettings } from "@/lib/settings";
-import { Field, PathField, Select } from "@/components/ui/field";
+import { Field, PathField, Select, TextInput } from "@/components/ui/field";
 import { Badge, btnDanger, btnPrimary, btnSecondary, Panel } from "@/components/ui/primitives";
 import { Drawer, useDialog } from "@/components/ui/dialog";
 import { useNotices } from "@/components/ui/toast";
@@ -22,6 +22,8 @@ export function SettingsDrawer() {
   const { confirm } = useDialog();
   const { push } = useNotices();
   const [draft, setDraft] = useState<AppSettings>(settings);
+  const [geminiKey, setGeminiKey] = useState("");
+  const [clearGeminiKey, setClearGeminiKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [staleEntries, setStaleEntries] = useState<{ path: string; parent_exists: boolean }[]>([]);
@@ -30,7 +32,11 @@ export function SettingsDrawer() {
   const volumeStale = staleEntries.filter((entry) => !entry.parent_exists);
 
   useEffect(() => {
-    if (open) setDraft(settings);
+    if (open) {
+      setDraft(settings);
+      setGeminiKey("");
+      setClearGeminiKey(false);
+    }
   }, [open, settings]);
 
   useEffect(() => {
@@ -128,9 +134,16 @@ export function SettingsDrawer() {
 
   async function submit() {
     setBusy(true);
-    const ok = await save(draft);
+    const patch: Partial<AppSettings> = { ...draft };
+    if (geminiKey.trim()) patch.gemini_api_key = geminiKey.trim();
+    if (clearGeminiKey) patch.clear_gemini_api_key = true;
+    const ok = await save(patch);
     setBusy(false);
-    if (ok) closeSettings();
+    if (ok) {
+      setGeminiKey("");
+      setClearGeminiKey(false);
+      closeSettings();
+    }
   }
 
   return (
@@ -177,6 +190,32 @@ export function SettingsDrawer() {
               </span>
             </span>
           </label>
+          <Field
+            label="Gemini API key"
+            htmlFor="settings-gemini-key"
+            hint="Key trong Cài đặt sẽ đè lên biến môi trường và .env. Để trống để giữ key hiện tại."
+          >
+            <TextInput
+              id="settings-gemini-key"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={geminiKey}
+              onChange={(event) => setGeminiKey(event.target.value)}
+              placeholder={draft.gemini_api_key_set ? "•••••••• (đã lưu)" : "AIza... hoặc AQ..."}
+            />
+          </Field>
+          {draft.gemini_api_key_set ? (
+            <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
+              <input
+                type="checkbox"
+                className="accent-[var(--gold)]"
+                checked={clearGeminiKey}
+                onChange={(event) => setClearGeminiKey(event.target.checked)}
+              />
+              Xoá key đã lưu trong Cài đặt
+            </label>
+          ) : null}
         </Panel>
 
         <div className="space-y-3">

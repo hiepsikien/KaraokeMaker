@@ -31,6 +31,7 @@ class SettingsTests(unittest.TestCase):
     def test_round_trip(self):
         payload = {
             "gemini_consent": True,
+            "gemini_api_key": "test-key",
             "device": "mps",
             "model_name": "medium",
             "output_dir": "/tmp/karaoke out",
@@ -41,6 +42,14 @@ class SettingsTests(unittest.TestCase):
 
         path = self.data_root / "settings.json"
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), payload)
+        self.assertEqual((path.stat().st_mode & 0o777), 0o600)
+
+    def test_public_settings_hides_key(self):
+        from karaoke.settings import public_settings
+
+        public = public_settings({"gemini_api_key": "secret", "gemini_consent": True})
+        self.assertNotIn("gemini_api_key", public)
+        self.assertTrue(public["gemini_api_key_set"])
 
     def test_validation_falls_back_to_defaults(self):
         saved = save_settings(

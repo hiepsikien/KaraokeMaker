@@ -1,7 +1,8 @@
 """Small persisted app settings (consent, device, default transcription model).
 
-Settings deliberately contain no secrets: API keys stay in the environment or
-``.env``. The file lives next to stable assets under ``data_root()``.
+The Gemini key may be stored here so a desktop user can override an inherited
+shell/environment key. The settings file is written with ``0600`` and the key
+is never returned to the browser; the API only reports whether one is set.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from karaoke.cache import data_root
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
     "gemini_consent": False,
+    "gemini_api_key": "",
     "device": "cpu",
     "model_name": "small",
     "output_dir": "",
@@ -72,6 +74,9 @@ def _clean(payload: object) -> dict:
     consent = data.get("gemini_consent", result["gemini_consent"])
     if isinstance(consent, bool):
         result["gemini_consent"] = consent
+    api_key = data.get("gemini_api_key", result["gemini_api_key"])
+    if isinstance(api_key, str):
+        result["gemini_api_key"] = api_key.strip()
     device = data.get("device", result["device"])
     if isinstance(device, str) and device.strip() in DEVICES:
         result["device"] = device.strip()
@@ -94,6 +99,14 @@ def load_settings() -> dict:
     return _clean(payload)
 
 
+def public_settings(data: dict | None = None) -> dict:
+    """Settings safe to send to the browser: never include the key itself."""
+    values = dict(data if isinstance(data, dict) else load_settings())
+    has_key = bool(str(values.pop("gemini_api_key", "") or "").strip())
+    values["gemini_api_key_set"] = has_key
+    return values
+
+
 def save_settings(payload: dict) -> dict:
     """Validate and atomically persist settings; return the stored values."""
     data = _clean(payload)
@@ -109,6 +122,7 @@ def save_settings(payload: dict) -> dict:
                     json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
+                os.chmod(temporary, 0o600)
                 os.replace(temporary, path)
             finally:
                 temporary.unlink(missing_ok=True)

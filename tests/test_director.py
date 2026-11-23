@@ -307,11 +307,18 @@ class AnalyzeSceneTests(unittest.TestCase):
         self.assertIn("đồng ý", str(caught.exception))
         post.assert_not_called()
 
+    def test_settings_key_overrides_environment(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "env-key", "GOOGLE_API_KEY": ""}):
+            with patch("karaoke.settings.load_settings", return_value={"gemini_api_key": "settings-key"}):
+                self.assertEqual(director._api_key(), "settings-key")
+
     def test_missing_key_is_refused(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}):
-            with patch("karaoke.director.requests.post") as post:
-                with self.assertRaises(DirectorError) as caught:
-                    analyze_scene(self.image, self.PROMPT, consent=True)
+            with patch("karaoke.settings.load_settings", return_value={"gemini_api_key": ""}):
+                with patch("dotenv.dotenv_values", return_value={}):
+                    with patch("karaoke.director.requests.post") as post:
+                        with self.assertRaises(DirectorError) as caught:
+                            analyze_scene(self.image, self.PROMPT, consent=True)
         self.assertIn("GEMINI_API_KEY", str(caught.exception))
         post.assert_not_called()
 
