@@ -1176,6 +1176,7 @@ def _public_job(record: dict) -> dict:
         "id": record["id"],
         "status": record["status"],
         "created": float(record.get("created") or 0),
+        "started": float(record.get("started") or record.get("created") or 0),
         "log": list(record["log"]),
         "error": record["error"],
         "outputs": record["outputs"],
@@ -1585,6 +1586,7 @@ def create_job(body: CreateJobRequest):
         "id": job_id,
         "status": "running",
         "created": time.time(),
+        "started": time.time(),
         "log": ["Bắt đầu căn lời."],
         "error": "",
         "outputs": None,
@@ -1815,6 +1817,7 @@ def realign_job(job_id: str, body: AlignRequest):
             raise HTTPException(status_code=400, detail="Cần file vocal để ghép chữ lại.")
         prepared.update(options)
         record["status"] = "running"
+        record["started"] = time.time()
         record["error"] = ""
         record["log"].append(
             f"Ghép chữ lại bằng {options['model_name']} trên {options['device']}. Timing đang sửa sẽ được thay khi nghe xong."
