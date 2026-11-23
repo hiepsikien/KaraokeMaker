@@ -6,6 +6,7 @@ from pathlib import Path
 from karaoke.access import clear_grants, grant
 from karaoke.project import (
     _path_key,
+    _same_path,
     load_project,
     prepared_from_project,
     project_from_fields,
@@ -212,6 +213,15 @@ class BackgroundEffectProjectTests(unittest.TestCase):
             again = sync_project_file(prepared, status="aligned")
             self.assertTrue(again.is_file())
             self.assertTrue(first.is_file())
+
+    def test_same_path_does_not_merge_distinct_existing_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = root / "A.karaoke.json"
+            second = root / "B.karaoke.json"
+            first.write_text("{}", encoding="utf-8")
+            second.write_text("{}", encoding="utf-8")
+            self.assertFalse(_same_path(first, second))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import { AlignOptions } from "@/components/align-options";
 import { AudioRestore } from "@/components/audio-restore";
@@ -97,6 +97,7 @@ export function MakerForm() {
   const [alignNow, setAlignNow] = useState(0);
   const [exportRequest, setExportRequest] = useState<number | null>(null);
   const [projectExported, setProjectExported] = useState(false);
+  const clearExportRequest = useCallback(() => setExportRequest(null), []);
   const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
   const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
 
@@ -587,15 +588,15 @@ export function MakerForm() {
     }
   }
 
-  async function resumeEdit() {
+  async function resumeEdit(): Promise<boolean> {
     setNotice("");
     if (!fields.project_path) {
       setNotice("Chưa có file dự án để cập nhật.");
-      return;
+      return false;
     }
     if (!fields.vocal_audio) {
       setNotice("Cần file vocal để nghe và biên tập.");
-      return;
+      return false;
     }
     try {
       const response = await fetch("/api/projects/session", {
@@ -605,7 +606,7 @@ export function MakerForm() {
       });
       if (!response.ok) {
         setNotice(await readError(response));
-        return;
+        return false;
       }
       const data = (await response.json()) as { phase: string; project: Project; job: Job | null };
       setFields(fieldsFromProject(data.project));
@@ -620,21 +621,23 @@ export function MakerForm() {
       if (data.job) {
         setJob(data.job);
         setPhase("edit");
-        return;
+        return true;
       }
       setNotice("Chưa vào được biên tập. Kiểm tra lại vocal và timing trong dự án.");
+      return false;
     } catch {
       setNotice("Không cập nhật được dự án. Server Python chưa chạy.");
+      return false;
     }
   }
 
-  function requestExportAgain() {
+  async function requestExportAgain() {
     if (!canReExport) return;
     setExportRequest(Date.now());
     setPhase("edit");
     if (!job) {
-      if (fields.project_path) void openProjectPath(fields.project_path);
-      else void resumeEdit();
+      const ok = await resumeEdit();
+      if (!ok) setExportRequest(null);
     }
   }
 
@@ -738,7 +741,7 @@ export function MakerForm() {
                 type="button"
                 className={btnSecondary}
                 onClick={() => {
-                  requestExportAgain();
+                  void requestExportAgain();
                 }}
               >
                 Xuất lại
@@ -950,7 +953,7 @@ export function MakerForm() {
           background={job.background}
           renderPercent={job.render_percent ?? 0}
           openExportRequest={exportRequest}
-          onExportRequestHandled={() => setExportRequest(null)}
+          onExportRequestHandled={clearExportRequest}
           presentation={mergePresentation(fields.presentation)}
           waveform={mergeWaveform(fields.waveform)}
           outputProfile={fields.output_profile}
