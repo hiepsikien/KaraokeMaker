@@ -117,10 +117,11 @@ export function MakerForm() {
 
   useEffect(() => {
     if (!tracked) return;
-    // The tracked job is always the one driven by jobId; when it is the job we
-    // are already showing, never drop its updates on a path mismatch.
-    if (job?.id && tracked.id !== job.id) return;
-    if (
+    if (job?.id) {
+      // Already showing this exact job: always accept its updates. Comparing
+      // paths here could freeze the log again on a spelling mismatch.
+      if (tracked.id !== job.id) return;
+    } else if (
       tracked.project_path &&
       fields.project_path &&
       !samePath(tracked.project_path, fields.project_path)
@@ -147,6 +148,7 @@ export function MakerForm() {
   useEffect(() => {
     if (!tracked) return;
     if (tracked.status !== "error" || !tracked.error.includes("Không thấy tác vụ")) return;
+    if (job?.id && tracked.id !== job.id) return;
     if (recoveredJob.current === tracked.id) return;
     recoveredJob.current = tracked.id;
     setJob(null);
@@ -165,15 +167,20 @@ export function MakerForm() {
     // The server restarted (or pruned the job) while a project is open. Reopen
     // it from the saved file instead of leaving a dead editor/align screen.
     handledParam.current = `p:${projectParam}`;
-    void openProjectPath(projectParam);
-    push({
-      tone: "info",
-      message: "Server đã khởi động lại. Đã mở lại dự án từ file đã lưu.",
-    });
-  }, [tracked?.id, tracked?.status, projectParam, phase, push]);
+    void (async () => {
+      const opened = await openProjectPath(projectParam);
+      if (opened) {
+        push({
+          tone: "info",
+          message: "Server đã khởi động lại. Đã mở lại dự án từ file đã lưu.",
+        });
+      }
+    })();
+  }, [tracked?.id, tracked?.status, job?.id, projectParam, phase, push]);
 
   useEffect(() => {
     if (!tracked) return;
+    if (job?.id && tracked.id !== job.id) return;
     if (
       tracked.project_path &&
       fields.project_path &&
@@ -186,7 +193,7 @@ export function MakerForm() {
       setHasLines(Boolean(tracked.lines?.length));
       if (tracked.project) setFields(fieldsFromProject(tracked.project));
     }
-  }, [tracked?.id, tracked?.status]);
+  }, [tracked?.id, tracked?.status, job?.id, fields.project_path]);
 
   useEffect(() => {
     fetch("/api/defaults")
@@ -408,7 +415,7 @@ export function MakerForm() {
     await guardedNavigate(`/project?project=${encodeURIComponent(path)}`);
   }
 
-  async function openProjectPath(path: string, keepSetup = false) {
+  async function openProjectPath(path: string, keepSetup = false): Promise<boolean> {
     setNotice("");
     try {
       const response = await fetch("/api/projects/open", {
@@ -430,7 +437,7 @@ export function MakerForm() {
           model_name: settings.model_name || "small",
         });
         setPhase("home");
-        return;
+        return false;
       }
       const data = (await response.json()) as {
         phase: "setup" | "edit";
@@ -459,6 +466,7 @@ export function MakerForm() {
         setPhase("setup");
       }
       handledParam.current = `p:${path}`;
+      return true;
     } catch {
       setNotice("Không mở được dự án. Server Python chưa chạy bản mới.");
       handledParam.current = "";
@@ -473,6 +481,7 @@ export function MakerForm() {
         model_name: settings.model_name || "small",
       });
       setPhase("home");
+      return false;
     }
   }
 
@@ -592,11 +601,12 @@ export function MakerForm() {
         return;
       }
       const data = await response.json();
+      const startedAt = Date.now() / 1000;
       setJob({
         id: data.id,
         status: "running",
-        created: Date.now() / 1000,
-        started: Date.now() / 1000,
+        created: startedAt,
+        started: startedAt,
         log: [`Đã gửi việc căn lời bằng ${payload.model_name}.`],
         error: "",
         outputs: null,
