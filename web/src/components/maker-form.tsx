@@ -572,6 +572,9 @@ export function MakerForm() {
             device: payload.device,
             no_speech_threshold: payload.no_speech_threshold,
             whisper_retry: payload.whisper_retry,
+            align_strategy: payload.align_strategy,
+            gemini_model: payload.gemini_model,
+            google_audio_consent: payload.google_audio_consent,
           }),
         });
         if (!response.ok) {

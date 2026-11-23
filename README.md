@@ -160,7 +160,12 @@ Mười tám con người dưới cờ Lũng Nhai
 
 Chỉ dòng thứ ba được căn giờ và hiện trên video.
 
-Căn lời dùng file vocal. Trước khi chạy, chọn model Whisper (`tiny`, `base`, `small`, `medium`, `large-v2`, `large` — bản v3), thiết bị CPU hoặc GPU Apple, ngưỡng không-lời, và có thử lại khi câu bị lặp hay không. Máy chưa có model thì tải về lúc bắt đầu. Whisper lấy mốc thời gian. Chỗ khớp với lời đã nhập thì chữ trên video là lời đó. Đoạn hát chỉ nghe được, không có trong lời, được thêm như câu bổ sung.
+Căn lời dùng file vocal. Trước khi chạy, chọn chiến lược:
+
+- **Whisper** — local, mặc định; chọn model (`tiny`, `base`, `small`, `medium`, `large-v2`, `large`), thiết bị CPU/GPU Apple.
+- **Gemini line-level + Whisper word-level** — Gemini chia câu và lấy mốc câu; Whisper căn từng từ trong câu. Cần `GEMINI_API_KEY` và bật đồng ý gửi vocal. Nếu Gemini lỗi hoặc chưa đồng ý, app tự quay lại Whisper.
+
+Chỗ khớp với lời đã nhập thì chữ trên video là lời đó. Đoạn hò/ad-lib không có trong lời được đánh dấu riêng; câu không đủ tin cậy có thể bỏ trống để thêm tay.
 
 Việc này chạy một lần trong lúc căn. Mở dự án đã có không căn lại, trừ khi bấm **Ghép chữ lại**. Vocal không phải WAV 16-bit, kể cả mp3 và flac, được chuyển tạm trước khi đo tiếng hát.
 

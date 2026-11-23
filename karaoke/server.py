@@ -66,7 +66,7 @@ from karaoke.pipeline import (
     render_job,
     save_timing_file,
     timing_path_for,
-    whisper_options,
+    align_options,
 )
 from karaoke.profiles import get_profile, normalize_profile_id
 from karaoke.project import (
@@ -178,6 +178,9 @@ class ProjectFieldsRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
+    align_strategy: str = "whisper"
+    gemini_model: str = "gemini-3.8-flash"
+    google_audio_consent: bool = False
     project_path: str = ""
 
 
@@ -186,6 +189,9 @@ class AlignRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
+    align_strategy: str = "whisper"
+    gemini_model: str = "gemini-3.8-flash"
+    google_audio_consent: bool = False
 
 
 CreateJobRequest = ProjectFieldsRequest
@@ -261,6 +267,9 @@ class SettingsRequest(BaseModel):
     gemini_consent: bool | None = None
     gemini_api_key: str | None = None
     clear_gemini_api_key: bool = False
+    google_audio_consent: bool | None = None
+    align_strategy: str | None = None
+    gemini_model: str | None = None
     device: str | None = None
     model_name: str | None = None
     output_dir: str | None = None
@@ -1802,9 +1811,9 @@ def job_audio(job_id: str):
 
 @app.post("/api/jobs/{job_id}/realign")
 def realign_job(job_id: str, body: AlignRequest):
-    """Run Whisper alignment again and replace the timing currently being edited."""
+    """Run alignment again and replace the timing currently being edited."""
     try:
-        options = whisper_options(body.model_dump())
+        options = align_options(body.model_dump())
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     with _lock:
@@ -1820,8 +1829,12 @@ def realign_job(job_id: str, body: AlignRequest):
         record["status"] = "running"
         record["started"] = time.time()
         record["error"] = ""
+        if options.get("align_strategy") == "gemini_lines":
+            source = f"Gemini line-level ({options.get('gemini_model')}) + Whisper word-level"
+        else:
+            source = f"Whisper {options['model_name']} trên {options['device']}"
         record["log"].append(
-            f"Ghép chữ lại bằng {options['model_name']} trên {options['device']}. Timing đang sửa sẽ được thay khi nghe xong."
+            f"Ghép chữ lại bằng {source}. Timing đang sửa sẽ được thay khi nghe xong."
         )
 
     def log(message: str) -> None:

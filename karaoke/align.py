@@ -768,9 +768,8 @@ def lines_from_transcript(segments: list[dict]) -> list[dict]:
     return lines
 
 
-def align_lyrics(
+def transcribe_whisper(
     vocal_path: Path,
-    lyrics: str,
     language: str,
     model_name: str,
     device: str,
@@ -778,12 +777,7 @@ def align_lyrics(
     no_speech_threshold: float | None = None,
     whisper_retry: bool = True,
 ) -> list[dict]:
-    typed = extract_sung_lines(lyrics)
-    if typed:
-        log(
-            f"Lời đã nhập có {len(typed)} câu. "
-            "Chỗ khớp sẽ hiện lời này; đoạn chỉ nghe được sẽ được thêm như câu bổ sung."
-        )
+    """Run Whisper once and return heard segments with word timestamps."""
     _log_model_cache(model_name, log)
     log(f"Đang tải model {model_name} ({device}).")
 
@@ -838,6 +832,34 @@ def align_lyrics(
         words = _words_from_segment(segment)
         if words:
             heard_segments.append({"words": words})
+    return heard_segments
+
+
+def align_lyrics(
+    vocal_path: Path,
+    lyrics: str,
+    language: str,
+    model_name: str,
+    device: str,
+    log,
+    no_speech_threshold: float | None = None,
+    whisper_retry: bool = True,
+) -> list[dict]:
+    typed = extract_sung_lines(lyrics)
+    if typed:
+        log(
+            f"Lời đã nhập có {len(typed)} câu. "
+            "Chỗ khớp sẽ hiện lời này; đoạn chỉ nghe được sẽ được thêm như câu bổ sung."
+        )
+    heard_segments = transcribe_whisper(
+        vocal_path,
+        language,
+        model_name,
+        device,
+        log,
+        no_speech_threshold=no_speech_threshold,
+        whisper_retry=whisper_retry,
+    )
     if typed:
         matched = reconcile_lyrics_with_transcript(typed, heard_segments)
         added = sum(1 for line in matched if line.get("supplemented"))

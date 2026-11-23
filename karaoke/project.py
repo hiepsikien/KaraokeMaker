@@ -145,6 +145,9 @@ def empty_project() -> dict:
         "device": "cpu",
         "no_speech_threshold": None,
         "whisper_retry": True,
+        "align_strategy": "whisper",
+        "gemini_model": "gemini-3.8-flash",
+        "google_audio_consent": False,
         "lines": [],
         "outputs": None,
         "restore": {
@@ -196,9 +199,9 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     except (TypeError, ValueError) as error:
         raise JobError("Thời lượng phải là số giây.") from error
     project["language"] = str(payload.get("language") or "vi").strip() or "vi"
-    from karaoke.pipeline import whisper_options
+    from karaoke.pipeline import align_options
 
-    project.update(whisper_options(payload))
+    project.update(align_options(payload))
     if status not in STATUSES:
         raise JobError("Trạng thái dự án không hợp lệ.")
     project["status"] = status
@@ -246,6 +249,9 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "device": project.get("device") or "cpu",
         "no_speech_threshold": project.get("no_speech_threshold"),
         "whisper_retry": bool(project.get("whisper_retry", True)),
+        "align_strategy": project.get("align_strategy") or "whisper",
+        "gemini_model": project.get("gemini_model") or "gemini-3.8-flash",
+        "google_audio_consent": bool(project.get("google_audio_consent", False)),
         "lines": list(project.get("lines") or []),
         "outputs": project.get("outputs"),
         "restore": restore_from_payload(project),
@@ -435,6 +441,9 @@ def prepared_from_project(project: dict) -> dict:
         "device": project.get("device") or "cpu",
         "no_speech_threshold": project.get("no_speech_threshold"),
         "whisper_retry": bool(project.get("whisper_retry", True)),
+        "align_strategy": project.get("align_strategy") or "whisper",
+        "gemini_model": project.get("gemini_model") or "gemini-3.8-flash",
+        "google_audio_consent": bool(project.get("google_audio_consent", False)),
         "project_path": str(project.get("path") or ""),
         "timing_path": str(project.get("timing_path") or ""),
         "restore": restore_from_payload(project),

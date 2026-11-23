@@ -6,6 +6,7 @@ from pathlib import Path
 
 from karaoke.access import AccessError, ensure_allowed, grant, grant_project_paths
 from karaoke.align import AlignError, align_lyrics
+from karaoke.approach_b import align_with_gemini_lines
 from karaoke.errors import JobError
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import (
@@ -22,6 +23,8 @@ from karaoke.profiles import normalize_profile_id
 
 EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
 WHISPER_MODELS = frozenset({"tiny", "base", "small", "medium", "large-v2", "large"})
+ALIGN_STRATEGIES = frozenset({"whisper", "gemini_lines"})
+GEMINI_AUDIO_MODELS = frozenset({"gemini-3.8-flash"})
 
 
 def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
@@ -129,7 +132,7 @@ def prepare_job(payload: dict, log) -> dict:
 
     language = str(payload.get("language") or "vi").strip() or "vi"
     output_profile = normalize_profile_id(payload.get("output_profile"))
-    whisper = whisper_options(payload)
+    align = align_options(payload)
 
     try:
         original_length = probe_duration(original)
@@ -176,10 +179,13 @@ def prepare_job(payload: dict, log) -> dict:
         "cover_duration": cover_duration,
         "image_duration": image_duration,
         "language": language,
-        "model_name": whisper["model_name"],
-        "device": whisper["device"],
-        "no_speech_threshold": whisper["no_speech_threshold"],
-        "whisper_retry": whisper["whisper_retry"],
+        "model_name": align["model_name"],
+        "device": align["device"],
+        "no_speech_threshold": align["no_speech_threshold"],
+        "whisper_retry": align["whisper_retry"],
+        "align_strategy": align["align_strategy"],
+        "gemini_model": align["gemini_model"],
+        "google_audio_consent": align["google_audio_consent"],
         "vocal_duration": vocal_length,
     }
 
@@ -286,6 +292,9 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
         "language": "vi",
         "model_name": "small",
         "device": "cpu",
+        "align_strategy": "whisper",
+        "gemini_model": "gemini-3.8-flash",
+        "google_audio_consent": False,
         "vocal_duration": vocal_length,
         "timing_path": str(timing),
     }
@@ -409,8 +418,50 @@ def whisper_options(payload: dict) -> dict:
     }
 
 
+def align_options(payload: dict) -> dict:
+    result = whisper_options(payload)
+    strategy = str(payload.get("align_strategy") or "whisper").strip().lower() or "whisper"
+    if strategy not in ALIGN_STRATEGIES:
+        raise JobError("Chiến lược căn lời không hợp lệ.")
+    gemini_model = str(payload.get("gemini_model") or "gemini-3.8-flash").strip()
+    if gemini_model not in GEMINI_AUDIO_MODELS:
+        raise JobError("Model Gemini cho audio không hợp lệ.")
+    consent = payload.get("google_audio_consent", False)
+    if isinstance(consent, str):
+        consent = consent.strip().lower() not in {"0", "false", "no", ""}
+    else:
+        consent = bool(consent)
+    result.update(
+        {
+            "align_strategy": strategy,
+            "gemini_model": gemini_model,
+            "google_audio_consent": consent,
+        }
+    )
+    return result
+
+
 def align_job(prepared: dict, log) -> list[dict]:
     try:
+        strategy = str(prepared.get("align_strategy") or "whisper").strip().lower()
+        if strategy == "gemini_lines":
+            if not prepared.get("google_audio_consent"):
+                log("Chưa đồng ý gửi audio lên Gemini; dùng Whisper fallback.")
+            else:
+                try:
+                    return align_with_gemini_lines(
+                        Path(prepared["vocal_audio"]),
+                        prepared["lyrics"],
+                        prepared["language"],
+                        prepared["model_name"],
+                        prepared["device"],
+                        log,
+                        no_speech_threshold=prepared.get("no_speech_threshold"),
+                        whisper_retry=prepared.get("whisper_retry", True),
+                        gemini_model=prepared.get("gemini_model") or "gemini-3.8-flash",
+                    )
+                except Exception as error:
+                    log(f"Approach B lỗi ({error}); dùng Whisper fallback.")
         return align_lyrics(
             Path(prepared["vocal_audio"]),
             prepared["lyrics"],
