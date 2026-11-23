@@ -90,6 +90,7 @@ export function MakerForm() {
   const [notice, setNotice] = useState("");
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
+  const [alignNow, setAlignNow] = useState(0);
   const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
   const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
 
@@ -97,6 +98,9 @@ export function MakerForm() {
   const rendering = job?.status === "rendering";
   const exported = job?.status === "done" || Boolean(job?.outputs);
   const displayPhase: Phase = phase === "edit" ? "edit" : phase;
+  const alignElapsed = job?.created && alignNow ? Math.max(0, Math.floor((alignNow - job.created * 1000) / 1000)) : 0;
+  const alignClock = `${Math.floor(alignElapsed / 60)}:${String(alignElapsed % 60).padStart(2, "0")}`;
+  const alignStep = job?.log?.length ? job.log[job.log.length - 1] : "Đang chuẩn bị…";
 
   useEffect(() => {
     if (!tracked) return;
@@ -109,6 +113,14 @@ export function MakerForm() {
     }
     setJob(tracked);
   }, [tracked, fields.project_path]);
+
+  useEffect(() => {
+    if (phase !== "align" || job?.status !== "running") return;
+    const tick = () => setAlignNow(Date.now());
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [phase, job?.status, job?.id]);
 
   useEffect(() => {
     if (!job?.id) return;
@@ -815,6 +827,20 @@ export function MakerForm() {
         <section className="mx-auto max-w-2xl rounded-3xl border border-[var(--line)] bg-[var(--panel)] p-6">
           <p className="text-xs font-semibold tracking-[0.18em] text-[var(--gold)] uppercase">Ghép chữ</p>
           <h2 className="mt-2 text-xl font-semibold">Đang căn lời vào vocal…</h2>
+          {job.status === "running" ? (
+            <div className="mt-4 space-y-2 rounded-xl border border-[var(--line)] bg-black/20 px-3 py-3">
+              <div className="flex items-center justify-between text-xs text-[var(--muted)]">
+                <span className="truncate pr-3">{alignStep}</span>
+                <span className="shrink-0 tabular-nums">{alignClock}</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full w-1/2 animate-pulse rounded-full bg-[var(--gold)]" />
+              </div>
+              <p className="text-[11px] leading-4 text-[var(--muted)]">
+                Whisper đang nghe toàn bộ vocal. Bài dài có thể mất vài phút; log bên dưới cập nhật theo từng bước.
+              </p>
+            </div>
+          ) : null}
           <ol className="mt-5 max-h-[28rem] space-y-2 overflow-auto text-sm leading-6 text-[var(--muted)]">
             {job.log.map((line, index) => (
               <li key={`${index}-${line}`}>{line}</li>

@@ -1175,6 +1175,7 @@ def _public_job(record: dict) -> dict:
     return {
         "id": record["id"],
         "status": record["status"],
+        "created": float(record.get("created") or 0),
         "log": list(record["log"]),
         "error": record["error"],
         "outputs": record["outputs"],
