@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import { AlignOptions } from "@/components/align-options";
 import { AudioRestore } from "@/components/audio-restore";
@@ -10,7 +10,7 @@ import { PhaseStepper } from "@/components/phase-stepper";
 import { ProjectSetup } from "@/components/project-setup";
 import { TimingEditor, type ExportOptions } from "@/components/timing-editor";
 import { PageHeader } from "@/components/ui/page-header";
-import { Badge, btnGhost } from "@/components/ui/primitives";
+import { Badge, btnGhost, btnSecondary } from "@/components/ui/primitives";
 import { useNotices } from "@/components/ui/toast";
 import type { TimedLine } from "@/lib/cue";
 import { clearSession, sessionKeys, useSessionState } from "@/lib/session";
@@ -31,6 +31,10 @@ import {
   type ProjectFields,
   type RestoreSettings,
 } from "@/lib/types";
+
+function projectIsExported(project: Project | null | undefined): boolean {
+  return project?.status === "exported" || Boolean(project?.outputs);
+}
 
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project" | "outro";
 
@@ -91,12 +95,17 @@ export function MakerForm() {
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [alignNow, setAlignNow] = useState(0);
+  const [exportRequest, setExportRequest] = useState<number | null>(null);
+  const [projectExported, setProjectExported] = useState(false);
+  const clearExportRequest = useCallback(() => setExportRequest(null), []);
   const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
   const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
-  const exported = job?.status === "done" || Boolean(job?.outputs);
+  const exported = job?.status === "done" || Boolean(job?.outputs) || projectExported;
+  const canReExport =
+    exported && hasLines && !aligning && !rendering && (phase === "edit" || phase === "setup");
   const displayPhase: Phase = phase === "edit" ? "edit" : phase;
   const alignElapsed = job?.created && alignNow ? Math.max(0, Math.floor((alignNow - job.created * 1000) / 1000)) : 0;
   const alignClock = `${Math.floor(alignElapsed / 60)}:${String(alignElapsed % 60).padStart(2, "0")}`;
@@ -211,7 +220,10 @@ export function MakerForm() {
         setJobId(data.id);
         trackJob(data.id, data);
         setHasLines(Boolean(data.lines?.length));
-        if (data.project) setFields(fieldsFromProject(data.project));
+        if (data.project) {
+          setFields(fieldsFromProject(data.project));
+          setProjectExported(projectIsExported(data.project));
+        }
         let nextPhase: Phase = data.lines?.length ? "edit" : "setup";
         if (data.status === "running") nextPhase = "align";
         else if (["separating", "ready", "needs_split"].includes(data.status)) {
@@ -356,6 +368,7 @@ export function MakerForm() {
   function startCreate() {
     setNotice("");
     setJob(null);
+    setProjectExported(false);
     setHasLines(false);
     setFields({
       ...emptyFields(settings.output_dir),
@@ -391,6 +404,7 @@ export function MakerForm() {
         handledParam.current = "";
         setOpenedProject("");
         setJob(null);
+        setProjectExported(false);
         setJobId("");
         setHasLines(false);
         setFields({
@@ -409,6 +423,7 @@ export function MakerForm() {
       };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
+      setProjectExported(projectIsExported(data.project));
       if (data.notice) push({ tone: "info", message: data.notice });
       setOpenedProject(path);
       // An explicit ?view=setup (refresh/bookmark) stays in setup; opening a
@@ -432,6 +447,7 @@ export function MakerForm() {
       handledParam.current = "";
       setOpenedProject("");
       setJob(null);
+      setProjectExported(false);
       setJobId("");
       setHasLines(false);
       setFields({
@@ -572,15 +588,15 @@ export function MakerForm() {
     }
   }
 
-  async function resumeEdit() {
+  async function resumeEdit(): Promise<boolean> {
     setNotice("");
     if (!fields.project_path) {
       setNotice("Chưa có file dự án để cập nhật.");
-      return;
+      return false;
     }
     if (!fields.vocal_audio) {
       setNotice("Cần file vocal để nghe và biên tập.");
-      return;
+      return false;
     }
     try {
       const response = await fetch("/api/projects/session", {
@@ -590,11 +606,12 @@ export function MakerForm() {
       });
       if (!response.ok) {
         setNotice(await readError(response));
-        return;
+        return false;
       }
       const data = (await response.json()) as { phase: string; project: Project; job: Job | null };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
+      setProjectExported(projectIsExported(data.project));
       const path = data.project.path || fields.project_path;
       if (path) {
         setOpenedProject(path);
@@ -604,11 +621,23 @@ export function MakerForm() {
       if (data.job) {
         setJob(data.job);
         setPhase("edit");
-        return;
+        return true;
       }
       setNotice("Chưa vào được biên tập. Kiểm tra lại vocal và timing trong dự án.");
+      return false;
     } catch {
       setNotice("Không cập nhật được dự án. Server Python chưa chạy.");
+      return false;
+    }
+  }
+
+  async function requestExportAgain() {
+    if (!canReExport) return;
+    setExportRequest(Date.now());
+    setPhase("edit");
+    if (!job) {
+      const ok = await resumeEdit();
+      if (!ok) setExportRequest(null);
     }
   }
 
@@ -707,6 +736,17 @@ export function MakerForm() {
         }
         actions={
           <>
+            {canReExport ? (
+              <button
+                type="button"
+                className={btnSecondary}
+                onClick={() => {
+                  void requestExportAgain();
+                }}
+              >
+                Xuất lại
+              </button>
+            ) : null}
             <Badge tone={exported ? "success" : hasLines ? "info" : "muted"}>
               {exported ? "Đã xuất" : hasLines ? "Đã ghép lời" : "Nháp"}
             </Badge>
@@ -912,6 +952,8 @@ export function MakerForm() {
           defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
           background={job.background}
           renderPercent={job.render_percent ?? 0}
+          openExportRequest={exportRequest}
+          onExportRequestHandled={clearExportRequest}
           presentation={mergePresentation(fields.presentation)}
           waveform={mergeWaveform(fields.waveform)}
           outputProfile={fields.output_profile}

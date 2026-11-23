@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,21 +42,37 @@ def is_project_path(path: Path) -> bool:
     return path.name.lower().endswith(".karaoke.json")
 
 
+def _path_key(path: Path) -> str:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser()
+    # macOS may hand us NFC or NFD strings for the same file. Compare a
+    # normalized spelling so «Nữ» composed/decomposed is not treated as a
+    # different project.
+    return unicodedata.normalize("NFC", str(resolved))
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    """True when two spellings point at the same existing file.
+
+    ``samefile`` handles NFC/NFD, case-insensitive volumes and symlinks. The
+    normalized-string fallback is only for paths that do not both exist yet.
+    """
+    try:
+        if first.expanduser().exists() and second.expanduser().exists():
+            return first.expanduser().samefile(second.expanduser())
+    except OSError:
+        pass
+    return _path_key(first) == _path_key(second)
+
+
 def assert_project_path_available(desired: Path, previous: Path | None) -> None:
     """Refuse to overwrite another project's file when renaming/moving."""
     if not desired.is_file():
         return
-    try:
-        desired_resolved = desired.resolve()
-    except OSError:
-        desired_resolved = desired.expanduser()
-    if previous is not None:
-        try:
-            if previous.expanduser().resolve() == desired_resolved:
-                return
-        except OSError:
-            if previous.expanduser() == desired.expanduser():
-                return
+    if previous is not None and _same_path(previous, desired):
+        return
     raise JobError(
         f"Đã có dự án khác tại «{desired.name}». Đổi tên bài hoặc chọn thư mục xuất khác."
     )
@@ -473,7 +490,7 @@ def sync_project_file(
     saved = save_project(desired, project)
     if source is not None:
         try:
-            if source.resolve() != saved.resolve() and source.is_file():
+            if not _same_path(source, saved) and source.is_file():
                 source.unlink()
         except OSError:
             pass

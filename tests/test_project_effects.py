@@ -1,15 +1,19 @@
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
 from karaoke.access import clear_grants, grant
 from karaoke.project import (
+    _path_key,
+    _same_path,
     load_project,
     prepared_from_project,
     project_from_fields,
     project_path_for,
     public_project,
     save_project,
+    sync_project_file,
 )
 
 
@@ -188,6 +192,36 @@ class BackgroundEffectProjectTests(unittest.TestCase):
             )
             self.assertEqual(effect["effect_plan"]["regions"][0]["id"], "outdoor")
             self.assertEqual(effect["effect_plan"]["protect"][0]["label"], "face")
+
+    def test_sync_does_not_delete_same_file_with_nfd_spelling(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            grant(root)
+            title = "Đại Việt Trường Tồn"
+            prepared = {
+                "title": title,
+                "artist": "Andy Nguyen",
+                "output_dir": str(root),
+                "project_path": "",
+            }
+            first = sync_project_file(prepared, status="draft")
+            self.assertTrue(first.is_file())
+            composed = str(first)
+            decomposed = unicodedata.normalize("NFD", composed)
+            self.assertEqual(_path_key(Path(composed)), _path_key(Path(decomposed)))
+            prepared["project_path"] = decomposed
+            again = sync_project_file(prepared, status="aligned")
+            self.assertTrue(again.is_file())
+            self.assertTrue(first.is_file())
+
+    def test_same_path_does_not_merge_distinct_existing_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = root / "A.karaoke.json"
+            second = root / "B.karaoke.json"
+            first.write_text("{}", encoding="utf-8")
+            second.write_text("{}", encoding="utf-8")
+            self.assertFalse(_same_path(first, second))
 
 
 if __name__ == "__main__":

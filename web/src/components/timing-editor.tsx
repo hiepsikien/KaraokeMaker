@@ -107,6 +107,8 @@ export function TimingEditor({
   defaultOutputDir = "",
   background = null,
   renderPercent = 0,
+  openExportRequest = null,
+  onExportRequestHandled,
   presentation,
   waveform,
   outputProfile = "landscape_1080p",
@@ -134,6 +136,8 @@ export function TimingEditor({
   outputs: { vocal: string; instrumental: string; directory: string } | null;
   defaultOutputDir?: string;
   renderPercent?: number;
+  openExportRequest?: number | null;
+  onExportRequestHandled?: () => void;
   background?: {
     state: "missing" | "stale" | "ready" | "building" | "error";
     percent?: number;
@@ -206,6 +210,12 @@ export function TimingEditor({
   );
   const [exportOpen, setExportOpen] = useState(false);
   const closeExport = useCallback(() => setExportOpen(false), []);
+  useEffect(() => {
+    if (openExportRequest == null) return;
+    if (locked || lines.length === 0) return;
+    setExportOpen(true);
+    onExportRequestHandled?.();
+  }, [openExportRequest, locked, lines.length, onExportRequestHandled]);
   const [exportTab, setExportTab] = useState<"export" | "waveform" | "pages">("export");
   const [wave, setWave] = useState<WaveformPlan>(() => mergeWaveform(waveform));
   const [waveSaving, setWaveSaving] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -791,7 +801,7 @@ export function TimingEditor({
               onClick={() => setExportOpen(true)}
               className="rounded-full border border-[var(--line)] px-4 py-1.5 text-sm font-semibold text-[var(--paper)] transition hover:border-[var(--gold)] hover:text-[var(--gold)]"
             >
-              Xuất
+              {exported ? "Xuất lại" : "Xuất"}
             </button>
             <Badge tone={exportStatusTone}>{exportStatusLabel}</Badge>
           </>
