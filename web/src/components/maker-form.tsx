@@ -10,7 +10,7 @@ import { PhaseStepper } from "@/components/phase-stepper";
 import { ProjectSetup } from "@/components/project-setup";
 import { TimingEditor, type ExportOptions } from "@/components/timing-editor";
 import { PageHeader } from "@/components/ui/page-header";
-import { Badge, btnGhost } from "@/components/ui/primitives";
+import { Badge, btnGhost, btnSecondary } from "@/components/ui/primitives";
 import { useNotices } from "@/components/ui/toast";
 import type { TimedLine } from "@/lib/cue";
 import { clearSession, sessionKeys, useSessionState } from "@/lib/session";
@@ -91,12 +91,14 @@ export function MakerForm() {
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [alignNow, setAlignNow] = useState(0);
+  const [exportRequest, setExportRequest] = useState(0);
+  const [projectExported, setProjectExported] = useState(false);
   const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
   const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
 
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
-  const exported = job?.status === "done" || Boolean(job?.outputs);
+  const exported = job?.status === "done" || Boolean(job?.outputs) || projectExported;
   const displayPhase: Phase = phase === "edit" ? "edit" : phase;
   const alignElapsed = job?.created && alignNow ? Math.max(0, Math.floor((alignNow - job.created * 1000) / 1000)) : 0;
   const alignClock = `${Math.floor(alignElapsed / 60)}:${String(alignElapsed % 60).padStart(2, "0")}`;
@@ -356,6 +358,7 @@ export function MakerForm() {
   function startCreate() {
     setNotice("");
     setJob(null);
+    setProjectExported(false);
     setHasLines(false);
     setFields({
       ...emptyFields(settings.output_dir),
@@ -391,6 +394,7 @@ export function MakerForm() {
         handledParam.current = "";
         setOpenedProject("");
         setJob(null);
+        setProjectExported(false);
         setJobId("");
         setHasLines(false);
         setFields({
@@ -409,6 +413,7 @@ export function MakerForm() {
       };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
+      setProjectExported(data.project.status === "exported" || Boolean(data.project.outputs));
       if (data.notice) push({ tone: "info", message: data.notice });
       setOpenedProject(path);
       // An explicit ?view=setup (refresh/bookmark) stays in setup; opening a
@@ -432,6 +437,7 @@ export function MakerForm() {
       handledParam.current = "";
       setOpenedProject("");
       setJob(null);
+      setProjectExported(false);
       setJobId("");
       setHasLines(false);
       setFields({
@@ -595,6 +601,7 @@ export function MakerForm() {
       const data = (await response.json()) as { phase: string; project: Project; job: Job | null };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
+      setProjectExported(data.project.status === "exported" || Boolean(data.project.outputs));
       const path = data.project.path || fields.project_path;
       if (path) {
         setOpenedProject(path);
@@ -610,6 +617,12 @@ export function MakerForm() {
     } catch {
       setNotice("Không cập nhật được dự án. Server Python chưa chạy.");
     }
+  }
+
+  function requestExportAgain() {
+    setExportRequest((current) => current + 1);
+    setPhase("edit");
+    if (!job) void resumeEdit();
   }
 
   function resumeEditing() {
@@ -707,6 +720,17 @@ export function MakerForm() {
         }
         actions={
           <>
+            {exported && hasLines ? (
+              <button
+                type="button"
+                className={btnSecondary}
+                onClick={() => {
+                  requestExportAgain();
+                }}
+              >
+                Xuất lại
+              </button>
+            ) : null}
             <Badge tone={exported ? "success" : hasLines ? "info" : "muted"}>
               {exported ? "Đã xuất" : hasLines ? "Đã ghép lời" : "Nháp"}
             </Badge>
@@ -912,6 +936,7 @@ export function MakerForm() {
           defaultOutputDir={fields.output_dir || job.outputs?.directory || ""}
           background={job.background}
           renderPercent={job.render_percent ?? 0}
+          openExportRequest={exportRequest}
           presentation={mergePresentation(fields.presentation)}
           waveform={mergeWaveform(fields.waveform)}
           outputProfile={fields.output_profile}
