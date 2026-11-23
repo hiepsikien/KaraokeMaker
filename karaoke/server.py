@@ -80,7 +80,7 @@ from karaoke.project import (
     save_project,
     sync_project_file,
 )
-from karaoke.settings import load_settings, save_settings
+from karaoke.settings import load_settings, public_settings, save_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -259,6 +259,8 @@ class StudioAssetRenameRequest(BaseModel):
 
 class SettingsRequest(BaseModel):
     gemini_consent: bool | None = None
+    gemini_api_key: str | None = None
+    clear_gemini_api_key: bool = False
     device: str | None = None
     model_name: str | None = None
     output_dir: str | None = None
@@ -1554,18 +1556,24 @@ def projects_registry_forget(body: ForgetProjectsRequest):
 
 @app.get("/api/settings")
 def get_settings():
-    return {"settings": load_settings()}
+    return {"settings": public_settings(load_settings())}
 
 
 @app.put("/api/settings")
 def update_settings(body: SettingsRequest):
     current = load_settings()
     updates = body.model_dump(exclude_unset=True)
+    clear_key = bool(updates.pop("clear_gemini_api_key", False))
+    new_key = updates.pop("gemini_api_key", None)
     merged = {**current}
     for key, value in updates.items():
         if value is not None:
             merged[key] = value
-    return {"settings": save_settings(merged)}
+    if clear_key:
+        merged["gemini_api_key"] = ""
+    elif isinstance(new_key, str) and new_key.strip():
+        merged["gemini_api_key"] = new_key.strip()
+    return {"settings": public_settings(save_settings(merged))}
 
 
 @app.post("/api/jobs")

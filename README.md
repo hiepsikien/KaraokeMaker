@@ -62,6 +62,10 @@ cp .env.example .env
 Hoặc đặt biến môi trường trước khi chạy server. Sau khi đổi `.env`, tắt và chạy lại
 server Python. Key chỉ nằm ở server, không gửi xuống trình duyệt.
 
+Thứ tự ưu tiên key Gemini: **Cài đặt trong app → `.env` → biến môi trường**. Có thể
+nhập key trong **Cài đặt → Hiệu ứng AI**; key đó sẽ đè lên key hệ thống/`.env` và
+được lưu với quyền `0600`.
+
 - Ảnh chỉ được gửi khi bạn bật ô đồng ý trong mục Hiệu ứng nền.
 - **Định dạng video**: Ngang 16:9 (1920×1080), Dọc 9:16 (1080×1920), Vuông 1:1
   (1080×1080), Dọc 4:5 (1080×1350). 9:16 có hậu tố `(dọc)` và dải lời nằm trên vùng

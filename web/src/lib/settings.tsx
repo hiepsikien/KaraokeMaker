@@ -15,6 +15,9 @@ import { useNotices } from "@/components/ui/toast";
 
 export type AppSettings = {
   gemini_consent: boolean;
+  gemini_api_key_set: boolean;
+  gemini_api_key?: string;
+  clear_gemini_api_key?: boolean;
   device: string;
   model_name: string;
   output_dir: string;
@@ -22,6 +25,7 @@ export type AppSettings = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   gemini_consent: false,
+  gemini_api_key_set: false,
   device: "cpu",
   model_name: "small",
   output_dir: "",
