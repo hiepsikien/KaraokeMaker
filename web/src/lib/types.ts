@@ -467,6 +467,7 @@ export type Project = {
 export type Job = {
   id: string;
   status: "running" | "editing" | "rendering" | "done" | "error" | "needs_split" | "separating" | "ready";
+  created?: number;
   log: string[];
   error: string;
   outputs: Outputs | null;
