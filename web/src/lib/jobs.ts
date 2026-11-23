@@ -57,6 +57,9 @@ async function pollOne(id: string, entry: Entry) {
         entry.job = { ...entry.job, status: "error", error: "Không thấy tác vụ (server có thể đã restart)." };
         entry.placeholder = false;
         emit(id);
+      } else if (!entry.job.connectionLost) {
+        entry.job = { ...entry.job, connectionLost: true };
+        emit(id);
       }
       return;
     }
@@ -65,7 +68,12 @@ async function pollOne(id: string, entry: Entry) {
     entry.placeholder = false;
     emit(id);
   } catch {
-    /* keep the last known state; the global health banner handles offline */
+    // Keep the last known state but tell the UI that the server stopped
+    // answering, so a frozen log does not look like a healthy running job.
+    if (!entry.job.connectionLost) {
+      entry.job = { ...entry.job, connectionLost: true };
+      emit(id);
+    }
   }
 }
 

@@ -2,6 +2,7 @@ import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from karaoke.access import clear_grants, grant
 from karaoke.project import (
@@ -194,6 +195,9 @@ class BackgroundEffectProjectTests(unittest.TestCase):
             self.assertEqual(effect["effect_plan"]["protect"][0]["label"], "face")
 
     def test_sync_does_not_delete_same_file_with_nfd_spelling(self):
+        # On macOS both spellings resolve to the same file, so this exercises
+        # the unlink branch. On case/Unicode-sensitive filesystems the NFD path
+        # does not exist and only the key comparison is checked.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             grant(root)
@@ -222,6 +226,30 @@ class BackgroundEffectProjectTests(unittest.TestCase):
             first.write_text("{}", encoding="utf-8")
             second.write_text("{}", encoding="utf-8")
             self.assertFalse(_same_path(first, second))
+
+    def test_same_path_follows_symlinks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            target = root / "Real.karaoke.json"
+            target.write_text("{}", encoding="utf-8")
+            link = root / "Link.karaoke.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink is not available here")
+            self.assertTrue(_same_path(target, link))
+
+    def test_same_path_trusts_file_identity_over_spelling(self):
+        # Both files exist and are different: samefile() must win even when the
+        # normalized-string fallback happens to collide.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = root / "A.karaoke.json"
+            second = root / "B.karaoke.json"
+            first.write_text("{}", encoding="utf-8")
+            second.write_text("{}", encoding="utf-8")
+            with mock.patch("karaoke.project._path_key", return_value="same"):
+                self.assertFalse(_same_path(first, second))
 
 
 if __name__ == "__main__":

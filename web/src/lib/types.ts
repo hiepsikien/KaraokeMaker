@@ -468,11 +468,13 @@ export type Job = {
   id: string;
   status: "running" | "editing" | "rendering" | "done" | "error" | "needs_split" | "separating" | "ready";
   created?: number;
+  started?: number;
   log: string[];
   error: string;
   outputs: Outputs | null;
   lines: TimedLine[] | null;
   duration: number;
+  connectionLost?: boolean;
   export_gaps?: string[];
   render_percent?: number;
   project_path?: string;
