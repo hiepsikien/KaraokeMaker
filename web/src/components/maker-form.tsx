@@ -32,6 +32,10 @@ import {
   type RestoreSettings,
 } from "@/lib/types";
 
+function projectIsExported(project: Project | null | undefined): boolean {
+  return project?.status === "exported" || Boolean(project?.outputs);
+}
+
 type BrowseKind = "original" | "vocal" | "instrumental" | "cover" | "images" | "output" | "project" | "outro";
 
 function replaceProjectUrl(
@@ -91,7 +95,7 @@ export function MakerForm() {
   const [busyBrowse, setBusyBrowse] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [alignNow, setAlignNow] = useState(0);
-  const [exportRequest, setExportRequest] = useState(0);
+  const [exportRequest, setExportRequest] = useState<number | null>(null);
   const [projectExported, setProjectExported] = useState(false);
   const shouldTrackSavedJob = !projectParam || samePath(openedProject, projectParam);
   const tracked = useTrackedJob(shouldTrackSavedJob ? jobId || null : null);
@@ -99,6 +103,8 @@ export function MakerForm() {
   const aligning = job?.status === "running";
   const rendering = job?.status === "rendering";
   const exported = job?.status === "done" || Boolean(job?.outputs) || projectExported;
+  const canReExport =
+    exported && hasLines && !aligning && !rendering && (phase === "edit" || phase === "setup");
   const displayPhase: Phase = phase === "edit" ? "edit" : phase;
   const alignElapsed = job?.created && alignNow ? Math.max(0, Math.floor((alignNow - job.created * 1000) / 1000)) : 0;
   const alignClock = `${Math.floor(alignElapsed / 60)}:${String(alignElapsed % 60).padStart(2, "0")}`;
@@ -213,7 +219,10 @@ export function MakerForm() {
         setJobId(data.id);
         trackJob(data.id, data);
         setHasLines(Boolean(data.lines?.length));
-        if (data.project) setFields(fieldsFromProject(data.project));
+        if (data.project) {
+          setFields(fieldsFromProject(data.project));
+          setProjectExported(projectIsExported(data.project));
+        }
         let nextPhase: Phase = data.lines?.length ? "edit" : "setup";
         if (data.status === "running") nextPhase = "align";
         else if (["separating", "ready", "needs_split"].includes(data.status)) {
@@ -413,7 +422,7 @@ export function MakerForm() {
       };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
-      setProjectExported(data.project.status === "exported" || Boolean(data.project.outputs));
+      setProjectExported(projectIsExported(data.project));
       if (data.notice) push({ tone: "info", message: data.notice });
       setOpenedProject(path);
       // An explicit ?view=setup (refresh/bookmark) stays in setup; opening a
@@ -601,7 +610,7 @@ export function MakerForm() {
       const data = (await response.json()) as { phase: string; project: Project; job: Job | null };
       setFields(fieldsFromProject(data.project));
       setHasLines(Boolean(data.project.lines?.length));
-      setProjectExported(data.project.status === "exported" || Boolean(data.project.outputs));
+      setProjectExported(projectIsExported(data.project));
       const path = data.project.path || fields.project_path;
       if (path) {
         setOpenedProject(path);
@@ -620,9 +629,13 @@ export function MakerForm() {
   }
 
   function requestExportAgain() {
-    setExportRequest((current) => current + 1);
+    if (!canReExport) return;
+    setExportRequest(Date.now());
     setPhase("edit");
-    if (!job) void resumeEdit();
+    if (!job) {
+      if (fields.project_path) void openProjectPath(fields.project_path);
+      else void resumeEdit();
+    }
   }
 
   function resumeEditing() {
@@ -720,7 +733,7 @@ export function MakerForm() {
         }
         actions={
           <>
-            {exported && hasLines ? (
+            {canReExport ? (
               <button
                 type="button"
                 className={btnSecondary}
@@ -937,6 +950,7 @@ export function MakerForm() {
           background={job.background}
           renderPercent={job.render_percent ?? 0}
           openExportRequest={exportRequest}
+          onExportRequestHandled={() => setExportRequest(null)}
           presentation={mergePresentation(fields.presentation)}
           waveform={mergeWaveform(fields.waveform)}
           outputProfile={fields.output_profile}

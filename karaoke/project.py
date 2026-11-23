@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,21 +42,24 @@ def is_project_path(path: Path) -> bool:
     return path.name.lower().endswith(".karaoke.json")
 
 
+def _path_key(path: Path) -> str:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser()
+    # macOS may hand us NFC or NFD strings for the same file. Compare a
+    # normalized spelling so «Nữ» composed/decomposed is not treated as a
+    # different project.
+    return unicodedata.normalize("NFC", str(resolved))
+
+
 def assert_project_path_available(desired: Path, previous: Path | None) -> None:
     """Refuse to overwrite another project's file when renaming/moving."""
     if not desired.is_file():
         return
-    try:
-        desired_resolved = desired.resolve()
-    except OSError:
-        desired_resolved = desired.expanduser()
-    if previous is not None:
-        try:
-            if previous.expanduser().resolve() == desired_resolved:
-                return
-        except OSError:
-            if previous.expanduser() == desired.expanduser():
-                return
+    desired_key = _path_key(desired)
+    if previous is not None and _path_key(previous) == desired_key:
+        return
     raise JobError(
         f"Đã có dự án khác tại «{desired.name}». Đổi tên bài hoặc chọn thư mục xuất khác."
     )
