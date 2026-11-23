@@ -569,7 +569,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **204 test hiện tại vẫn pass**:
+- **327 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -1196,7 +1196,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `218` Python tests pass.
+- `327` Python tests pass.
 - `npx tsc --noEmit` pass.
 - Gate 0 live chưa chạy: key trong `.env` trả `401 API key not valid`.
 
