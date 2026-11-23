@@ -1582,11 +1582,12 @@ def update_settings(body: SettingsRequest):
 def create_job(body: CreateJobRequest):
     job_id = uuid.uuid4().hex
     payload = body.model_dump()
+    started = time.time()
     record = {
         "id": job_id,
         "status": "running",
-        "created": time.time(),
-        "started": time.time(),
+        "created": started,
+        "started": started,
         "log": ["Bắt đầu căn lời."],
         "error": "",
         "outputs": None,
