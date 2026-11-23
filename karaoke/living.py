@@ -225,7 +225,7 @@ EFFECT_LABELS = {
 # v17: sparse box-free smoke, birds, sunrays, platform cache and protect fixes.
 # v31: visual plan hash ignores non-visual params (audio, legacy loop_duration).
 # v34: shared particle sprites, cloud warp, branch wind groups, ash/spark embers.
-MOTION_CACHE_VERSION = 34
+MOTION_CACHE_VERSION = 35
 
 # Shared x264 parameters for motion clips. They are part of the cache key via
 # ``ENCODER_VERSION``: bump it whenever any value below changes so old clips are
