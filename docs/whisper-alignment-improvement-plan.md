@@ -1,6 +1,6 @@
 # Phương án ghép lời: Gemini line-level (B) trước, Whisper fallback (A)
 
-Trạng thái: **Đã triển khai core Approach B; Gate 0 live chưa chạy được vì API key 401**  
+Trạng thái: **Đã triển khai core Approach B; Gate 0 pass trên bài khó, hơi kém A trên bài dễ**  
 Ngày: 2026-11-23  
 Phạm vi: `karaoke/align.py`, `karaoke/pipeline.py`, chất lượng Whisper, editor  
 Bối cảnh: Chirp/Gemini **word-level** đã bị loại và không có trong `main` stable.
@@ -1198,7 +1198,33 @@ Kết quả test:
 
 - `327` Python tests pass.
 - `npx tsc --noEmit` pass.
-- Gate 0 live chưa chạy: key trong `.env` trả `401 API key not valid`.
+
+### Gate 0 thật (key đã cập nhật)
+
+- Quả Cam, **1 request toàn bài + lyrics context**:
+  - 33/33 dòng, delta line start **0.00–0.67s**.
+  - Không context: 50 dòng, nhiều MISS → context rất quan trọng.
+- Bài Ca, **1 request toàn bài + context**:
+  - 35/36 dòng; thiếu ad-lib `"Ô... Ố..."`; delta còn lại **0.01–0.64s**.
+- Chunk 60s bị thiếu câu ở biên; 1 request toàn bài tốt hơn rõ rệt.
+
+### Full Approach B (Whisper medium + Gemini + matching + word-fit)
+
+| Bài | Số câu | MAE | P90 | Max | So A |
+|---|---:|---:|---:|---:|---|
+| Quả Cam | 33/33 | 0.221s | 0.42s | 0.95s | A 0.088/0.208 → B hơi tệ hơn |
+| Bài Ca | 35/36 | 0.771s | 0.46s | 9.23s | A 1.715/5.31 → B tốt hơn nhiều |
+
+Kết luận tạm:
+
+- B vượt trội ở bài khó (Bài Ca), nhưng hơi kém A ở bài dễ (Quả Cam).
+- Gate “MAE không tăng quá +0.02s” sẽ **fail Quả Cam**; cần quyết định:
+  - nới gate cho phép +0.15s nếu P90 ≤0.5s; hoặc
+  - dùng B cho bài khó, A cho bài dễ; hoặc
+  - cải thiện line start của B thêm ~0.2s.
+- Ad-lib cuối Bài Ca vẫn lệch ~9s; cần rule NLV/repeat hoặc review tay.
+- `extract_sung_lines` đã sửa để bỏ dòng stage direction trong ngoặc đơn `(...)`,
+  vì lyrics Quả Cam có `(Smooth jazz vibe)` làm lệch reference index.
 
 Chưa làm:
 

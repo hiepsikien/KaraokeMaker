@@ -137,20 +137,25 @@ def match_lines(
         }
 
     syllable_seconds = _syllable_seconds(reference, heard)
-    heard_texts = [
-        max(
-            sim_text(reference[row], line["text"]),
-            sim_text(
-                reference[row],
-                whisper_text_in_window(
-                    whisper_words, float(line["start"]), float(line["end"])
-                ),
-            ),
-        )
-        for row in range(rows)
-        for line in heard
-    ]
-    sim_matrix = [heard_texts[row * cols : (row + 1) * cols] for row in range(rows)]
+    sim_matrix: list[list[float]] = []
+    for row in range(rows):
+        values: list[float] = []
+        for line in heard:
+            gemini_sim = sim_text(reference[row], line["text"])
+            similarity = gemini_sim
+            # Second opinion only rescues a weak Gemini line. Taking max()
+            # unconditionally lets a shifted/hallucinated Whisper transcript
+            # inflate wrong pairs and pull the DP into a bad block.
+            if whisper_words and gemini_sim < 0.50:
+                whisper_sim = sim_text(
+                    reference[row],
+                    whisper_text_in_window(
+                        whisper_words, float(line["start"]), float(line["end"])
+                    ),
+                )
+                similarity = max(gemini_sim, whisper_sim)
+            values.append(similarity)
+        sim_matrix.append(values)
 
     score = [[0.0] * (cols + 1) for _ in range(rows + 1)]
     move = [[("skip_ref", 0) for _ in range(cols + 1)] for _ in range(rows + 1)]

@@ -247,8 +247,8 @@ def transcribe_lines(
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": _LINE_SCHEMA,
-            "temperature": 0.1,
-            "maxOutputTokens": 8192,
+            "temperature": 0.0,
+            "maxOutputTokens": 32768,
         },
     }
     if log is not None:

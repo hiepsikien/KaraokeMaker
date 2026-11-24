@@ -57,6 +57,10 @@ class LyricsTests(unittest.TestCase):
         lyrics = "\n[Intro]\n[Tiếng trống]\n\nMười tám con người\n"
         self.assertEqual(extract_sung_lines(lyrics), ["Mười tám con người"])
 
+    def test_skips_parenthetical_stage_directions(self):
+        lyrics = "(Smooth jazz vibe)\nBên bến Bình Than\n(Playful swing)\n"
+        self.assertEqual(extract_sung_lines(lyrics), ["Bên bến Bình Than"])
+
 
 class RepairTests(unittest.TestCase):
     def test_pulls_a_word_back_from_a_long_gap(self):

@@ -11,7 +11,9 @@ def extract_sung_lines(lyrics: str) -> list[str]:
         line = " ".join(raw.strip().split())
         if not line:
             continue
-        if line.startswith("[") and line.endswith("]"):
+        if (line.startswith("[") and line.endswith("]")) or (
+            line.startswith("(") and line.endswith(")")
+        ):
             continue
         sung.append(line)
     return sung
