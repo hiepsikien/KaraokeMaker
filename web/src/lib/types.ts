@@ -461,6 +461,10 @@ export type Project = {
   align_strategy?: "whisper" | "gemini_lines";
   gemini_model?: string;
   google_audio_consent?: boolean;
+  whisper_engine?: "auto" | "mlx" | "stable";
+  whisper_vad?: "off" | "rms" | "silero";
+  gemini_chunk_workers?: number;
+  align_parallel?: boolean;
   lines: TimedLine[];
   outputs: Outputs | null;
   restore?: RestoreSettings | null;
@@ -525,6 +529,10 @@ export type ProjectFields = {
   align_strategy: "whisper" | "gemini_lines";
   gemini_model: string;
   google_audio_consent: boolean;
+  whisper_engine: "auto" | "mlx" | "stable";
+  whisper_vad: "off" | "rms" | "silero";
+  gemini_chunk_workers: string;
+  align_parallel: boolean;
   project_path: string;
 };
 
@@ -555,6 +563,10 @@ export function emptyFields(outputDir = ""): ProjectFields {
     align_strategy: "gemini_lines",
     gemini_model: "gemini-3.8-flash",
     google_audio_consent: false,
+    whisper_engine: "auto",
+    whisper_vad: "off",
+    gemini_chunk_workers: "3",
+    align_parallel: true,
     project_path: "",
   };
 }
@@ -587,6 +599,16 @@ export function fieldsFromProject(project: Project): ProjectFields {
     align_strategy: project.align_strategy === "whisper" ? "whisper" : "gemini_lines",
     gemini_model: project.gemini_model || "gemini-3.8-flash",
     google_audio_consent: project.google_audio_consent === true,
+    whisper_engine:
+      project.whisper_engine === "mlx" || project.whisper_engine === "stable"
+        ? project.whisper_engine
+        : "auto",
+    whisper_vad:
+      project.whisper_vad === "rms" || project.whisper_vad === "silero"
+        ? project.whisper_vad
+        : "off",
+    gemini_chunk_workers: String(project.gemini_chunk_workers ?? 3),
+    align_parallel: project.align_parallel !== false,
     project_path: project.path || "",
   };
 }
@@ -619,6 +641,10 @@ export function fieldsPayload(fields: ProjectFields) {
     align_strategy: fields.align_strategy,
     gemini_model: fields.gemini_model,
     google_audio_consent: fields.google_audio_consent,
+    whisper_engine: fields.whisper_engine,
+    whisper_vad: fields.whisper_vad,
+    gemini_chunk_workers: Number(fields.gemini_chunk_workers) || 3,
+    align_parallel: fields.align_parallel,
     project_path: fields.project_path,
   };
 }

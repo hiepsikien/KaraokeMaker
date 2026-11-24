@@ -33,12 +33,18 @@ DEFAULT_SETTINGS = {
     "google_audio_consent": False,
     "align_strategy": "gemini_lines",
     "gemini_model": DEFAULT_GEMINI_MODEL,
+    "whisper_engine": "auto",
+    "whisper_vad": "off",
+    "gemini_chunk_workers": 3,
+    "align_parallel": True,
     "device": "cpu",
     "model_name": "small",
     "output_dir": "",
 }
 DEVICES = frozenset({"cpu", "mps"})
 ALIGN_STRATEGIES = frozenset({"whisper", "gemini_lines"})
+WHISPER_ENGINES = frozenset({"auto", "mlx", "stable"})
+WHISPER_VADS = frozenset({"off", "rms", "silero"})
 
 _LOCK = threading.Lock()
 
@@ -92,6 +98,20 @@ def _clean(payload: object) -> dict:
     gemini_model = data.get("gemini_model", result["gemini_model"])
     if isinstance(gemini_model, str) and gemini_model.strip() in GEMINI_AUDIO_MODELS:
         result["gemini_model"] = gemini_model.strip()
+    engine = data.get("whisper_engine", result["whisper_engine"])
+    if isinstance(engine, str) and engine.strip().lower() in WHISPER_ENGINES:
+        result["whisper_engine"] = engine.strip().lower()
+    vad = data.get("whisper_vad", result["whisper_vad"])
+    if isinstance(vad, str) and vad.strip().lower() in WHISPER_VADS:
+        result["whisper_vad"] = vad.strip().lower()
+    workers = data.get("gemini_chunk_workers", result["gemini_chunk_workers"])
+    try:
+        result["gemini_chunk_workers"] = max(1, min(3, int(workers)))
+    except (TypeError, ValueError):
+        pass
+    parallel = data.get("align_parallel", result["align_parallel"])
+    if isinstance(parallel, bool):
+        result["align_parallel"] = parallel
     device = data.get("device", result["device"])
     if isinstance(device, str) and device.strip() in DEVICES:
         result["device"] = device.strip()

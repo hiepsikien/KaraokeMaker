@@ -135,6 +135,16 @@ class ApproachBTests(unittest.TestCase):
         self.assertFalse(chunked.called)
         self.assertEqual([line["text"] for line in lines], ["một", "ba"])
 
+    def test_clip_for_whisper_rejects_fragmented_or_mostly_voiced(self):
+        from karaoke.approach_b import _clip_for_whisper
+
+        self.assertIsNone(
+            _clip_for_whisper([(i, i + 1.0) for i in range(0, 13)], 30.0)
+        )
+        self.assertIsNone(_clip_for_whisper([(0.0, 29.0)], 30.0))
+        clip = _clip_for_whisper([(0.0, 5.0), (20.0, 25.0)], 30.0)
+        self.assertEqual(clip, [0.0, 5.0, 20.0, 25.0])
+
     def test_gemini_failure_falls_back_to_whisper(self):
         with tempfile.TemporaryDirectory() as folder:
             vocal = Path(folder) / "vocal.wav"
@@ -142,6 +152,9 @@ class ApproachBTests(unittest.TestCase):
             segments = [{"words": words([("Màn", 0.5, 0.9), ("sương", 0.9, 1.4), ("buông", 1.4, 2.0)])}]
             with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
                 "karaoke.approach_b.transcribe_lines", side_effect=GeminiLineError("429")
+            ), patch(
+                "karaoke.approach_b.transcribe_lines_chunked",
+                side_effect=GeminiLineError("429"),
             ):
                 lines = align_with_gemini_lines(
                     vocal,

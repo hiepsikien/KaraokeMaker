@@ -85,22 +85,44 @@ class GeminiLinesTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["confidence"], 0.9)
 
-    def test_failed_chunk_is_reported_instead_of_silently_dropped(self):
+    def test_chunked_parallel_keeps_chunk_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.0, 6.0)], seconds=6.0)
+
+            def fake(*_args, start, **_kwargs):
+                return [{"text": f"c{int(start)}", "start": start, "end": start + 0.5}]
+
+            with patch(
+                "karaoke.gemini_lines.plan_chunks",
+                return_value=[(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)],
+            ), patch("karaoke.gemini_lines.transcribe_lines", side_effect=fake):
+                lines, failures = transcribe_lines_chunked(
+                    vocal, "x", use_cache=False, workers=3
+                )
+        self.assertEqual(failures, [])
+        self.assertEqual([line["text"] for line in lines], ["c0", "c2", "c4"])
+
+    def test_failed_chunk_is_reported_without_dropping_good_chunks(self):
         with tempfile.TemporaryDirectory() as folder:
             vocal = Path(folder) / "vocal.wav"
             tone(vocal, [(0.0, 5.0)], seconds=5.0)
+
+            def fake(*_args, start, end, **_kwargs):
+                if start == 0.0:
+                    return [{"text": "a", "start": 0.0, "end": 1.0}]
+                raise GeminiLineError("429")
+
             with patch(
                 "karaoke.gemini_lines.plan_chunks", return_value=[(0.0, 2.5), (2.5, 5.0)]
-            ), patch(
-                "karaoke.gemini_lines.transcribe_lines",
-                side_effect=[
-                    [{"text": "a", "start": 0.0, "end": 1.0}],
-                    GeminiLineError("429"),
-                ],
-            ):
-                with self.assertRaises(GeminiLineError) as raised:
-                    transcribe_lines_chunked(vocal, "a", use_cache=False)
-        self.assertIn("1/2", str(raised.exception))
+            ), patch("karaoke.gemini_lines.transcribe_lines", side_effect=fake):
+                lines, failures = transcribe_lines_chunked(
+                    vocal, "a", use_cache=False, workers=1
+                )
+        self.assertEqual([line["text"] for line in lines], ["a"])
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], 1)
+        self.assertIn("429", failures[0][1])
     def _response(self, lines):
         return {
             "candidates": [

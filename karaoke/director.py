@@ -229,6 +229,15 @@ class DirectorError(RuntimeError):
     """A clear, user-facing failure from the scene director."""
 
 
+class GeminiHTTPError(DirectorError):
+    """HTTP failure from Gemini, with enough detail to decide on retry."""
+
+    def __init__(self, message: str, *, status: int | None = None, transient: bool = False):
+        super().__init__(message)
+        self.status = status
+        self.transient = transient
+
+
 # ---------------------------------------------------------------------------
 # Environment and cache
 
@@ -442,7 +451,9 @@ def _post_generate(model: str, payload: dict, api_key: str, *, timeout: int) -> 
         try:
             return requests.post(url, headers=headers, json=body, timeout=timeout)
         except requests.RequestException as error:
-            raise DirectorError(f"Không gọi được Gemini ({model}): {error}") from error
+            raise GeminiHTTPError(
+                f"Không gọi được Gemini ({model}): {error}", transient=True
+            ) from error
 
     response = send(payload)
     if response.status_code == 400:
@@ -454,14 +465,24 @@ def _post_generate(model: str, payload: dict, api_key: str, *, timeout: int) -> 
 
     status = response.status_code
     if status == 429:
-        raise DirectorError(
-            "Gemini đang giới hạn tần suất (429). Hãy đợi một lát rồi thử lại."
+        raise GeminiHTTPError(
+            "Gemini đang giới hạn tần suất (429). Hãy đợi một lát rồi thử lại.",
+            status=status,
+            transient=True,
         )
     if status >= 500:
-        raise DirectorError(f"Gemini tạm lỗi ({status}). Hãy thử lại sau ít phút.")
+        raise GeminiHTTPError(
+            f"Gemini tạm lỗi ({status}). Hãy thử lại sau ít phút.",
+            status=status,
+            transient=True,
+        )
     if status != 200:
         detail = _response_detail(response)
-        raise DirectorError(f"Gemini trả lỗi {status}: {detail or 'không có chi tiết'}.")
+        raise GeminiHTTPError(
+            f"Gemini trả lỗi {status}: {detail or 'không có chi tiết'}.",
+            status=status,
+            transient=False,
+        )
 
     try:
         data = response.json()

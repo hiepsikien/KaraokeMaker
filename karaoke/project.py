@@ -149,6 +149,10 @@ def empty_project() -> dict:
         "align_strategy": "gemini_lines",
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "google_audio_consent": False,
+        "whisper_engine": "auto",
+        "whisper_vad": "off",
+        "gemini_chunk_workers": 3,
+        "align_parallel": True,
         "audio_consent_receipt": None,
         "lines": [],
         "outputs": None,
@@ -258,6 +262,10 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "align_strategy": project.get("align_strategy") or "gemini_lines",
         "gemini_model": project.get("gemini_model") or DEFAULT_GEMINI_MODEL,
         "google_audio_consent": bool(project.get("google_audio_consent", False)),
+        "whisper_engine": project.get("whisper_engine") or "auto",
+        "whisper_vad": project.get("whisper_vad") or "off",
+        "gemini_chunk_workers": int(project.get("gemini_chunk_workers") or 3),
+        "align_parallel": bool(project.get("align_parallel", True)),
         "audio_consent_receipt": (
             dict(project["audio_consent_receipt"])
             if isinstance(project.get("audio_consent_receipt"), dict)
@@ -455,6 +463,10 @@ def prepared_from_project(project: dict) -> dict:
         "align_strategy": project.get("align_strategy") or "gemini_lines",
         "gemini_model": project.get("gemini_model") or DEFAULT_GEMINI_MODEL,
         "google_audio_consent": bool(project.get("google_audio_consent", False)),
+        "whisper_engine": project.get("whisper_engine") or "auto",
+        "whisper_vad": project.get("whisper_vad") or "off",
+        "gemini_chunk_workers": int(project.get("gemini_chunk_workers") or 3),
+        "align_parallel": bool(project.get("align_parallel", True)),
         "audio_consent_receipt": (
             dict(project["audio_consent_receipt"])
             if isinstance(project.get("audio_consent_receipt"), dict)

@@ -803,3 +803,37 @@ Mỗi bước có feature flag; benchmark trước/sau trên cùng 3 bài.
   - `_WHISPER_LOCK` bao trọn load+transcribe; engine đi qua `align_lyrics`;
   - giữ nguyên threshold 0.08/0.12, không đổi ngoài phạm vi;
   - pin `mlx-whisper>=0.4.3,<0.5`; sửa nit test count/§7/§8.
+
+---
+
+## 17. Trạng thái triển khai (branch `feat/alignment-performance`)
+
+Đã implement:
+
+- **B**: Phase 1 chạy Whisper + full-song Gemini song song; Phase 2 coverage → chunk.
+- **D**: chunk Gemini tối đa 3 worker, giữ thứ tự; `GeminiBudget` 4 calls/chunk;
+  retry 429/5xx trong `gemini_lines`; regional check cho mọi chunk.
+- **E**: `karaoke/whisper_backend.py` tự chọn `mlx-whisper` trên Apple Silicon;
+  fallback stable; `load_mlx_whisper` giữ stable-ts word timing.
+- **F**: `karaoke/voiced.py` + `clip_timestamps`; F mặc định **off**, bật bằng UI
+  `VAD=RMS`; có guard bỏ F khi span quá nhiều/quá dài (mlx #1285).
+- Config: `whisper_engine`, `whisper_vad`, `gemini_chunk_workers`, `align_parallel`
+  đi qua project/settings/UI; `requirements-karaoke.txt` có mlx-whisper optional.
+- `WhisperFailed` để fallback A không chạy lại Whisper lần 2.
+
+Đo trên Apple M5 24 GB, medium, bài 4–5 phút:
+
+| Bài | Trước (stable serial) | B + D (stable) | B + D + E (MLX) | Ghi chú |
+|---|---:|---:|---:|---|
+| Tàn Hồng / Lời Thề | ~163 s | 56.0 s | **35.4 s** | F tự tắt do span 82% bài |
+| Tên Người / Hà Nội 1882 | ~140 s | — | **33.2 s** | F bật RMS (span 51%, 11 đoạn) |
+
+- 60 giây audio: stable medium ~25 s; MLX medium ~10.3 s (warm).
+- F giúp Tên Người: Whisper 47.4 → 39.4 s; Tàn Hồng F làm chậm nên guard bỏ F.
+- Kết quả alignment: Tàn Hồng 24/24; Tên Người 18/18 (Gò Công 123.8 s).
+
+Còn lại:
+
+- Chạy hold-out đầy đủ và quyết định bật F mặc định.
+- Cân nhắc thêm UI cho `gemini_chunk_workers`/`align_parallel` (hiện env/default).
+- Đo peak RAM MLX trên bài dài, chạy lặp 3 lần.

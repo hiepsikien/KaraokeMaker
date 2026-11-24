@@ -140,6 +140,40 @@ export function AlignOptions({
             <option value="mps">GPU Apple</option>
           </select>
         </label>
+        <label className="block">
+          <span className="mb-1.5 block text-sm text-[var(--muted)]">Engine Whisper</span>
+          <select
+            className={fieldClass}
+            value={fields.whisper_engine}
+            onChange={(event) =>
+              setFields((current) => ({
+                ...current,
+                whisper_engine: event.target.value as ProjectFields["whisper_engine"],
+              }))
+            }
+          >
+            <option value="auto">Auto (MLX nếu có)</option>
+            <option value="mlx">MLX (GPU Apple)</option>
+            <option value="stable">Stable (PyTorch)</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-1.5 block text-sm text-[var(--muted)]">VAD</span>
+          <select
+            className={fieldClass}
+            value={fields.whisper_vad}
+            onChange={(event) =>
+              setFields((current) => ({
+                ...current,
+                whisper_vad: event.target.value as ProjectFields["whisper_vad"],
+              }))
+            }
+          >
+            <option value="off">Tắt</option>
+            <option value="rms">RMS (chỉ đoạn có hát)</option>
+            <option value="silero">Silero</option>
+          </select>
+        </label>
         <label className="block sm:col-span-2">
           <span className="mb-1.5 block text-sm text-[var(--muted)]">Ngưỡng không-lời (0–1, để trống là tắt)</span>
           <input

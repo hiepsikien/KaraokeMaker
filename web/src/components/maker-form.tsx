@@ -400,6 +400,10 @@ export function MakerForm() {
           : ("whisper" as const),
       gemini_model: settings.gemini_model || "gemini-3.8-flash",
       google_audio_consent: Boolean(settings.google_audio_consent),
+      whisper_engine: settings.whisper_engine || "auto",
+      whisper_vad: settings.whisper_vad || "off",
+      gemini_chunk_workers: String(settings.gemini_chunk_workers ?? 3),
+      align_parallel: settings.align_parallel !== false,
     };
   }
 

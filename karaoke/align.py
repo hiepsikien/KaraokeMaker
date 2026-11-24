@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import unicodedata
 import wave
 from difflib import SequenceMatcher
@@ -11,10 +12,17 @@ import numpy as np
 
 from karaoke.lyrics import extract_sung_lines, normalize_token
 from karaoke.media import MediaError, is_pcm16_wav, pcm16_wav
+from karaoke.whisper_backend import load_whisper_model
+
+_WHISPER_LOCK = threading.Lock()
 
 
 class AlignError(RuntimeError):
     pass
+
+
+class WhisperFailed(AlignError):
+    """Whisper itself failed; retrying the whole job would only load it again."""
 
 
 def _word_dict(text: str, start: float, end: float) -> dict:
@@ -23,18 +31,33 @@ def _word_dict(text: str, start: float, end: float) -> dict:
     return {"text": text, "start": float(start), "end": float(end)}
 
 
+def _word_value(word, key: str):
+    if isinstance(word, dict):
+        return word.get(key)
+    return getattr(word, key, None)
+
+
 def _words_from_segment(segment) -> list[dict]:
+    raw_words = segment.get("words") if isinstance(segment, dict) else getattr(segment, "words", None)
     words = []
-    for word in segment.words or []:
-        text = str(word.word).strip()
-        if text:
-            words.append(_word_dict(text, word.start, word.end))
+    for word in raw_words or []:
+        text = str(_word_value(word, "word") or "").strip()
+        start = _word_value(word, "start")
+        end = _word_value(word, "end")
+        if not text or start is None or end is None:
+            continue
+        words.append(_word_dict(text, float(start), float(end)))
     if words:
         return words
-    text = str(getattr(segment, "text", "") or "").strip()
+    text = str(
+        (segment.get("text") if isinstance(segment, dict) else getattr(segment, "text", ""))
+        or ""
+    ).strip()
     if not text:
         return []
-    return [_word_dict(text, segment.start, segment.end)]
+    start = segment.get("start") if isinstance(segment, dict) else getattr(segment, "start", 0)
+    end = segment.get("end") if isinstance(segment, dict) else getattr(segment, "end", 0)
+    return [_word_dict(text, float(start or 0), float(end or 0))]
 
 
 def _line_from_words(
@@ -776,23 +799,10 @@ def transcribe_whisper(
     log,
     no_speech_threshold: float | None = None,
     whisper_retry: bool = True,
+    clip_timestamps: list[float] | None = None,
+    engine: str = "auto",
 ) -> list[dict]:
     """Run Whisper once and return heard segments with word timestamps."""
-    _log_model_cache(model_name, log)
-    log(f"Đang tải model {model_name} ({device}).")
-
-    import stable_whisper
-
-    try:
-        model = stable_whisper.load_model(model_name, device=device)
-    except Exception as error:
-        if device != "cpu":
-            log(f"Không dùng được {device} ({error}). Chuyển sang CPU.")
-            model = stable_whisper.load_model(model_name, device="cpu")
-        else:
-            raise AlignError(f"Không tải được model căn lời: {error}") from error
-
-    _allow_mps_alignment()
     temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if whisper_retry else 0.0
     if whisper_retry:
         log("Nếu một câu bị lặp, Whisper sẽ thử lại với nhiệt độ cao hơn.")
@@ -811,21 +821,44 @@ def transcribe_whisper(
         "no_speech_threshold": no_speech_threshold,
         "regroup": True,
     }
-    log("Đang nghe vocal bằng Whisper để lấy mốc thời gian.")
-    try:
-        result = model.transcribe(str(vocal_path), **transcribe_options)
-    except Exception as error:
-        if device == "cpu":
-            raise AlignError(f"Nghe vocal thất bại: {error}") from error
-        log(f"GPU Apple không nghe được ({error}). Đang nghe lại trên CPU.")
-        model = stable_whisper.load_model(model_name, device="cpu")
+    if clip_timestamps:
+        transcribe_options["clip_timestamps"] = clip_timestamps
+
+    with _WHISPER_LOCK:
+        model, backend = load_whisper_model(model_name, device, engine, log)
+        if backend == "stable":
+            _log_model_cache(model_name, log)
+            _allow_mps_alignment()
+        else:
+            log(f"Dùng MLX Whisper cho model {model_name}.")
+        log("Đang nghe vocal bằng Whisper để lấy mốc thời gian.")
+
+        def run(current_model):
+            return current_model.transcribe(str(vocal_path), **transcribe_options)
+
         try:
-            result = model.transcribe(str(vocal_path), **transcribe_options)
-        except Exception as cpu_error:
-            raise AlignError(f"Nghe vocal thất bại: {cpu_error}") from cpu_error
+            result = run(model)
+        except Exception as error:
+            if backend == "mlx":
+                log(f"MLX Whisper lỗi ({error}); fallback stable_whisper.")
+                model, backend = load_whisper_model(model_name, device, "stable", log)
+                _allow_mps_alignment()
+                try:
+                    result = run(model)
+                except Exception as stable_error:
+                    raise WhisperFailed(f"Nghe vocal thất bại: {stable_error}") from stable_error
+            elif device == "cpu":
+                raise WhisperFailed(f"Nghe vocal thất bại: {error}") from error
+            else:
+                log(f"GPU Apple không nghe được ({error}). Đang nghe lại trên CPU.")
+                model, _backend = load_whisper_model(model_name, "cpu", "stable", log)
+                try:
+                    result = run(model)
+                except Exception as cpu_error:
+                    raise WhisperFailed(f"Nghe vocal thất bại: {cpu_error}") from cpu_error
 
     if result is None:
-        raise AlignError("Whisper không trả về lời nghe được.")
+        raise WhisperFailed("Whisper không trả về lời nghe được.")
 
     heard_segments = []
     for segment in result.segments or []:
@@ -844,6 +877,7 @@ def align_lyrics(
     log,
     no_speech_threshold: float | None = None,
     whisper_retry: bool = True,
+    engine: str = "auto",
 ) -> list[dict]:
     typed = extract_sung_lines(lyrics)
     if typed:
@@ -859,6 +893,7 @@ def align_lyrics(
         log,
         no_speech_threshold=no_speech_threshold,
         whisper_retry=whisper_retry,
+        engine=engine,
     )
     if typed:
         matched = reconcile_lyrics_with_transcript(typed, heard_segments)
