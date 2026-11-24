@@ -60,6 +60,7 @@ def main() -> int:
     parser.add_argument("--whole", action="store_true")
     parser.add_argument("--context", action="store_true", help="Send reference lyrics.")
     parser.add_argument("--model", default="gemini-3.8-flash")
+    parser.add_argument("--json", action="store_true", help="Print MAE/P90/max as JSON.")
     args = parser.parse_args()
 
     project = find_project(Path(args.root).expanduser(), args.project)
@@ -100,7 +101,11 @@ def main() -> int:
         if overlap(line, window_start, window_end) > 0.2
     ]
     print(f"\nGemini lines: {len(heard)}; gold lines in window: {len(expected)}")
-    print(f"{'#':>2} {'gold start':>10} {'gemini start':>12} {'delta':>7}  text")
+    if not args.json:
+        print(f"{'#':>2} {'gold start':>10} {'gemini start':>12} {'delta':>7}  text")
+    deltas: list[float] = []
+    missing = 0
+    rows = []
     for index, line in enumerate(expected[:40]):
         candidates = [
             item
@@ -108,14 +113,43 @@ def main() -> int:
             if overlap({"start": item["start"], "end": item["end"]}, line["start"], line["end"]) > 0.1
         ]
         if not candidates:
-            print(f"{index:2d} {line['start']:10.2f} {'MISS':>12} {'':>7}  {line['text'][:40]}")
+            missing += 1
+            if not args.json:
+                print(f"{index:2d} {line['start']:10.2f} {'MISS':>12} {'':>7}  {line['text'][:40]}")
             continue
         closest = min(candidates, key=lambda item: abs(item["start"] - line["start"]))
-        print(
-            f"{index:2d} {line['start']:10.2f} {closest['start']:12.2f} "
-            f"{closest['start'] - line['start']:7.2f}  {line['text'][:40]}"
+        delta = closest["start"] - line["start"]
+        deltas.append(abs(delta))
+        rows.append(
+            {
+                "index": index,
+                "gold": round(float(line["start"]), 3),
+                "gemini": round(float(closest["start"]), 3),
+                "delta": round(float(delta), 3),
+                "text": str(line.get("text") or ""),
+            }
         )
-    print("\nGhi chú: so theo overlap thô; cần kiểm tra tay các câu lệch.")
+        if not args.json:
+            print(
+                f"{index:2d} {line['start']:10.2f} {closest['start']:12.2f} "
+                f"{delta:7.2f}  {line['text'][:40]}"
+            )
+
+    metrics = {"n": len(deltas), "missing": missing}
+    if deltas:
+        ordered = sorted(deltas)
+        metrics.update(
+            {
+                "mae": round(sum(deltas) / len(deltas), 3),
+                "p90": round(ordered[max(0, int(len(ordered) * 0.9) - 1)], 3),
+                "max": round(max(deltas), 3),
+            }
+        )
+    if args.json:
+        print(json.dumps({"metrics": metrics, "rows": rows}, ensure_ascii=False))
+    else:
+        print(f"\nMetrics: {metrics}")
+        print("Ghi chú: so theo overlap thô; cần kiểm tra tay các câu lệch.")
     return 0
 
 

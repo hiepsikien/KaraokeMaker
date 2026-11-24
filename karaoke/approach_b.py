@@ -8,6 +8,7 @@ uncertain lines are left unsung instead of being forced.
 from __future__ import annotations
 
 import math
+import unicodedata
 from pathlib import Path
 
 from karaoke.align import (
@@ -15,12 +16,14 @@ from karaoke.align import (
     _align_tokens,
     _fold_token,
     _line_from_words,
+    _plausible_heard,
     _vocal_rms,
     _word_dict,
     reconcile_lyrics_with_transcript,
     transcribe_whisper,
 )
 from karaoke.gemini_lines import GeminiLineError, transcribe_lines, transcribe_lines_chunked
+from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.line_match import match_lines
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import probe_duration
@@ -137,18 +140,16 @@ def _words_for_line(
     for token, time in zip(tokens, times):
         if time is None:
             continue
-        word_start = max(start, min(time[0], end))
-        word_end = max(word_start + 0.08, min(time[1], end))
-        if word_start < previous_end:
-            word_start = previous_end
-        if word_end <= word_start:
-            word_end = min(end, word_start + 0.08)
-        if word_end <= word_start:
-            continue
-        word_start = _snap_time(word_start, levels, hop, threshold)
-        word_end = _snap_time(word_end, levels, hop, threshold)
-        if word_end <= word_start:
-            word_end = word_start + 0.08
+        # Snap first, then enforce order. Snapping a start can move it back by up
+        # to SNAP_SHIFT; clamping before the snap could leave overlapping words.
+        word_start = _snap_time(min(max(time[0], start), end), levels, hop, threshold)
+        word_end = _snap_time(min(max(time[1], start), end), levels, hop, threshold)
+        word_start = max(start, previous_end, word_start)
+        if word_start > end - 0.08:
+            word_start = max(start, end - 0.08)
+        word_end = max(word_end, word_start + 0.08)
+        if word_end > end:
+            word_end = end if end > word_start else word_start + 0.08
         result.append(_word_dict(token, word_start, word_end))
         previous_end = word_end
     return result or _spread(tokens, start, end)
@@ -213,6 +214,35 @@ def _cut_overlaps(lines: list[dict]) -> None:
             word["start"] = max(float(word["start"]), float(current["start"]))
 
 
+def _plausible_extra(text: str) -> bool:
+    """Reject ASR noise that is not a pronounceable Latin/Vietnamese word."""
+    if not _plausible_heard(text):
+        return False
+    folded = "".join(
+        char
+        for char in unicodedata.normalize("NFD", text.casefold())
+        if char.isalpha() and not unicodedata.combining(char)
+    )
+    return len(folded) >= 2 and any(char in "aeiouy" for char in folded)
+
+
+def _voiced_ratio(
+    levels: list[float],
+    hop: float,
+    start: float,
+    end: float,
+    threshold: float,
+) -> float:
+    if not levels or hop <= 0:
+        return 1.0
+    first = max(0, int(start / hop))
+    last = min(len(levels), int(end / hop) + 1)
+    if last <= first:
+        return 0.0
+    voiced = sum(1 for level in levels[first:last] if level >= threshold)
+    return voiced / (last - first)
+
+
 def _build_from_match(
     references: list[str],
     match: dict,
@@ -229,13 +259,23 @@ def _build_from_match(
     threshold = max(80.0, peak * 0.12)
     used: set[int] = set()
     lines: list[dict] = []
+    dropped_extras = 0
 
+    planned: list[tuple[float, dict, str, int]] = []
     for item in match.get("matched", []) + match.get("repeat", []):
         ref_index = item.get("reference_index")
         if ref_index is None or not 0 <= int(ref_index) < len(references):
             continue
-        ref = references[int(ref_index)]
-        start = float(item["start"])
+        planned.append(
+            (float(item["start"]), item, references[int(ref_index)], int(ref_index))
+        )
+    planned.sort(key=lambda entry: (entry[0], float(entry[1]["end"])))
+
+    # Pass 1: every matched line claims the words inside its Gemini window.
+    # Overlapping windows must not let an earlier line steal a later line's core
+    # words through the padded fallback below.
+    claims: list[tuple[float, float, dict, str, int, list[int]]] = []
+    for start, item, ref, ref_index in planned:
         end = float(item["end"])
         core = [
             index
@@ -244,6 +284,10 @@ def _build_from_match(
         ]
         for index in core:
             used.add(index)
+        claims.append((start, end, item, ref, ref_index, core))
+
+    # Pass 2: after all cores are claimed, pad only lines that are still short.
+    for start, end, item, ref, ref_index, core in claims:
         if len(core) < max(1, int(len(ref.split()) * MIN_WORD_COVERAGE)):
             for index, word in enumerate(whisper_words):
                 if index in used:
@@ -251,7 +295,10 @@ def _build_from_match(
                 if start - PAD <= _mid(word) <= end + PAD:
                     core.append(index)
                     used.add(index)
-        heard = [whisper_words[index] for index in sorted(core)]
+            core.sort()
+
+    for start, end, item, ref, ref_index, core in claims:
+        heard = [whisper_words[index] for index in core]
         words = _words_for_line(ref, start, end, heard, levels, hop, threshold)
         line_start = words[0]["start"] if words else start
         line_end = words[-1]["end"] if words else end
@@ -259,7 +306,7 @@ def _build_from_match(
         line = _line_from_words(ref, words or _spread(ref.split(), start, end), uncertain=confidence < 0.7)
         line.update(
             {
-                "reference_index": int(ref_index),
+                "reference_index": ref_index,
                 "heard_text": item.get("heard_text", ""),
                 "confidence": confidence,
                 "text_similarity": item.get("text_similarity", 0.0),
@@ -289,12 +336,21 @@ def _build_from_match(
             used.add(index)
         heard = [whisper_words[index] for index in sorted(core)]
         words = heard or _spread(text.split(), start, end)
+        # Keep the saved text identical to the word list, otherwise
+        # normalize_edited_lines rebuilds it from words and the line changes.
+        spoken = " ".join(str(word["text"]) for word in words).strip()
         kind = item.get("kind", "extra")
-        line = _line_from_words(text or "...", words, uncertain=kind != "nlv")
+        if kind != "nlv":
+            dropped_extras += 1
+            continue
+        voiced = _voiced_ratio(levels, hop, start, end, threshold)
+        if not spoken or voiced < 0.5 or not _plausible_extra(spoken):
+            dropped_extras += 1
+            continue
+        line = _line_from_words(spoken, words, uncertain=False)
         line["status"] = "extra"
-        if kind == "nlv":
-            line["kind"] = "nlv"
-            line["label"] = "chant" if len(text.split()) >= 2 else "adlib"
+        line["kind"] = "nlv"
+        line["label"] = "chant" if (end - start) >= 2.5 and voiced >= 0.6 else "adlib"
         lines.append(line)
 
     _apply_window_boundaries(lines)
@@ -302,6 +358,8 @@ def _build_from_match(
     unsung = match.get("unsung") or []
     if unsung:
         note(f"{len(unsung)} câu không đủ tin cậy nên bỏ trống.")
+    if dropped_extras:
+        note(f"Bỏ {dropped_extras} đoạn hát nghi vấn (không đủ rõ để thành câu).")
     return lines
 
 
@@ -315,7 +373,7 @@ def align_with_gemini_lines(
     *,
     no_speech_threshold: float | None = None,
     whisper_retry: bool = True,
-    gemini_model: str = "gemini-3.8-flash",
+    gemini_model: str = DEFAULT_GEMINI_MODEL,
     gemini_start: float | None = None,
     gemini_end: float | None = None,
     use_cache: bool = True,
@@ -367,19 +425,31 @@ def align_with_gemini_lines(
                     log=log,
                     use_cache=use_cache,
                 )
+
+        match = match_lines(references, gemini_lines, whisper_words)
+        if not match.get("matched") and not match.get("repeat"):
+            log("Gemini không khớp được câu nào; dùng Whisper fallback.")
+            return reconcile_lyrics_with_transcript(references, segments)
+        matched_count = len(match.get("matched", [])) + len(match.get("repeat", []))
+        if matched_count < len(references) * 0.6:
+            log(
+                f"Chỉ ghép được {matched_count}/{len(references)} câu. "
+                "Kiểm tra lời nhập và audio; các câu còn lại sẽ để trống."
+            )
+
+        lines = _build_from_match(references, match, whisper_words, vocal_path, log)
+        if not lines:
+            log("Không dựng được dòng nào từ kết quả Gemini; dùng Whisper fallback.")
+            return reconcile_lyrics_with_transcript(references, segments)
     except GeminiLineError as error:
         log(f"Gemini line pass lỗi ({error}). Dùng Whisper fallback.")
         return reconcile_lyrics_with_transcript(references, segments)
-
-    match = match_lines(references, gemini_lines, whisper_words)
-    if not match.get("matched") and not match.get("repeat"):
-        log("Gemini không khớp được câu nào; dùng Whisper fallback.")
+    except Exception as error:
+        # Matching/word-fit errors must not bubble up to align_job: that would
+        # run Whisper a second time. Reuse the transcript already in memory.
+        log(f"Approach B lỗi ({error}); dùng Whisper fallback.")
         return reconcile_lyrics_with_transcript(references, segments)
 
-    lines = _build_from_match(references, match, whisper_words, vocal_path, log)
-    if not lines:
-        log("Không dựng được dòng nào từ kết quả Gemini; dùng Whisper fallback.")
-        return reconcile_lyrics_with_transcript(references, segments)
     log(
         f"Approach B xong: {len(match.get('matched', []))} câu khớp, "
         f"{len(match.get('repeat', []))} lặp, {len(match.get('unsung', []))} bỏ trống."

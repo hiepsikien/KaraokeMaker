@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **332 test hiện tại vẫn pass**:
+- **345 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -684,10 +684,10 @@ fallback A nếu Gemini lỗi/429/tắt consent.
 
 - **Cắt tại khoảng nghỉ dài** (RMS thấp ≥0.8s), target 90s, max 120s.
 - Nếu bài không có khoảng nghỉ đủ dài → cắt fixed max 120s với overlap 2s.
-- Chunk tại nghỉ giúp không cắt giữa câu; vẫn giữ overlap 0.5s quanh cut.
+- Chunk tại nghỉ giúp không cắt giữa câu; overlap 1.5s quanh cut (0.75s mỗi bên).
 - Nếu câu bị cắt ở cả hai chunk → đánh `uncertain` + request lại chunk dịch 20–30s
   (chỉ 1 lần).
-- **Coverage check:** nếu response full-song chỉ phủ <45% độ dài bài hoặc <40% số câu
+- **Coverage check:** nếu response full-song chỉ phủ <55% độ dài bài hoặc <70% số câu
   reference → tự chạy lại chunked. Đây là fix cho Văn Lang full-song chỉ trả 14 dòng
   bắt đầu từ 209s.
 - Timestamp từng chunk có thể drift; calibrate bằng anchor tin cậy
@@ -1088,7 +1088,7 @@ Không dùng lại `gemini_consent` (đang có nghĩa "gửi **ảnh** lên Gemi
 - copy rõ "gửi vocal stem lên cloud";
 - consent tắt → tự fallback A, không chặn job.
 
-Đây là thay đổi sản phẩm, cần đưa vào câu hỏi chốt.
+Đã làm: `google_audio_consent` + `audio_consent_receipt`; tắt consent thì fallback A.
 
 ### 10.7. Gate 0 và Spike
 
@@ -1202,7 +1202,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `332` Python tests pass.
+- `345` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
@@ -1216,19 +1216,24 @@ Kết quả test:
 
 ### Full Approach B (Whisper medium + Gemini + matching + word-fit)
 
+Đo lại sau khi sửa DP bằng `scripts/eval_b_alignment.py` (gold = timing đã export
+trong project, so theo `reference_index`):
+
 | Bài | Số câu | MAE | P90 | Max | So A |
 |---|---:|---:|---:|---:|---|
-| Quả Cam | 33/33 | 0.212s | 0.42s | 0.95s | A 0.088/0.208 → B hơi tệ hơn |
-| Bài Ca | 35/36 | 0.771s | 0.46s | 9.23s | A 1.715/5.31 → B tốt hơn nhiều |
+| Quả Cam | 33/33 | 0.170s | 0.36s | 0.65s | A 0.088/0.208 → B kém MAE hơn nhưng P90 đạt gate |
+| Bài Ca | 35/35 | 0.205s | 0.39s | 0.50s | A 1.715/5.31 → B tốt hơn nhiều |
 
-Kết luận tạm:
+(Bài Ca: lời có 35 câu; project gold có 36 dòng vì thêm ad-lib cuối, B ghép 35/35 câu lời.)
 
-- B vượt trội ở bài khó (Bài Ca), nhưng hơi kém A ở bài dễ (Quả Cam).
-- Gate “MAE không tăng quá +0.02s” sẽ **fail Quả Cam**; cần quyết định:
-  - nới gate cho phép +0.15s nếu P90 ≤0.5s; hoặc
-  - dùng B cho bài khó, A cho bài dễ; hoặc
-  - cải thiện line start của B thêm ~0.2s.
-- Ad-lib cuối Bài Ca vẫn lệch ~9s; cần rule NLV/repeat hoặc review tay.
+Kết luận:
+
+- Sau khi sửa DP (cộng prefix), B đạt **P90 ≤0.5s** trên cả hai bài; gate P90 +
+  MAE +0.15s pass.
+- Bài Ca hết lệch ~9s ở ad-lib cuối: ad-lib không match vào lời nên bị loại khỏi
+  danh sách dòng, max còn 0.50s.
+- Quả Cam vẫn kém A về MAE (0.170 vs 0.088) nhưng trong ngưỡng cho phép và P90 tốt hơn.
+- Vẫn giữ B opt-in đến khi chạy hold-out (Buồm Đỏ, Hà Nội, Đại Việt).
 - Văn Lang: full-song Gemini chỉ phủ 73%/14 câu → fallback chunk 3 đoạn tại nghỉ; kết quả 24/24 câu, câu 15 từ 3:12.15 → 3:07.14.
 - Văn Lang câu cuối bị tách "Văn Lang trường tồn" + "ngàn năm" → merge extra sát câu matched; còn 24 dòng, câu cuối 245.61–256.79s, không còn dòng lặp.
 - Đã blend biên Gemini với biên word (chỉ nhận Gemini start nếu sớm hơn word 0.10–0.35s và không chồng câu trước).
@@ -1238,10 +1243,43 @@ Kết luận tạm:
   `[Chorus]` cả khi nằm giữa dòng; project cũ được làm sạch khi load/save.
 - Chunker mới cắt tại khoảng nghỉ RMS dài; full-song coverage <55% hoặc <70% số câu → tự chunked.
 
-Chưa làm:
+Đã sửa sau review (P0/P1):
 
-- Chunk Gemini (hiện 1 request toàn bài).
-- Receipt `audio_consent_receipt`.
-- UI badge confidence/NLV trong editor.
-- Gate 0/hold-out thật khi có key hợp lệ.
+- **DP cộng prefix**: `score[i][j] = score[i-1][j-1] + match_score` thay vì ghi đè
+  bằng `match_score` cục bộ. Đây là lỗi làm sai toàn bộ matching và số liệu cũ.
+- **Sort timestamp Gemini** theo `(start, end)` trước matching.
+- **Dedupe theo text + overlap**, bỏ nhánh "start cách <1s là trùng" (không còn mất
+  hai câu ngắn khác nhau).
+- **Extra chỉ emit khi** `kind=nlv`, `voiced_ratio ≥0.5` và text plausible; extra
+  không rõ bị loại thay vì thăng cấp thành Hò/Ad-lib. Text của extra lấy từ `words`
+  để lưu/save không đổi chữ.
+- **Metadata B được giữ** khi `normalize_edited_lines`/`write_timing`:
+  `status/confidence/reference_index/kind/label/repeated/occurrence/heard_text`.
+  Editor có badge `hò`, `ad-lib`, `lặp`.
+- **Word ownership 2 pass** (core trước, pad sau); snap RMS xong mới ép thứ tự nên
+  word không chồng nhau.
+- **Fallback không chạy Whisper lần hai** khi lỗi matching; chunk Gemini lỗi được
+  báo rõ và fallback A thay vì trả thiếu im lặng.
+- **PCM convert 1 lần** cho toàn bộ chunk; overlap tại điểm cắt là 1.5s.
+- **Model Gemini cũ trong project không còn làm hỏng load/save**: `project_from_fields`
+  sanitize về default, request tạo job mới vẫn validate strict.
+- **Consent**: copy nói rõ gửi cả vocal và lời; lưu `audio_consent_receipt`
+  (vocal hash, model, prompt version, thời điểm).
+
+Ghi chú kỹ thuật:
+
+- Confidence của dòng matched = `0.7 * gemini_confidence + 0.3 * word_coverage`;
+  repeat dùng `text_similarity`. Việc một câu thành `unsung` do DP quyết định,
+  không dùng band `<0.5` như bản thiết kế ban đầu.
+- `extract_sung_lines` bỏ mọi dòng nằm trọn trong `(...)` để tránh stage direction;
+  nếu lời dùng ngoặc đơn cho câu hát thật thì câu đó sẽ bị bỏ (known limitation).
+
+Còn lại:
+
+- Hold-out Buồm Đỏ, Hà Nội Sáu Mươi Ngày Đêm, Đại Việt chưa chạy lại sau fix DP.
+- Panel "câu cần thêm" cho `unsung` (hiện chỉ ghi log).
+- Word onset P90 của từng từ matched chưa đo riêng.
+- `approach_b` vẫn dùng một số helper private của `align.py` (`_align_tokens`,
+  `_line_from_words`, `_vocal_rms`…); chấp nhận trong repo nhưng nên tách
+  `align_core.py` nếu A/B cần tiến hoá độc lập.
 

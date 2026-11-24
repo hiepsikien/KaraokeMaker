@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - macOS/Linux
     msvcrt = None
 
 from karaoke.cache import data_root
+from karaoke.gemini_models import AUDIO_MODELS as GEMINI_AUDIO_MODELS, DEFAULT_GEMINI_MODEL
 
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
@@ -31,14 +32,14 @@ DEFAULT_SETTINGS = {
     "gemini_api_key": "",
     "google_audio_consent": False,
     "align_strategy": "whisper",
-    "gemini_model": "gemini-3.8-flash",
+    "gemini_model": DEFAULT_GEMINI_MODEL,
     "device": "cpu",
     "model_name": "small",
     "output_dir": "",
 }
 DEVICES = frozenset({"cpu", "mps"})
 ALIGN_STRATEGIES = frozenset({"whisper", "gemini_lines"})
-GEMINI_AUDIO_MODELS = frozenset({"gemini-3.8-flash"})
+
 _LOCK = threading.Lock()
 
 

@@ -82,6 +82,85 @@ class ApproachBTests(unittest.TestCase):
             self.assertEqual(lines[0]["text"], "Màn sương buông")
             self.assertAlmostEqual(lines[0]["start"], 0.5, delta=0.1)
 
+    def test_garbage_extra_is_not_promoted_to_nlv(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.5, 2.0)])
+            segments = [{"words": words([("Màn", 0.5, 0.9), ("sương", 0.9, 1.4), ("buông", 1.4, 2.0)])}]
+            gemini = [
+                {"text": "màn sương buông", "start": 0.5, "end": 2.0, "status": "matched", "confidence": 0.9, "reference_index": 0},
+                {"text": "H creepy iftsalay", "start": 2.5, "end": 3.9, "status": "extra", "confidence": 0.4, "kind": "nlv"},
+            ]
+            with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
+                "karaoke.approach_b.transcribe_lines", return_value=gemini
+            ), patch(
+                "karaoke.approach_b.transcribe_lines_chunked", return_value=gemini
+            ):
+                lines = align_with_gemini_lines(
+                    vocal,
+                    "Màn sương buông",
+                    "vi",
+                    "small",
+                    "cpu",
+                    lambda message: None,
+                )
+        self.assertFalse(any(line.get("kind") == "nlv" for line in lines))
+        self.assertEqual([line["text"] for line in lines], ["Màn sương buông"])
+
+    def test_nlv_text_matches_the_saved_word_list(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.5, 2.0), (2.5, 4.0)])
+            segments = [
+                {
+                    "words": words(
+                        [
+                            ("Màn", 0.5, 0.9),
+                            ("sương", 0.9, 1.4),
+                            ("buông", 1.4, 2.0),
+                            ("hò", 2.5, 2.9),
+                            ("ơi", 2.9, 3.9),
+                        ]
+                    )
+                }
+            ]
+            gemini = [
+                {"text": "màn sương buông", "start": 0.5, "end": 2.0, "status": "matched", "confidence": 0.9, "reference_index": 0},
+                {"text": "hò ơi hò khoan", "start": 2.5, "end": 3.9, "status": "extra", "confidence": 0.8, "kind": "nlv"},
+            ]
+            with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
+                "karaoke.approach_b.transcribe_lines", return_value=gemini
+            ), patch(
+                "karaoke.approach_b.transcribe_lines_chunked", return_value=gemini
+            ):
+                lines = align_with_gemini_lines(
+                    vocal,
+                    "Màn sương buông",
+                    "vi",
+                    "small",
+                    "cpu",
+                    lambda message: None,
+                )
+        chant = [line for line in lines if line.get("kind") == "nlv"]
+        self.assertEqual(len(chant), 1)
+        self.assertEqual(chant[0]["text"], "hò ơi")
+        self.assertEqual(chant[0]["text"], " ".join(word["text"] for word in chant[0]["words"]))
+
+    def test_word_times_never_overlap_after_snap(self):
+        from karaoke.approach_b import _words_for_line
+
+        def snap(moment, *_args):
+            return moment - 0.3 if moment >= 1.25 else moment
+
+        heard = [
+            {"text": "a", "start": 1.0, "end": 1.2},
+            {"text": "b", "start": 1.3, "end": 1.5},
+        ]
+        with patch("karaoke.approach_b._snap_time", side_effect=snap):
+            result = _words_for_line("a b", 0.5, 2.0, heard, [1.0] * 100, 0.03, 0.5)
+        self.assertEqual(len(result), 2)
+        self.assertGreaterEqual(result[1]["start"], result[0]["end"])
+
 
 class AlignStrategyTests(unittest.TestCase):
     def test_align_options_validates_strategy_and_consent(self):
@@ -98,6 +177,28 @@ class AlignStrategyTests(unittest.TestCase):
     def test_rejects_unknown_strategy(self):
         with self.assertRaises(JobError):
             align_options({"align_strategy": "magic"})
+
+    def test_rejects_unknown_gemini_model_for_a_new_job(self):
+        with self.assertRaises(JobError):
+            align_options({"gemini_model": "gemini-old"})
+
+    def test_old_project_model_is_sanitized_when_loaded(self):
+        from karaoke.project import project_from_fields
+
+        project = project_from_fields(
+            {
+                "title": "x",
+                "artist": "y",
+                "lyrics": "một",
+                "align_strategy": "gemini_lines",
+                "gemini_model": "gemini-old",
+                "google_audio_consent": True,
+                "audio_consent_receipt": {"model": "gemini-old", "vocal_hash": "sha256:x"},
+            }
+        )
+        self.assertEqual(project["gemini_model"], "gemini-3.8-flash")
+        self.assertTrue(project["google_audio_consent"])
+        self.assertEqual(project["audio_consent_receipt"]["vocal_hash"], "sha256:x")
 
     def test_align_job_uses_gemini_when_consented(self):
         prepared = {

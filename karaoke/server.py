@@ -50,6 +50,7 @@ from karaoke.background import (
     cleanup_pictures,
 )
 from karaoke.director import DirectorError, analyze_scene, build_fit_transform
+from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import COVER_RENDER_VERSION, IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
 from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
@@ -59,6 +60,7 @@ from karaoke.studio import StudioError, cache_path, is_preview_id, render_previe
 from karaoke.pipeline import (
     JobError,
     align_job,
+    audio_consent_receipt,
     export_gaps,
     open_project_file,
     open_saved,
@@ -179,7 +181,7 @@ class ProjectFieldsRequest(BaseModel):
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
     align_strategy: str = "whisper"
-    gemini_model: str = "gemini-3.8-flash"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
     google_audio_consent: bool = False
     project_path: str = ""
 
@@ -190,7 +192,7 @@ class AlignRequest(BaseModel):
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
     align_strategy: str = "whisper"
-    gemini_model: str = "gemini-3.8-flash"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
     google_audio_consent: bool = False
 
 
@@ -1836,6 +1838,16 @@ def realign_job(job_id: str, body: AlignRequest):
         record["log"].append(
             f"Ghép chữ lại bằng {source}. Timing đang sửa sẽ được thay khi nghe xong."
         )
+
+    if prepared.get("align_strategy") == "gemini_lines" and prepared.get("google_audio_consent"):
+        try:
+            prepared["audio_consent_receipt"] = audio_consent_receipt(
+                Path(prepared["vocal_audio"]), str(prepared.get("gemini_model") or "")
+            )
+        except (OSError, KeyError):
+            prepared["audio_consent_receipt"] = None
+    else:
+        prepared["audio_consent_receipt"] = None
 
     def log(message: str) -> None:
         with _lock:

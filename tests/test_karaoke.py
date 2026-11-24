@@ -5,6 +5,7 @@ import struct
 import tempfile
 import unittest
 import wave
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -577,6 +578,58 @@ class EditedLinesTests(unittest.TestCase):
         cleaned = normalize_edited_lines(lines)
         self.assertEqual(cleaned[0]["text"], "Dẫu phương Bắc")
         self.assertEqual(cleaned[0]["start"], 107.46)
+
+    def test_keeps_alignment_metadata(self):
+        lines = [
+            {
+                "text": "dòng",
+                "status": "matched",
+                "confidence": 0.82,
+                "text_similarity": 0.9,
+                "reference_index": 3,
+                "kind": "nlv",
+                "label": "chant",
+                "repeated": True,
+                "occurrence": 1,
+                "heard_text": "nghe được",
+                "words": [{"text": "dòng", "start": 1.0, "end": 2.0}],
+            }
+        ]
+        cleaned = normalize_edited_lines(lines)[0]
+        for key, value in {
+            "status": "matched",
+            "confidence": 0.82,
+            "text_similarity": 0.9,
+            "reference_index": 3,
+            "kind": "nlv",
+            "label": "chant",
+            "repeated": True,
+            "occurrence": 1,
+            "heard_text": "nghe được",
+        }.items():
+            self.assertEqual(cleaned[key], value)
+
+    def test_timing_file_keeps_alignment_metadata(self):
+        lines = [
+            {
+                "text": "dòng",
+                "status": "matched",
+                "confidence": 0.82,
+                "reference_index": 3,
+                "kind": "nlv",
+                "label": "chant",
+                "words": [{"text": "dòng", "start": 1.0, "end": 2.0}],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            grant(Path(folder))
+            path = save_timing_file(Path(folder) / "timing.json", lines)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload[0]["status"], "matched")
+        self.assertEqual(payload[0]["confidence"], 0.82)
+        self.assertEqual(payload[0]["reference_index"], 3)
+        self.assertEqual(payload[0]["kind"], "nlv")
+        self.assertEqual(payload[0]["label"], "chant")
 
 
 class AccessTests(unittest.TestCase):

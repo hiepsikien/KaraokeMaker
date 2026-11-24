@@ -97,7 +97,7 @@ export function AlignOptions({
                 }
               />
               <span className="text-sm leading-6">
-                Tôi đồng ý gửi file vocal lên Google Gemini để chia câu. Nếu tắt, app dùng Whisper.
+                Tôi đồng ý gửi file vocal và lời bài hát lên Google Gemini để chia câu. Nếu tắt, app dùng Whisper.
               </span>
             </label>
           </>
