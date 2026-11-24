@@ -87,5 +87,10 @@ def load_whisper_model(
                 )
     elif resolved == "mlx":
         emit("mlx-whisper không khả dụng trên máy này; fallback stable_whisper.")
+    elif _is_apple_silicon():
+        emit(
+            "Không thấy mlx-whisper; dùng stable_whisper. "
+            "Cài `mlx-whisper>=0.4.3` để dùng Apple GPU."
+        )
 
     return load_stable_model(model_name, device), "stable"
