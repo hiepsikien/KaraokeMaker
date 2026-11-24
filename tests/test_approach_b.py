@@ -104,6 +104,37 @@ class ApproachBTests(unittest.TestCase):
         self.assertTrue(chunked.called)
         self.assertEqual([line["text"] for line in lines], ["một", "hai", "ba"])
 
+    def test_low_line_ratio_with_high_word_coverage_does_not_chunk(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.5, 1.5), (5.5, 6.5)])
+            segments = [
+                {
+                    "words": words(
+                        [("một", 0.5, 1.0), ("ba", 5.5, 6.0)]
+                    )
+                }
+            ]
+            gemini = [
+                {"text": "một", "start": 0.5, "end": 1.0, "status": "matched", "confidence": 0.9, "reference_index": 0},
+                {"text": "ba", "start": 5.5, "end": 6.0, "status": "matched", "confidence": 0.9, "reference_index": 2},
+            ]
+            with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
+                "karaoke.approach_b.transcribe_lines", return_value=gemini
+            ), patch(
+                "karaoke.approach_b.transcribe_lines_chunked", return_value=gemini
+            ) as chunked:
+                lines = align_with_gemini_lines(
+                    vocal,
+                    "một\nhai\nba",
+                    "vi",
+                    "small",
+                    "cpu",
+                    lambda message: None,
+                )
+        self.assertFalse(chunked.called)
+        self.assertEqual([line["text"] for line in lines], ["một", "ba"])
+
     def test_gemini_failure_falls_back_to_whisper(self):
         with tempfile.TemporaryDirectory() as folder:
             vocal = Path(folder) / "vocal.wav"

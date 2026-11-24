@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **352 test hiện tại vẫn pass**:
+- **353 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -684,7 +684,7 @@ fallback A nếu Gemini lỗi/429/tắt consent.
 
 - **Cắt tại khoảng nghỉ dài** (RMS thấp ≥0.8s), target 60s, max 81s (1.35× target;
   Gemini kém ổn định trên đoạn dài, 45–60s cho kết quả tốt hơn).
-- Nếu bài không có khoảng nghỉ đủ dài → cắt fixed max 90s với overlap 2s.
+- Nếu bài không có khoảng nghỉ đủ dài → cắt fixed max 81s với overlap 2s.
 - Chunk tại nghỉ giúp không cắt giữa câu; overlap 1.5s quanh cut (0.75s mỗi bên).
 - Nếu câu bị cắt ở cả hai chunk → đánh `uncertain` + request lại chunk dịch 20–30s
   (chỉ 1 lần).
@@ -1205,7 +1205,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `352` Python tests pass.
+- `353` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
@@ -1276,7 +1276,7 @@ Kết luận:
 - **Sự cố Tên Người Ở Lại**: Gemini full-song trả đủ 18 câu nhưng bỏ trống đoạn
   117–207s, dồn verse 2/pre-chorus sang 203–255s (im lặng), và chèn outro vào giữa
   chorus. Coverage theo span/số câu không bắt được. Đã thêm coverage theo **tỉ lệ từ
-  Whisper** (41.8% <55%) và giảm chunk target xuống **60s / max 90s**. Kết quả:
+  Whisper** (41.8% <55%) và giảm chunk target xuống **60s / max 81s**. Kết quả:
   18/18 câu, "Gò Công cuộn sóng" ở 123.7s, chorus 177.8–205.2s, outro 259–274s.
 
 Ghi chú kỹ thuật:
