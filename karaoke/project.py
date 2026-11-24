@@ -146,7 +146,7 @@ def empty_project() -> dict:
         "device": "cpu",
         "no_speech_threshold": None,
         "whisper_retry": True,
-        "align_strategy": "whisper",
+        "align_strategy": "gemini_lines",
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "google_audio_consent": False,
         "audio_consent_receipt": None,
@@ -255,7 +255,7 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "device": project.get("device") or "cpu",
         "no_speech_threshold": project.get("no_speech_threshold"),
         "whisper_retry": bool(project.get("whisper_retry", True)),
-        "align_strategy": project.get("align_strategy") or "whisper",
+        "align_strategy": project.get("align_strategy") or "gemini_lines",
         "gemini_model": project.get("gemini_model") or DEFAULT_GEMINI_MODEL,
         "google_audio_consent": bool(project.get("google_audio_consent", False)),
         "audio_consent_receipt": (
@@ -452,7 +452,7 @@ def prepared_from_project(project: dict) -> dict:
         "device": project.get("device") or "cpu",
         "no_speech_threshold": project.get("no_speech_threshold"),
         "whisper_retry": bool(project.get("whisper_retry", True)),
-        "align_strategy": project.get("align_strategy") or "whisper",
+        "align_strategy": project.get("align_strategy") or "gemini_lines",
         "gemini_model": project.get("gemini_model") or DEFAULT_GEMINI_MODEL,
         "google_audio_consent": bool(project.get("google_audio_consent", False)),
         "audio_consent_receipt": (

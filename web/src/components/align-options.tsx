@@ -61,13 +61,16 @@ export function AlignOptions({
               }))
             }
           >
-            <option value="whisper">Whisper (local, mặc định)</option>
-            <option value="gemini_lines">Gemini line-level + Whisper word-level</option>
+            <option value="gemini_lines">Gemini line-level + Whisper word-level (mặc định)</option>
+            <option value="whisper">Whisper (local, dự phòng)</option>
           </select>
         </label>
 
         {gemini ? (
           <>
+            <p className="text-sm leading-6 text-[var(--muted)] sm:col-span-2">
+              Gemini chia câu và lấy mốc câu; Whisper căn từng từ. Cần bật đồng ý gửi audio bên dưới.
+            </p>
             <label className="block sm:col-span-2">
               <span className="mb-1.5 block text-sm text-[var(--muted)]">Model Gemini</span>
               <select
@@ -100,6 +103,11 @@ export function AlignOptions({
                 Tôi đồng ý gửi file vocal và lời bài hát lên Google Gemini để chia câu. Nếu tắt, app dùng Whisper.
               </span>
             </label>
+            {!fields.google_audio_consent && (
+              <p className="rounded-xl bg-amber-950/50 px-3 py-2 text-sm text-amber-100 sm:col-span-2">
+                Chưa bật đồng ý gửi audio: lần ghép này sẽ dùng Whisper.
+              </p>
+            )}
           </>
         ) : null}
 

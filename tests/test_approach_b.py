@@ -256,6 +256,15 @@ class AlignStrategyTests(unittest.TestCase):
         self.assertEqual(options["align_strategy"], "gemini_lines")
         self.assertTrue(options["google_audio_consent"])
 
+    def test_default_strategy_is_gemini_lines(self):
+        from karaoke.project import empty_project
+
+        self.assertEqual(align_options({})["align_strategy"], "gemini_lines")
+        self.assertEqual(empty_project()["align_strategy"], "gemini_lines")
+
+    def test_explicit_whisper_strategy_is_kept(self):
+        self.assertEqual(align_options({"align_strategy": "whisper"})["align_strategy"], "whisper")
+
     def test_rejects_unknown_strategy(self):
         with self.assertRaises(JobError):
             align_options({"align_strategy": "magic"})

@@ -30,7 +30,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gemini_consent: false,
   gemini_api_key_set: false,
   google_audio_consent: false,
-  align_strategy: "whisper",
+  align_strategy: "gemini_lines",
   gemini_model: "gemini-3.8-flash",
   device: "cpu",
   model_name: "small",

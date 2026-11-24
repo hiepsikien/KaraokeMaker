@@ -31,7 +31,7 @@ DEFAULT_SETTINGS = {
     "gemini_consent": False,
     "gemini_api_key": "",
     "google_audio_consent": False,
-    "align_strategy": "whisper",
+    "align_strategy": "gemini_lines",
     "gemini_model": DEFAULT_GEMINI_MODEL,
     "device": "cpu",
     "model_name": "small",

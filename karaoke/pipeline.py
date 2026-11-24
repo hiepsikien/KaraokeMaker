@@ -329,7 +329,7 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
         "language": "vi",
         "model_name": "small",
         "device": "cpu",
-        "align_strategy": "whisper",
+        "align_strategy": "gemini_lines",
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "google_audio_consent": False,
         "vocal_duration": vocal_length,
@@ -463,11 +463,11 @@ def whisper_options(payload: dict, *, strict: bool = True) -> dict:
 
 def align_options(payload: dict, *, strict: bool = True) -> dict:
     result = whisper_options(payload, strict=strict)
-    strategy = str(payload.get("align_strategy") or "whisper").strip().lower() or "whisper"
+    strategy = str(payload.get("align_strategy") or "gemini_lines").strip().lower() or "gemini_lines"
     if strategy not in ALIGN_STRATEGIES:
         if strict:
             raise JobError("Chiến lược căn lời không hợp lệ.")
-        strategy = "whisper"
+        strategy = "gemini_lines"
     gemini_model = str(payload.get("gemini_model") or DEFAULT_GEMINI_MODEL).strip()
     if gemini_model not in GEMINI_AUDIO_MODELS:
         if strict:
@@ -490,7 +490,7 @@ def align_options(payload: dict, *, strict: bool = True) -> dict:
 
 def align_job(prepared: dict, log) -> list[dict]:
     try:
-        strategy = str(prepared.get("align_strategy") or "whisper").strip().lower()
+        strategy = str(prepared.get("align_strategy") or "gemini_lines").strip().lower()
         if strategy == "gemini_lines":
             if not prepared.get("google_audio_consent"):
                 log("Chưa đồng ý gửi audio lên Gemini; dùng Whisper fallback.")
