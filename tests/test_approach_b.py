@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from karaoke.approach_b import (
     _needs_chunk,
@@ -140,6 +140,28 @@ class ApproachBTests(unittest.TestCase):
                 )
         self.assertFalse(chunked.called)
         self.assertEqual([line["text"] for line in lines], ["một", "ba"])
+
+    def test_whisper_load_falls_back_to_cpu(self):
+        from types import SimpleNamespace
+
+        from karaoke import align as align_module
+
+        calls: list[str] = []
+        fake_model = Mock()
+        fake_model.transcribe.return_value = SimpleNamespace(segments=[])
+
+        def loader(_name, device, _engine, _log):
+            calls.append(device)
+            if device != "cpu":
+                raise RuntimeError("mps load failed")
+            return fake_model, "stable"
+
+        with patch.object(align_module, "load_whisper_model", side_effect=loader):
+            result = align_module.transcribe_whisper(
+                Path("vocal.wav"), "vi", "small", "mps", lambda message: None
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(calls, ["mps", "cpu"])
 
     def test_clip_for_whisper_rejects_fragmented_or_mostly_voiced(self):
         from karaoke.voiced import clip_for_whisper
