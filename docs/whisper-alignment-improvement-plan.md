@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **328 test hiện tại vẫn pass**:
+- **331 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -682,9 +682,14 @@ fallback A nếu Gemini lỗi/429/tắt consent.
 
 #### Chunk policy
 
-- Ưu tiên chunk mà câu nằm trọn trong đó.
+- **Cắt tại khoảng nghỉ dài** (RMS thấp ≥0.8s), target 90s, max 120s.
+- Nếu bài không có khoảng nghỉ đủ dài → cắt fixed max 120s với overlap 2s.
+- Chunk tại nghỉ giúp không cắt giữa câu; vẫn giữ overlap 0.5s quanh cut.
 - Nếu câu bị cắt ở cả hai chunk → đánh `uncertain` + request lại chunk dịch 20–30s
   (chỉ 1 lần).
+- **Coverage check:** nếu response full-song chỉ phủ <45% độ dài bài hoặc <40% số câu
+  reference → tự chạy lại chunked. Đây là fix cho Văn Lang full-song chỉ trả 14 dòng
+  bắt đầu từ 209s.
 - Timestamp từng chunk có thể drift; calibrate bằng anchor tin cậy
   (Whisper word hoặc RMS activity) trước khi cộng offset.
 - Dedupe overlap phải so cả `text` + `start/end`; không dedupe hai chorus giống text
@@ -1197,7 +1202,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `328` Python tests pass.
+- `331` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
@@ -1224,9 +1229,13 @@ Kết luận tạm:
   - dùng B cho bài khó, A cho bài dễ; hoặc
   - cải thiện line start của B thêm ~0.2s.
 - Ad-lib cuối Bài Ca vẫn lệch ~9s; cần rule NLV/repeat hoặc review tay.
+- Văn Lang: full-song Gemini chỉ phủ 73%/14 câu → fallback chunk 3 đoạn tại nghỉ; kết quả 24/24 câu, câu 15 từ 3:12.15 → 3:07.14.
 - Đã blend biên Gemini với biên word (chỉ nhận Gemini start nếu sớm hơn word 0.10–0.35s và không chồng câu trước).
 - `extract_sung_lines` đã sửa để bỏ dòng stage direction trong ngoặc đơn `(...)`,
   vì lyrics Quả Cam có `(Smooth jazz vibe)` làm lệch reference index.
+- `extract_sung_lines` + `normalize_edited_lines` bỏ tag `[Male]`, `[Female]`,
+  `[Chorus]` cả khi nằm giữa dòng; project cũ được làm sạch khi load/save.
+- Chunker mới cắt tại khoảng nghỉ RMS dài; full-song coverage <55% hoặc <70% số câu → tự chunked.
 
 Chưa làm:
 

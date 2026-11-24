@@ -1,13 +1,49 @@
 import json
+import math
 import os
+import struct
+import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from karaoke.gemini_lines import GeminiLineError, transcribe_lines
+from karaoke.gemini_lines import GeminiLineError, plan_chunks, transcribe_lines
+
+
+def tone(path: Path, spans, seconds: float = 40.0) -> None:
+    rate = 8000
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        frames = bytearray()
+        for index in range(int(seconds * rate)):
+            moment = index / rate
+            loud = any(start <= moment < end for start, end in spans)
+            sample = int(12000 * math.sin(2 * math.pi * 220 * moment)) if loud else 0
+            frames += struct.pack("<h", sample)
+        handle.writeframes(frames)
 
 
 class GeminiLinesTests(unittest.TestCase):
+    def test_plan_chunks_cuts_in_a_long_rest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.0, 18.0), (22.0, 40.0)])
+            chunks = plan_chunks(
+                vocal,
+                target_seconds=20,
+                max_seconds=30,
+                min_seconds=8,
+                min_silence=0.8,
+            )
+        self.assertGreaterEqual(len(chunks), 2)
+        first_end = chunks[0][1]
+        second_start = chunks[1][0]
+        self.assertLess(first_end, 22.5)
+        self.assertGreater(second_start, 17.5)
+        self.assertTrue(abs(first_end - second_start) < 1.0)
     def _response(self, lines):
         return {
             "candidates": [

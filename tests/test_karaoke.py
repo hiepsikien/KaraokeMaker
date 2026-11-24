@@ -61,6 +61,13 @@ class LyricsTests(unittest.TestCase):
         lyrics = "(Smooth jazz vibe)\nBên bến Bình Than\n(Playful swing)\n"
         self.assertEqual(extract_sung_lines(lyrics), ["Bên bến Bình Than"])
 
+    def test_strips_inline_bracket_tags(self):
+        lyrics = "[Verse]\n[Male] Bên bến Bình Than\n[Female] Thuyền rồng [Harmony]\n"
+        self.assertEqual(
+            extract_sung_lines(lyrics),
+            ["Bên bến Bình Than", "Thuyền rồng"],
+        )
+
 
 class RepairTests(unittest.TestCase):
     def test_pulls_a_word_back_from_a_long_gap(self):
@@ -554,6 +561,22 @@ class EditedLinesTests(unittest.TestCase):
             {"text": "trước", "words": [{"text": "trước", "start": 10, "end": 10.5}]},
         ]
         self.assertEqual([line["text"] for line in normalize_edited_lines(lines)], ["trước", "sau"])
+
+    def test_removes_bracket_tags_from_saved_words(self):
+        lines = [
+            {
+                "text": "[Male] Dẫu phương Bắc",
+                "words": [
+                    {"text": "[Male]", "start": 107.16, "end": 107.46},
+                    {"text": "Dẫu", "start": 107.46, "end": 107.9},
+                    {"text": "phương", "start": 107.9, "end": 108.4},
+                    {"text": "Bắc", "start": 108.4, "end": 108.9},
+                ],
+            }
+        ]
+        cleaned = normalize_edited_lines(lines)
+        self.assertEqual(cleaned[0]["text"], "Dẫu phương Bắc")
+        self.assertEqual(cleaned[0]["start"], 107.46)
 
 
 class AccessTests(unittest.TestCase):

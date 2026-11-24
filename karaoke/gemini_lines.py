@@ -17,6 +17,7 @@ import tempfile
 import wave
 from pathlib import Path
 
+from karaoke.align import _vocal_rms
 from karaoke.cache import cache_root
 from karaoke.director import (
     DEFAULT_MODEL,
@@ -85,44 +86,42 @@ Nếu không chắc, confidence thấp; không đoán bừa.{context}"""
 
 
 def _audio_clip(vocal_path: Path, start: float | None, end: float | None) -> tuple[bytes, str, float]:
-    """Return compressed clip bytes, mime type, and clip offset."""
+    """Return compressed clip bytes, mime type, and clip offset.
+
+    Always encode to 16 kHz mono MP3 when ffmpeg exists. Sending the original
+    WAV (often ~50 MB for a full song) makes Gemini skip large sections.
+    """
     with pcm16_wav(vocal_path) as wav_path:
         offset = 0.0
-        if start is not None and end is not None and end > start:
+        has_clip = start is not None and end is not None and end > start
+        if has_clip:
             offset = max(0.0, float(start))
-            duration = max(0.1, float(end) - offset)
-            if shutil.which("ffmpeg"):
-                handle = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                handle.close()
-                target = Path(handle.name)
-                try:
-                    subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-ss",
-                            f"{offset:.3f}",
-                            "-t",
-                            f"{duration:.3f}",
-                            "-i",
-                            str(wav_path),
-                            "-ac",
-                            "1",
-                            "-ar",
-                            "16000",
-                            "-b:a",
-                            "64k",
-                            str(target),
-                        ],
-                        check=True,
-                        capture_output=True,
-                    )
-                    return target.read_bytes(), "audio/mpeg", offset
-                except (OSError, subprocess.SubprocessError):
-                    pass
-                finally:
-                    target.unlink(missing_ok=True)
-        if start is not None and end is not None and end > start:
+        if shutil.which("ffmpeg"):
+            handle = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            handle.close()
+            target = Path(handle.name)
+            try:
+                command = ["ffmpeg", "-y"]
+                if has_clip:
+                    command += ["-ss", f"{offset:.3f}", "-t", f"{max(0.1, float(end) - offset):.3f}"]
+                command += [
+                    "-i",
+                    str(wav_path),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-b:a",
+                    "48k",
+                    str(target),
+                ]
+                subprocess.run(command, check=True, capture_output=True)
+                return target.read_bytes(), "audio/mpeg", offset
+            except (OSError, subprocess.SubprocessError):
+                pass
+            finally:
+                target.unlink(missing_ok=True)
+        if has_clip:
             with wave.open(str(wav_path), "rb") as handle:
                 rate = handle.getframerate()
                 channels = handle.getnchannels()
@@ -201,6 +200,161 @@ def _normalize_lines(raw: dict, offset: float, clip_end: float) -> list[dict]:
             }
         )
     return result
+
+
+def _dedupe_lines(lines: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    for line in sorted(lines, key=lambda item: (float(item["start"]), float(item["end"]))):
+        text = " ".join(str(line.get("text") or "").casefold().split())
+        duplicate = None
+        for index, existing in enumerate(result):
+            existing_text = " ".join(str(existing.get("text") or "").casefold().split())
+            overlap = min(float(existing["end"]), float(line["end"])) - max(
+                float(existing["start"]), float(line["start"])
+            )
+            if overlap <= 0.05:
+                continue
+            if text and existing_text and (text in existing_text or existing_text in text):
+                duplicate = index
+                break
+            if abs(float(existing["start"]) - float(line["start"])) < 1.0:
+                duplicate = index
+                break
+        if duplicate is None:
+            result.append(line)
+            continue
+        existing = result[duplicate]
+        current_score = (len(str(line.get("text") or "")), float(line.get("confidence") or 0.0))
+        existing_score = (
+            len(str(existing.get("text") or "")),
+            float(existing.get("confidence") or 0.0),
+        )
+        if current_score > existing_score:
+            result[duplicate] = line
+    return result
+
+
+def plan_chunks(
+    vocal_path: Path,
+    *,
+    target_seconds: float = 90.0,
+    max_seconds: float = 120.0,
+    min_seconds: float = 30.0,
+    min_silence: float = 0.8,
+) -> list[tuple[float, float]]:
+    """Split at long vocal rests; fall back to fixed max-length chunks.
+
+    Cutting in a rest avoids slicing a lyric line at a chunk boundary. A small
+    overlap is kept around the cut so a breath at the edge is not lost.
+    """
+    try:
+        total = probe_duration(vocal_path)
+    except MediaError:
+        return []
+    if total <= max_seconds:
+        return [(0.0, total)]
+    try:
+        levels, hop = _vocal_rms(vocal_path)
+    except Exception:
+        levels, hop = [], 0.03
+    if not levels:
+        chunks: list[tuple[float, float]] = []
+        start = 0.0
+        while start < total:
+            end = min(total, start + max_seconds)
+            chunks.append((start, end))
+            if end >= total:
+                break
+            start = max(start + 1.0, end - 2.0)
+        return chunks
+
+    peak = max(levels) if levels else 0.0
+    threshold = max(80.0, peak * 0.08)
+    silent: list[tuple[float, float]] = []
+    run_start = None
+    for index, level in enumerate(levels):
+        if level < threshold and run_start is None:
+            run_start = index
+        elif level >= threshold and run_start is not None:
+            start_time = run_start * hop
+            end_time = index * hop
+            if end_time - start_time >= min_silence:
+                silent.append((start_time, end_time))
+            run_start = None
+    if run_start is not None:
+        start_time = run_start * hop
+        end_time = total
+        if end_time - start_time >= min_silence:
+            silent.append((start_time, end_time))
+
+    chunks = []
+    start = 0.0
+    while start < total:
+        remaining = total - start
+        if remaining <= max_seconds:
+            chunks.append((start, total))
+            break
+        target = min(start + target_seconds, start + max_seconds)
+        candidates = [
+            (abs((left + right) / 2.0 - target) - min(4.0, right - left) * 0.15,
+             (left + right) / 2.0)
+            for left, right in silent
+            if start + min_seconds <= (left + right) / 2.0 <= start + max_seconds
+        ]
+        if candidates:
+            cut = min(candidates)[1]
+            chunks.append((start, min(total, cut + 0.25)))
+            start = max(start + 1.0, cut - 0.25)
+        else:
+            cut = min(total, start + max_seconds)
+            chunks.append((start, cut))
+            start = max(start + 1.0, cut - 2.0)
+    return chunks
+
+
+def transcribe_lines_chunked(
+    vocal_path: Path,
+    lyrics: str,
+    *,
+    language: str = "vi",
+    model: str = DEFAULT_MODEL,
+    chunk_seconds: float = 90.0,
+    overlap: float = 4.0,
+    log=None,
+    use_cache: bool = True,
+) -> list[dict]:
+    chunks = plan_chunks(
+        Path(vocal_path),
+        target_seconds=chunk_seconds,
+        max_seconds=max(chunk_seconds * 1.35, chunk_seconds + 20),
+    )
+    if not chunks:
+        try:
+            probe_duration(Path(vocal_path))
+        except MediaError as error:
+            raise GeminiLineError(str(error)) from error
+        chunks = [(0.0, probe_duration(Path(vocal_path)))]
+    lines: list[dict] = []
+    for index, (start, end) in enumerate(chunks, start=1):
+        if log is not None:
+            log(f"Gemini chunk {index}/{len(chunks)}: {start:.1f}s–{end:.1f}s.")
+        try:
+            chunk = transcribe_lines(
+                vocal_path,
+                lyrics,
+                language=language,
+                model=model,
+                start=start,
+                end=end,
+                use_cache=use_cache,
+                log=None,
+            )
+        except GeminiLineError as error:
+            if log is not None:
+                log(f"Gemini chunk {index} lỗi: {error}")
+            chunk = []
+        lines.extend(chunk)
+    return _dedupe_lines(lines)
 
 
 def transcribe_lines(

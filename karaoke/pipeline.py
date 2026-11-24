@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -45,12 +46,16 @@ def _dict_list(value) -> list[dict]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def _strip_tags(text: str) -> str:
+    return " ".join(re.sub(r"\[[^\]]*\]", " ", str(text)).split())
+
+
 def normalize_edited_lines(lines: list[dict]) -> list[dict]:
     cleaned: list[dict] = []
     for line in lines:
         words: list[dict] = []
         for word in line.get("words") or []:
-            text = " ".join(str(word.get("text", "")).split())
+            text = _strip_tags(word.get("text", ""))
             if not text:
                 continue
             try:

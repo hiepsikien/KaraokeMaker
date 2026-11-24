@@ -20,9 +20,10 @@ from karaoke.align import (
     reconcile_lyrics_with_transcript,
     transcribe_whisper,
 )
-from karaoke.gemini_lines import GeminiLineError, transcribe_lines
+from karaoke.gemini_lines import GeminiLineError, transcribe_lines, transcribe_lines_chunked
 from karaoke.line_match import match_lines
 from karaoke.lyrics import extract_sung_lines
+from karaoke.media import probe_duration
 
 PAD = 0.8
 SNAP_SHIFT = 0.20
@@ -348,6 +349,24 @@ def align_with_gemini_lines(
             log=log,
             use_cache=use_cache,
         )
+        if gemini_start is None and gemini_end is None and gemini_lines:
+            total = probe_duration(vocal_path)
+            covered = (
+                max(float(item["end"]) for item in gemini_lines)
+                - min(float(item["start"]) for item in gemini_lines)
+            ) / max(1.0, total)
+            if covered < 0.55 or len(gemini_lines) < max(3, int(len(references) * 0.7)):
+                log(
+                    f"Gemini chỉ phủ {covered * 100:.0f}% bài; chạy lại theo chunk."
+                )
+                gemini_lines = transcribe_lines_chunked(
+                    vocal_path,
+                    lyrics,
+                    language=language,
+                    model=gemini_model,
+                    log=log,
+                    use_cache=use_cache,
+                )
     except GeminiLineError as error:
         log(f"Gemini line pass lỗi ({error}). Dùng Whisper fallback.")
         return reconcile_lyrics_with_transcript(references, segments)
