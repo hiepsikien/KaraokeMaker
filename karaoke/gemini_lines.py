@@ -20,16 +20,18 @@ from pathlib import Path
 from karaoke.align import _vocal_rms
 from karaoke.cache import cache_root
 from karaoke.director import (
-    DEFAULT_MODEL,
     DirectorError,
     _api_key,
     _extract_payload,
     _post_generate,
 )
+from karaoke.gemini_models import AUDIO_MODELS, DEFAULT_GEMINI_MODEL
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import MediaError, pcm16_wav, probe_duration
+from karaoke.line_match import sim_text
 
-ALLOWED_AUDIO_MODELS = frozenset({DEFAULT_MODEL})
+ALLOWED_AUDIO_MODELS = AUDIO_MODELS
+DEFAULT_MODEL = DEFAULT_GEMINI_MODEL
 PROMPT_VERSION = "align_lines_v1"
 
 _LINE_SCHEMA = {
@@ -199,6 +201,9 @@ def _normalize_lines(raw: dict, offset: float, clip_end: float) -> list[dict]:
                 "reference_index": reference_index,
             }
         )
+    # Gemini may return lines out of chronological order. The matcher walks
+    # heard columns in order, so unsorted input would swap text and timing.
+    result.sort(key=lambda item: (item["start"], item["end"]))
     return result
 
 
@@ -217,7 +222,9 @@ def _dedupe_lines(lines: list[dict]) -> list[dict]:
             if text and existing_text and (text in existing_text or existing_text in text):
                 duplicate = index
                 break
-            if abs(float(existing["start"]) - float(line["start"])) < 1.0:
+            # Two different short lines can start within a second of each other.
+            # Only merge when the text really is the same; never merge on time alone.
+            if text and existing_text and sim_text(existing_text, text) >= 0.6:
                 duplicate = index
                 break
         if duplicate is None:
@@ -303,8 +310,8 @@ def plan_chunks(
         ]
         if candidates:
             cut = min(candidates)[1]
-            chunks.append((start, min(total, cut + 0.25)))
-            start = max(start + 1.0, cut - 0.25)
+            chunks.append((start, min(total, cut + 0.75)))
+            start = max(start + 1.0, cut - 0.75)
         else:
             cut = min(total, start + max_seconds)
             chunks.append((start, cut))
@@ -319,41 +326,53 @@ def transcribe_lines_chunked(
     language: str = "vi",
     model: str = DEFAULT_MODEL,
     chunk_seconds: float = 90.0,
-    overlap: float = 4.0,
     log=None,
     use_cache: bool = True,
 ) -> list[dict]:
-    chunks = plan_chunks(
-        Path(vocal_path),
-        target_seconds=chunk_seconds,
-        max_seconds=max(chunk_seconds * 1.35, chunk_seconds + 20),
-    )
-    if not chunks:
-        try:
-            probe_duration(Path(vocal_path))
-        except MediaError as error:
-            raise GeminiLineError(str(error)) from error
-        chunks = [(0.0, probe_duration(Path(vocal_path)))]
-    lines: list[dict] = []
-    for index, (start, end) in enumerate(chunks, start=1):
-        if log is not None:
-            log(f"Gemini chunk {index}/{len(chunks)}: {start:.1f}s–{end:.1f}s.")
-        try:
-            chunk = transcribe_lines(
-                vocal_path,
-                lyrics,
-                language=language,
-                model=model,
-                start=start,
-                end=end,
-                use_cache=use_cache,
-                log=None,
+    """Transcribe a long song in vocal-rest chunks.
+
+    Convert to 16-bit PCM once, then reuse that file for every chunk. A failed
+    chunk is reported instead of silently returning a partial transcript, so the
+    caller can fall back to Whisper-only (A) rather than publish missing lines.
+    """
+    try:
+        with pcm16_wav(Path(vocal_path)) as wav_path:
+            chunks = plan_chunks(
+                wav_path,
+                target_seconds=chunk_seconds,
+                max_seconds=max(chunk_seconds * 1.35, chunk_seconds + 20),
             )
-        except GeminiLineError as error:
-            if log is not None:
-                log(f"Gemini chunk {index} lỗi: {error}")
-            chunk = []
-        lines.extend(chunk)
+            if not chunks:
+                chunks = [(0.0, probe_duration(wav_path))]
+            lines: list[dict] = []
+            failures: list[str] = []
+            for index, (start, end) in enumerate(chunks, start=1):
+                if log is not None:
+                    log(f"Gemini chunk {index}/{len(chunks)}: {start:.1f}s–{end:.1f}s.")
+                try:
+                    chunk = transcribe_lines(
+                        wav_path,
+                        lyrics,
+                        language=language,
+                        model=model,
+                        start=start,
+                        end=end,
+                        use_cache=use_cache,
+                        log=None,
+                    )
+                except GeminiLineError as error:
+                    failures.append(f"{start:.0f}–{end:.0f}s: {error}")
+                    if log is not None:
+                        log(f"Gemini chunk {index} lỗi: {error}")
+                    continue
+                lines.extend(chunk)
+    except MediaError as error:
+        raise GeminiLineError(str(error)) from error
+    if failures:
+        detail = "; ".join(failures[:3])
+        raise GeminiLineError(
+            f"Gemini lỗi {len(failures)}/{len(chunks)} đoạn ({detail})."
+        )
     return _dedupe_lines(lines)
 
 

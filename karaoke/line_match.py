@@ -256,9 +256,13 @@ def match_lines(
                 + W_ORDER * _order_bonus(row - 1, col - 1, rows, cols)
             )
             match_score = raw - MATCH_BASE
+            # The match extends the optimal prefix of both sequences. Comparing
+            # only the local match_score against best_gap would drop the prefix
+            # and let accumulated gaps lose to any weak pair at the end of a song.
+            diagonal_score = score[row - 1][col - 1] + match_score
             # Tie prefers a gap: better to leave a line unsung than place it wrong.
-            if match_score > best_gap + 1e-9:
-                score[row][col] = match_score
+            if diagonal_score > best_gap + 1e-9:
+                score[row][col] = diagonal_score
                 move[row][col] = ("match", 0)
             else:
                 score[row][col] = best_gap

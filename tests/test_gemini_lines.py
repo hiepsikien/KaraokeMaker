@@ -8,7 +8,14 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from karaoke.gemini_lines import GeminiLineError, plan_chunks, transcribe_lines
+from karaoke.gemini_lines import (
+    GeminiLineError,
+    _dedupe_lines,
+    _normalize_lines,
+    plan_chunks,
+    transcribe_lines,
+    transcribe_lines_chunked,
+)
 
 
 def tone(path: Path, spans, seconds: float = 40.0) -> None:
@@ -43,7 +50,56 @@ class GeminiLinesTests(unittest.TestCase):
         second_start = chunks[1][0]
         self.assertLess(first_end, 22.5)
         self.assertGreater(second_start, 17.5)
-        self.assertTrue(abs(first_end - second_start) < 1.0)
+        # 1.5s total overlap around the cut, per the chunk policy.
+        self.assertTrue(1.0 < abs(first_end - second_start) <= 2.0)
+
+    def test_normalize_sorts_out_of_order_lines(self):
+        raw = {
+            "lines": [
+                {"heard_text": "câu ba", "start": 9.0, "end": 10.0},
+                {"heard_text": "câu một", "start": 1.0, "end": 2.0},
+                {"heard_text": "câu hai", "start": 5.0, "end": 6.0},
+            ]
+        }
+        lines = _normalize_lines(raw, 0.0, 20.0)
+        self.assertEqual([line["text"] for line in lines], ["câu một", "câu hai", "câu ba"])
+        self.assertEqual([line["start"] for line in lines], [1.0, 5.0, 9.0])
+
+    def test_dedupe_keeps_different_lines_with_close_starts(self):
+        lines = _dedupe_lines(
+            [
+                {"text": "anh yêu em", "start": 10.0, "end": 11.0},
+                {"text": "em yêu anh", "start": 10.7, "end": 11.5},
+            ]
+        )
+        self.assertEqual(len(lines), 2)
+
+    def test_dedupe_merges_the_same_line_across_chunk_overlap(self):
+        lines = _dedupe_lines(
+            [
+                {"text": "điệp khúc", "start": 10.0, "end": 11.0, "confidence": 0.7},
+                {"text": "điệp khúc", "start": 10.5, "end": 11.5, "confidence": 0.9},
+            ]
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["confidence"], 0.9)
+
+    def test_failed_chunk_is_reported_instead_of_silently_dropped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.0, 5.0)], seconds=5.0)
+            with patch(
+                "karaoke.gemini_lines.plan_chunks", return_value=[(0.0, 2.5), (2.5, 5.0)]
+            ), patch(
+                "karaoke.gemini_lines.transcribe_lines",
+                side_effect=[
+                    [{"text": "a", "start": 0.0, "end": 1.0}],
+                    GeminiLineError("429"),
+                ],
+            ):
+                with self.assertRaises(GeminiLineError) as raised:
+                    transcribe_lines_chunked(vocal, "a", use_cache=False)
+        self.assertIn("1/2", str(raised.exception))
     def _response(self, lines):
         return {
             "candidates": [

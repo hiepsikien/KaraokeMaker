@@ -52,6 +52,33 @@ class LineMatchTests(unittest.TestCase):
         self.assertEqual(result["repeat"][0]["status"], "repeat")
         self.assertFalse(any(item.get("kind") == "nlv" for item in result["extra"]))
 
+    def test_first_occurrence_is_matched_not_repeat(self):
+        result = match_lines(
+            ["Điệp khúc"],
+            [
+                heard("điệp khúc", 1.0, 2.5),
+                heard("điệp khúc", 10.0, 11.5),
+            ],
+        )
+        self.assertAlmostEqual(result["matched"][0]["start"], 1.0, delta=0.01)
+        self.assertAlmostEqual(result["repeat"][0]["start"], 10.0, delta=0.01)
+
+    def test_weak_pair_after_many_unsung_lines_stays_unsung(self):
+        # Regression: the DP used to compare only the local match score against
+        # the accumulated gap. After several unsung lines that made any weak
+        # pair win and forced a line that was not sung.
+        reference = [
+            "zzz một",
+            "zzz hai",
+            "zzz ba",
+            "zzz bốn",
+            "zzz năm",
+            "câu sáu cuối",
+        ]
+        result = match_lines(reference, [heard("câu", 1.0, 11.0)])
+        self.assertEqual(result["matched"], [])
+        self.assertEqual(len(result["unsung"]), len(reference))
+
     def test_split_fragment_is_merged_into_matched_line(self):
         result = match_lines(
             ["Văn Lang trường tồn... ngàn năm..."],
