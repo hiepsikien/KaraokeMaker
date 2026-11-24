@@ -156,12 +156,49 @@ class ApproachBTests(unittest.TestCase):
                 raise RuntimeError("mps load failed")
             return fake_model, "stable"
 
-        with patch.object(align_module, "load_whisper_model", side_effect=loader):
+        with patch.object(align_module, "load_whisper_model", side_effect=loader), patch.object(
+            align_module, "_log_model_cache"
+        ), patch.object(align_module, "_allow_mps_alignment"):
             result = align_module.transcribe_whisper(
                 Path("vocal.wav"), "vi", "small", "mps", lambda message: None
             )
         self.assertEqual(result, [])
         self.assertEqual(calls, ["mps", "cpu"])
+
+    def test_mlx_transcribe_failure_falls_back_to_stable_cpu(self):
+        from types import SimpleNamespace
+
+        from karaoke import align as align_module
+
+        calls: list[tuple[str, str]] = []
+        bad_model = Mock()
+        bad_model.transcribe.side_effect = RuntimeError("mlx failed")
+        good_model = Mock()
+        good_model.transcribe.return_value = SimpleNamespace(segments=[])
+
+        def loader(_name, device, engine, _log):
+            calls.append((device, engine))
+            if engine == "mlx":
+                return bad_model, "mlx"
+            if device != "cpu":
+                raise RuntimeError("stable mps failed")
+            return good_model, "stable"
+
+        with patch.object(align_module, "load_whisper_model", side_effect=loader), patch.object(
+            align_module, "_log_model_cache"
+        ), patch.object(align_module, "_allow_mps_alignment"):
+            result = align_module.transcribe_whisper(
+                Path("vocal.wav"),
+                "vi",
+                "small",
+                "mps",
+                lambda message: None,
+                engine="mlx",
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(
+            calls, [("mps", "mlx"), ("mps", "stable"), ("cpu", "stable")]
+        )
 
     def test_clip_for_whisper_rejects_fragmented_or_mostly_voiced(self):
         from karaoke.voiced import clip_for_whisper
@@ -342,6 +379,9 @@ class AlignStrategyTests(unittest.TestCase):
             runtime = apply_env_overrides(project)
             self.assertEqual(runtime["whisper_engine"], "stable")
             self.assertEqual(runtime["gemini_chunk_workers"], 1)
+
+    def test_align_parallel_none_defaults_true(self):
+        self.assertTrue(align_options({"align_parallel": None})["align_parallel"])
 
     def test_explicit_whisper_strategy_is_kept(self):
         self.assertEqual(align_options({"align_strategy": "whisper"})["align_strategy"], "whisper")

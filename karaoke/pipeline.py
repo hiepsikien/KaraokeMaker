@@ -495,6 +495,8 @@ def align_options(payload: dict, *, strict: bool = True) -> dict:
     except (TypeError, ValueError):
         workers = 3
     parallel = payload.get("align_parallel", True)
+    if parallel is None:
+        parallel = True
     if isinstance(parallel, str):
         parallel = parallel.strip().lower() not in {"0", "false", "no", ""}
     else:
