@@ -1212,7 +1212,7 @@ Kết quả test:
 
 | Bài | Số câu | MAE | P90 | Max | So A |
 |---|---:|---:|---:|---:|---|
-| Quả Cam | 33/33 | 0.221s | 0.42s | 0.95s | A 0.088/0.208 → B hơi tệ hơn |
+| Quả Cam | 33/33 | 0.212s | 0.42s | 0.95s | A 0.088/0.208 → B hơi tệ hơn |
 | Bài Ca | 35/36 | 0.771s | 0.46s | 9.23s | A 1.715/5.31 → B tốt hơn nhiều |
 
 Kết luận tạm:
@@ -1223,6 +1223,7 @@ Kết luận tạm:
   - dùng B cho bài khó, A cho bài dễ; hoặc
   - cải thiện line start của B thêm ~0.2s.
 - Ad-lib cuối Bài Ca vẫn lệch ~9s; cần rule NLV/repeat hoặc review tay.
+- Đã blend biên Gemini với biên word (chỉ nhận Gemini start nếu sớm hơn word 0.10–0.35s và không chồng câu trước).
 - `extract_sung_lines` đã sửa để bỏ dòng stage direction trong ngoặc đơn `(...)`,
   vì lyrics Quả Cam có `(Smooth jazz vibe)` làm lệch reference index.
 
