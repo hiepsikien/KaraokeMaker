@@ -511,6 +511,7 @@ def align_with_gemini_lines(
             whisper_retry=whisper_retry,
             clip_timestamps=clip,
             engine=whisper_engine,
+            vad=whisper_vad == "silero",
         )
 
     def run_gemini_full():
@@ -595,26 +596,16 @@ def align_with_gemini_lines(
                 log(f"{len(failures)} chunk Gemini lỗi; kiểm tra vùng lời.")
 
         match = match_lines(references, gemini_lines, whisper_words)
-        if chunks and (failures or match.get("unsung")):
-            counts = [
-                sum(
-                    1
-                    for line in gemini_lines
-                    if start <= (float(line["start"]) + float(line["end"])) / 2 <= end
-                )
-                for start, end in chunks
-            ]
-            failed_indexes = {index for index, _message in failures}
-            suspicious = [
-                (index, chunk)
-                for index, chunk in enumerate(chunks)
-                if index in failed_indexes or counts[index] <= 1
-            ]
+        global_coverage = _window_coverage(whisper_words, gemini_lines)
+        needs_region_check = bool(failures) or (
+            bool(match.get("unsung")) and global_coverage < 0.8
+        )
+        if chunks and needs_region_check:
             if any(
                 _region_has_missing_lyrics(
                     start, end, whisper_words, gemini_lines, levels, hop
                 )
-                for _index, (start, end) in suspicious
+                for start, end in chunks
             ):
                 log("Có vùng có lời nhưng Gemini bỏ trống; dùng Whisper fallback.")
                 return reconcile_lyrics_with_transcript(references, segments)

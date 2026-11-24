@@ -801,6 +801,7 @@ def transcribe_whisper(
     whisper_retry: bool = True,
     clip_timestamps: list[float] | None = None,
     engine: str = "auto",
+    vad: bool = False,
 ) -> list[dict]:
     """Run Whisper once and return heard segments with word timestamps."""
     temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if whisper_retry else 0.0
@@ -823,6 +824,8 @@ def transcribe_whisper(
     }
     if clip_timestamps:
         transcribe_options["clip_timestamps"] = clip_timestamps
+    if vad:
+        transcribe_options["vad"] = True
 
     with _WHISPER_LOCK:
         model, backend = load_whisper_model(model_name, device, engine, log)
@@ -878,6 +881,7 @@ def align_lyrics(
     no_speech_threshold: float | None = None,
     whisper_retry: bool = True,
     engine: str = "auto",
+    vad: bool = False,
 ) -> list[dict]:
     typed = extract_sung_lines(lyrics)
     if typed:
@@ -894,6 +898,7 @@ def align_lyrics(
         no_speech_threshold=no_speech_threshold,
         whisper_retry=whisper_retry,
         engine=engine,
+        vad=vad,
     )
     if typed:
         matched = reconcile_lyrics_with_transcript(typed, heard_segments)

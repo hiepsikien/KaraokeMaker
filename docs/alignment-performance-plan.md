@@ -291,6 +291,9 @@ Quy tắc:
 - Nếu tất cả chunk đều im lặng/instrumental → giữ partial, log cảnh báo.
 - Không bao giờ trả partial có vùng lời bị thiếu.
 - Test phải có case **chunk trả `[]`**, không chỉ case chunk raise.
+- Chỉ chạy regional check khi có `failures` hoặc có `unsung` **và** word coverage
+  toàn bài <0.8; tránh false positive do Whisper hallucinate ở đoạn instrumental
+  (Tàn Hồng: unsung=0, chunk outro có từ rác nhưng không fallback).
 
 Whisper đã chạy song song nên fallback A không tốn thêm thời gian Whisper.
 
@@ -817,6 +820,7 @@ Mỗi bước có feature flag; benchmark trước/sau trên cùng 3 bài.
   fallback stable; `load_mlx_whisper` giữ stable-ts word timing.
 - **F**: `karaoke/voiced.py` + `clip_timestamps`; F mặc định **off**, bật bằng UI
   `VAD=RMS`; có guard bỏ F khi span quá nhiều/quá dài (mlx #1285).
+  `VAD=Silero` được nối qua `vad=True` của stable-ts (thử nghiệm).
 - Config: `whisper_engine`, `whisper_vad`, `gemini_chunk_workers`, `align_parallel`
   đi qua project/settings/UI; `requirements-karaoke.txt` có mlx-whisper optional.
 - `WhisperFailed` để fallback A không chạy lại Whisper lần 2.
@@ -837,3 +841,5 @@ Còn lại:
 - Chạy hold-out đầy đủ và quyết định bật F mặc định.
 - Cân nhắc thêm UI cho `gemini_chunk_workers`/`align_parallel` (hiện env/default).
 - Đo peak RAM MLX trên bài dài, chạy lặp 3 lần.
+- 2026-11-24 (implement): B/D/E/F đã code; thêm Silero (`vad=True`) và regional
+  check có điều kiện; 378 test pass; đo thật Tàn Hồng 47.1 s, Tên Người 33.2 s.

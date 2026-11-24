@@ -560,6 +560,7 @@ def align_job(prepared: dict, log) -> list[dict]:
             no_speech_threshold=prepared.get("no_speech_threshold"),
             whisper_retry=prepared.get("whisper_retry", True),
             engine=prepared.get("whisper_engine") or "auto",
+            vad=(prepared.get("whisper_vad") or "off") == "silero",
         )
     except AlignError as error:
         raise JobError(str(error)) from error
