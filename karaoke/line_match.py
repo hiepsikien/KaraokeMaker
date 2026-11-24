@@ -101,6 +101,76 @@ def _order_bonus(row_index: int, col_index: int, ref_count: int, heard_count: in
     return max(0.0, 1.0 - abs(expected - actual))
 
 
+MERGE_EXTRA_GAP = 5.0
+MERGE_EXTRA_SIM = 0.35
+
+
+def _prefix_text(ref: str, count: int) -> str:
+    tokens = ref.split()
+    return " ".join(tokens[: max(1, min(len(tokens), count + 2))])
+
+
+def _suffix_text(ref: str, count: int) -> str:
+    tokens = ref.split()
+    return " ".join(tokens[-max(1, min(len(tokens), count + 2)) :])
+
+
+def _merge_adjacent_extras(
+    extras: list[dict],
+    lines: list[dict],
+    reference: list[str],
+) -> tuple[list[dict], list[dict]]:
+    """Merge a split heard fragment back into its matched line.
+
+    A chorus line is often split by ASR into "Văn Lang trường tồn" and
+    "ngàn năm". One half matches the reference, the other becomes extra. If the
+    fragment is adjacent and resembles the beginning/end of the reference, fold
+    it back instead of showing a duplicate line.
+    """
+    kept: list[dict] = []
+    for extra in extras:
+        if extra.get("kind") == "nlv":
+            kept.append(extra)
+            continue
+        text = " ".join(str(extra.get("text") or "").split())
+        if not text:
+            continue
+        count = len(text.split())
+        target = None
+        side = ""
+        for line in lines:
+            row = line.get("reference_index")
+            if row is None or not 0 <= int(row) < len(reference):
+                continue
+            ref = reference[int(row)]
+            if (
+                float(extra["end"]) <= float(line["start"]) + 0.2
+                and float(line["start"]) - float(extra["end"]) <= MERGE_EXTRA_GAP
+                and sim_text(_prefix_text(ref, count), text) >= MERGE_EXTRA_SIM
+            ):
+                target = line
+                side = "before"
+                break
+            if (
+                float(extra["start"]) >= float(line["end"]) - 0.2
+                and float(extra["start"]) - float(line["end"]) <= MERGE_EXTRA_GAP
+                and sim_text(_suffix_text(ref, count), text) >= MERGE_EXTRA_SIM
+            ):
+                target = line
+                side = "after"
+                break
+        if target is None:
+            kept.append(extra)
+            continue
+        target["start"] = min(float(target["start"]), float(extra["start"]))
+        target["end"] = max(float(target["end"]), float(extra["end"]))
+        if side == "before":
+            target["heard_text"] = f"{text} {target.get('heard_text', '')}".strip()
+        else:
+            target["heard_text"] = f"{target.get('heard_text', '')} {text}".strip()
+    return lines, kept
+
+
 def match_lines(
     reference: list[str],
     heard: list[dict],
@@ -292,6 +362,10 @@ def match_lines(
                 "text_similarity": best,
             }
         )
+
+    merged_lines, extra = _merge_adjacent_extras(extra, matched + repeat, reference)
+    matched = [line for line in merged_lines if line.get("status") != "repeat"]
+    repeat = [line for line in merged_lines if line.get("status") == "repeat"]
 
     return {
         "matched": matched,

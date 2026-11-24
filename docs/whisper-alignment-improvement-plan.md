@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **331 test hiện tại vẫn pass**:
+- **332 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -1202,7 +1202,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `331` Python tests pass.
+- `332` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
@@ -1230,6 +1230,7 @@ Kết luận tạm:
   - cải thiện line start của B thêm ~0.2s.
 - Ad-lib cuối Bài Ca vẫn lệch ~9s; cần rule NLV/repeat hoặc review tay.
 - Văn Lang: full-song Gemini chỉ phủ 73%/14 câu → fallback chunk 3 đoạn tại nghỉ; kết quả 24/24 câu, câu 15 từ 3:12.15 → 3:07.14.
+- Văn Lang câu cuối bị tách "Văn Lang trường tồn" + "ngàn năm" → merge extra sát câu matched; còn 24 dòng, câu cuối 245.61–256.79s, không còn dòng lặp.
 - Đã blend biên Gemini với biên word (chỉ nhận Gemini start nếu sớm hơn word 0.10–0.35s và không chồng câu trước).
 - `extract_sung_lines` đã sửa để bỏ dòng stage direction trong ngoặc đơn `(...)`,
   vì lyrics Quả Cam có `(Smooth jazz vibe)` làm lệch reference index.

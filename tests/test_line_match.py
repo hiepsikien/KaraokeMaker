@@ -52,6 +52,19 @@ class LineMatchTests(unittest.TestCase):
         self.assertEqual(result["repeat"][0]["status"], "repeat")
         self.assertFalse(any(item.get("kind") == "nlv" for item in result["extra"]))
 
+    def test_split_fragment_is_merged_into_matched_line(self):
+        result = match_lines(
+            ["Văn Lang trường tồn... ngàn năm..."],
+            [
+                heard("văn lang trường tố", 245.82, 248.43),
+                heard("Văn Lang trường tồn... ngàn năm...", 252.75, 255.21),
+            ],
+        )
+        self.assertEqual(len(result["matched"]), 1)
+        self.assertEqual(result["extra"], [])
+        self.assertAlmostEqual(result["matched"][0]["start"], 245.82, delta=0.1)
+        self.assertAlmostEqual(result["matched"][0]["end"], 255.21, delta=0.1)
+
     def test_similarity_is_normalized(self):
         self.assertEqual(sim_text("Màn sương", "màn sương"), 1.0)
         self.assertGreater(sim_text("Màn sương", "màn sương"), sim_text("Màn sương", "hoàn toàn khác"))
