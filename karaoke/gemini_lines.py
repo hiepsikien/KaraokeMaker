@@ -32,7 +32,7 @@ from karaoke.line_match import sim_text
 
 ALLOWED_AUDIO_MODELS = AUDIO_MODELS
 DEFAULT_MODEL = DEFAULT_GEMINI_MODEL
-PROMPT_VERSION = "align_lines_v1"
+PROMPT_VERSION = "align_lines_v2"
 
 _LINE_SCHEMA = {
     "type": "OBJECT",
@@ -66,6 +66,7 @@ class GeminiLineError(RuntimeError):
 
 def _prompt(lyrics: str, start: float, end: float) -> str:
     context = ""
+    duration = max(0.1, end - start)
     sung = extract_sung_lines(lyrics)
     if sung:
         numbered = "\n".join(
@@ -82,6 +83,8 @@ Audio là chuẩn. Lời tham chiếu chỉ để tham khảo vocabulary và th�
 Không được bịa câu không có trong audio. Không copy lời tham chiếu nếu audio hát khác.
 Chỉ trả những câu thực sự được hát trong đoạn {start:.2f}s–{end:.2f}s.
 Thời gian tính bằng giây, tương đối so với đầu đoạn audio.
+Đoạn audio chỉ dài {duration:.2f} giây. Mọi start/end phải nằm trong 0–{duration:.2f};
+start phải nhỏ hơn end. Không trả mốc vượt quá độ dài đoạn.
 Mỗi câu cần: reference_index nếu xác định được, heard_text, start, end,
 status (matched|repeat|extra|nlv|unsung), confidence 0..1.
 Nếu không chắc, confidence thấp; không đoán bừa.{context}"""
@@ -207,6 +210,38 @@ def _normalize_lines(raw: dict, offset: float, clip_end: float) -> list[dict]:
     return result
 
 
+def _timestamps_out_of_clip(raw: dict, clip_end: float) -> bool:
+    """True when the response mostly used absolute song time instead of clip time.
+
+    Gemini occasionally answers a 90s chunk with timestamps from the whole song
+    (e.g. 102s inside a 94s clip). Those lines would be clamped away, silently
+    losing the verse, so the caller must retry or fall back instead of caching.
+    """
+    lines = raw.get("lines")
+    if not isinstance(lines, list) or not lines:
+        return False
+    bad = 0
+    for item in lines:
+        if not isinstance(item, dict):
+            bad += 1
+            continue
+        try:
+            start = float(item.get("start", 0))
+            end = float(item.get("end", 0))
+        except (TypeError, ValueError):
+            bad += 1
+            continue
+        if (
+            start < -0.5
+            or start > clip_end + 0.5
+            or end > clip_end + 0.5
+            # Do not reject end <= start: _normalize_lines repairs zero-length
+            # lines, and treating them as out-of-clip can force a needless fallback.
+        ):
+            bad += 1
+    return bad * 2 >= len(lines)
+
+
 def _dedupe_lines(lines: list[dict]) -> list[dict]:
     result: list[dict] = []
     for line in sorted(lines, key=lambda item: (float(item["start"]), float(item["end"]))):
@@ -244,8 +279,8 @@ def _dedupe_lines(lines: list[dict]) -> list[dict]:
 def plan_chunks(
     vocal_path: Path,
     *,
-    target_seconds: float = 90.0,
-    max_seconds: float = 120.0,
+    target_seconds: float = 60.0,
+    max_seconds: float = 90.0,
     min_seconds: float = 30.0,
     min_silence: float = 0.8,
 ) -> list[tuple[float, float]]:
@@ -325,7 +360,7 @@ def transcribe_lines_chunked(
     *,
     language: str = "vi",
     model: str = DEFAULT_MODEL,
-    chunk_seconds: float = 90.0,
+    chunk_seconds: float = 60.0,
     log=None,
     use_cache: bool = True,
 ) -> list[dict]:
@@ -402,8 +437,11 @@ def transcribe_lines(
     if use_cache:
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if isinstance(cached, dict):
+            if isinstance(cached, dict) and not _timestamps_out_of_clip(cached, clip_end):
                 return _normalize_lines(cached, offset, clip_end)
+            if isinstance(cached, dict):
+                # Do not keep feeding the same invalid response back.
+                cache_path.unlink(missing_ok=True)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -426,14 +464,31 @@ def transcribe_lines(
     }
     if log is not None:
         log(f"Gemini line pass: {offset:.1f}s–{offset + clip_end:.1f}s.")
-    try:
+
+    def request(body: dict) -> dict:
         if generate is None:
-            raw_response = _post_generate(model, payload, _api_key(), timeout=180)
+            raw_response = _post_generate(model, body, _api_key(), timeout=180)
         else:
-            raw_response = generate(model, payload, _api_key())
-        parsed = _extract_payload(raw_response, "align_lines")
+            raw_response = generate(model, body, _api_key())
+        return _extract_payload(raw_response, "align_lines")
+
+    try:
+        parsed = request(payload)
+        if _timestamps_out_of_clip(parsed, clip_end):
+            if log is not None:
+                log("Gemini trả mốc ngoài độ dài đoạn; thử lại một lần.")
+            parts = list(payload["contents"][0]["parts"])
+            parts[0] = {
+                "text": (
+                    f"{parts[0]['text']}\n\nLần trước bạn trả mốc ngoài 0–{clip_end:.2f}. "
+                    "Chỉ dùng thời gian trong đoạn này."
+                )
+            }
+            parsed = request({**payload, "contents": [{"role": "user", "parts": parts}]})
     except DirectorError as error:
         raise GeminiLineError(str(error)) from error
+    if _timestamps_out_of_clip(parsed, clip_end):
+        raise GeminiLineError("Gemini trả mốc ngoài độ dài đoạn audio.")
     if use_cache:
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
