@@ -409,14 +409,17 @@ def align_with_gemini_lines(
         )
         if gemini_start is None and gemini_end is None and gemini_lines:
             total = probe_duration(vocal_path)
+            first = min(float(item["start"]) for item in gemini_lines)
             covered = (
-                max(float(item["end"]) for item in gemini_lines)
-                - min(float(item["start"]) for item in gemini_lines)
+                max(float(item["end"]) for item in gemini_lines) - first
             ) / max(1.0, total)
-            if covered < 0.55 or len(gemini_lines) < max(3, int(len(references) * 0.7)):
-                log(
-                    f"Gemini chỉ phủ {covered * 100:.0f}% bài; chạy lại theo chunk."
-                )
+            line_ratio = len(gemini_lines) / max(1, len(references))
+            late_start = bool(whisper_words) and first > whisper_words[0]["start"] + 8.0
+            if covered < 0.55 or line_ratio < 0.8 or late_start:
+                detail = f"Gemini chỉ phủ {covered * 100:.0f}% bài, {line_ratio * 100:.0f}% số câu"
+                if late_start:
+                    detail += f", bắt đầu trễ {first - whisper_words[0]['start']:.0f}s"
+                log(f"{detail}; chạy lại theo chunk.")
                 gemini_lines = transcribe_lines_chunked(
                     vocal_path,
                     lyrics,

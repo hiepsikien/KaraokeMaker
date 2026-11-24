@@ -169,6 +169,62 @@ class GeminiLinesTests(unittest.TestCase):
             )
         self.assertEqual([line["text"] for line in lines], ["câu thật"])
 
+    def test_out_of_clip_response_is_retried(self):
+        calls: list[int] = []
+
+        def generate(model, payload, key):
+            calls.append(1)
+            if len(calls) == 1:
+                return self._response(
+                    [
+                        {"heard_text": "sai", "start": 102.3, "end": 105.0},
+                        {"heard_text": "sai nữa", "start": 110.0, "end": 115.0},
+                    ]
+                )
+            return self._response([{"heard_text": "câu thật", "start": 1.0, "end": 2.0}])
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch(
+            "karaoke.gemini_lines._audio_clip", return_value=(b"audio", "audio/mpeg", 0.0)
+        ), patch("karaoke.gemini_lines.probe_duration", return_value=10.0):
+            lines = transcribe_lines(
+                Path("vocal.mp3"),
+                "câu thật",
+                use_cache=False,
+                generate=generate,
+            )
+        self.assertEqual([line["text"] for line in lines], ["câu thật"])
+        self.assertEqual(len(calls), 2)
+
+    def test_invalid_cached_response_is_ignored(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cache = Path(folder) / "lines.json"
+            cache.write_text(
+                json.dumps(
+                    {
+                        "lines": [
+                            {"heard_text": "sai", "start": 102.3, "end": 105.0},
+                            {"heard_text": "sai nữa", "start": 110.0, "end": 115.0},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch(
+                "karaoke.gemini_lines._audio_clip",
+                return_value=(b"audio", "audio/mpeg", 0.0),
+            ), patch("karaoke.gemini_lines.probe_duration", return_value=10.0), patch(
+                "karaoke.gemini_lines._cache_path", return_value=cache
+            ):
+                lines = transcribe_lines(
+                    Path("vocal.mp3"),
+                    "câu thật",
+                    use_cache=True,
+                    generate=lambda *args: self._response(
+                        [{"heard_text": "câu thật", "start": 1.0, "end": 2.0}]
+                    ),
+                )
+        self.assertEqual([line["text"] for line in lines], ["câu thật"])
+
 
 if __name__ == "__main__":
     unittest.main()

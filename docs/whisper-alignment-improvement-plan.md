@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **345 test hiện tại vẫn pass**:
+- **348 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -1202,7 +1202,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `345` Python tests pass.
+- `348` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
@@ -1265,6 +1265,11 @@ Kết luận:
   sanitize về default, request tạo job mới vẫn validate strict.
 - **Consent**: copy nói rõ gửi cả vocal và lời; lưu `audio_consent_receipt`
   (vocal hash, model, prompt version, thời điểm).
+- **Sự cố Tàn Hồng Trong Gió**: Gemini full-song chỉ trả 13/18 câu và bắt đầu
+  trễ ~40s; response sai được cache nên ghép lại vẫn sai. Prompt v2 nêu rõ độ dài
+  clip; response có mốc ngoài clip bị loại và retry; cache sai bị bỏ qua; coverage
+  dùng thêm tỉ lệ số câu + mốc bắt đầu → tự chunk. Kết quả 18/18 câu đúng, câu 5
+  ở 93.3s, chorus cuối 185.8s.
 
 Ghi chú kỹ thuật:
 

@@ -62,6 +62,48 @@ class ApproachBTests(unittest.TestCase):
             self.assertAlmostEqual(lyric[1]["start"], 4.5, delta=0.08)
             self.assertTrue(any(line.get("kind") == "nlv" for line in lines))
 
+    def test_short_full_song_answer_triggers_chunked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            vocal = Path(folder) / "vocal.wav"
+            tone(vocal, [(0.5, 1.0), (2.5, 3.0), (4.5, 5.0)])
+            segments = [
+                {
+                    "words": words(
+                        [("một", 0.5, 1.0), ("hai", 2.5, 3.0), ("ba", 4.5, 5.0)]
+                    )
+                }
+            ]
+            short = [
+                {
+                    "text": "một",
+                    "start": 0.5,
+                    "end": 1.0,
+                    "status": "matched",
+                    "confidence": 0.9,
+                    "reference_index": 0,
+                }
+            ]
+            full = [
+                {"text": "một", "start": 0.5, "end": 1.0, "status": "matched", "confidence": 0.9, "reference_index": 0},
+                {"text": "hai", "start": 2.5, "end": 3.0, "status": "matched", "confidence": 0.9, "reference_index": 1},
+                {"text": "ba", "start": 4.5, "end": 5.0, "status": "matched", "confidence": 0.9, "reference_index": 2},
+            ]
+            with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
+                "karaoke.approach_b.transcribe_lines", return_value=short
+            ), patch(
+                "karaoke.approach_b.transcribe_lines_chunked", return_value=full
+            ) as chunked:
+                lines = align_with_gemini_lines(
+                    vocal,
+                    "một\nhai\nba",
+                    "vi",
+                    "small",
+                    "cpu",
+                    lambda message: None,
+                )
+        self.assertTrue(chunked.called)
+        self.assertEqual([line["text"] for line in lines], ["một", "hai", "ba"])
+
     def test_gemini_failure_falls_back_to_whisper(self):
         with tempfile.TemporaryDirectory() as folder:
             vocal = Path(folder) / "vocal.wav"
