@@ -231,7 +231,13 @@ def _timestamps_out_of_clip(raw: dict, clip_end: float) -> bool:
         except (TypeError, ValueError):
             bad += 1
             continue
-        if start < -0.5 or start > clip_end + 0.5 or end <= start:
+        if (
+            start < -0.5
+            or start > clip_end + 0.5
+            or end > clip_end + 0.5
+            # Do not reject end <= start: _normalize_lines repairs zero-length
+            # lines, and treating them as out-of-clip can force a needless fallback.
+        ):
             bad += 1
     return bad * 2 >= len(lines)
 
@@ -433,6 +439,9 @@ def transcribe_lines(
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             if isinstance(cached, dict) and not _timestamps_out_of_clip(cached, clip_end):
                 return _normalize_lines(cached, offset, clip_end)
+            if isinstance(cached, dict):
+                # Do not keep feeding the same invalid response back.
+                cache_path.unlink(missing_ok=True)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -456,19 +465,26 @@ def transcribe_lines(
     if log is not None:
         log(f"Gemini line pass: {offset:.1f}s–{offset + clip_end:.1f}s.")
 
-    def request() -> dict:
+    def request(body: dict) -> dict:
         if generate is None:
-            raw_response = _post_generate(model, payload, _api_key(), timeout=180)
+            raw_response = _post_generate(model, body, _api_key(), timeout=180)
         else:
-            raw_response = generate(model, payload, _api_key())
+            raw_response = generate(model, body, _api_key())
         return _extract_payload(raw_response, "align_lines")
 
     try:
-        parsed = request()
+        parsed = request(payload)
         if _timestamps_out_of_clip(parsed, clip_end):
             if log is not None:
                 log("Gemini trả mốc ngoài độ dài đoạn; thử lại một lần.")
-            parsed = request()
+            parts = list(payload["contents"][0]["parts"])
+            parts[0] = {
+                "text": (
+                    f"{parts[0]['text']}\n\nLần trước bạn trả mốc ngoài 0–{clip_end:.2f}. "
+                    "Chỉ dùng thời gian trong đoạn này."
+                )
+            }
+            parsed = request({**payload, "contents": [{"role": "user", "parts": parts}]})
     except DirectorError as error:
         raise GeminiLineError(str(error)) from error
     if _timestamps_out_of_clip(parsed, clip_end):

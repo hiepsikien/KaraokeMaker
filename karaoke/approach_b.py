@@ -429,7 +429,12 @@ def align_with_gemini_lines(
             line_ratio = len(gemini_lines) / max(1, len(references))
             late_start = bool(whisper_words) and first > whisper_words[0]["start"] + 8.0
             word_cov = _window_coverage(whisper_words, gemini_lines)
-            if covered < 0.55 or line_ratio < 0.8 or late_start or word_cov < 0.55:
+            if (
+                covered < 0.55
+                or (line_ratio < 0.8 and word_cov < 0.75)
+                or late_start
+                or word_cov < 0.55
+            ):
                 detail = (
                     f"Gemini chỉ phủ {covered * 100:.0f}% bài, "
                     f"{line_ratio * 100:.0f}% số câu, {word_cov * 100:.0f}% từ"

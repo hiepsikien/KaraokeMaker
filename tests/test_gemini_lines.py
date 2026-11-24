@@ -12,6 +12,7 @@ from karaoke.gemini_lines import (
     GeminiLineError,
     _dedupe_lines,
     _normalize_lines,
+    _timestamps_out_of_clip,
     plan_chunks,
     transcribe_lines,
     transcribe_lines_chunked,
@@ -169,6 +170,27 @@ class GeminiLinesTests(unittest.TestCase):
             )
         self.assertEqual([line["text"] for line in lines], ["câu thật"])
 
+    def test_end_past_clip_is_out_of_clip(self):
+        self.assertTrue(
+            _timestamps_out_of_clip(
+                {
+                    "lines": [
+                        {"heard_text": "a", "start": 1.0, "end": 500.0},
+                        {"heard_text": "b", "start": 2.0, "end": 501.0},
+                    ]
+                },
+                10.0,
+            )
+        )
+
+    def test_zero_length_line_is_repaired_not_rejected(self):
+        self.assertFalse(
+            _timestamps_out_of_clip(
+                {"lines": [{"heard_text": "a", "start": 1.0, "end": 1.0}]},
+                10.0,
+            )
+        )
+
     def test_out_of_clip_response_is_retried(self):
         calls: list[int] = []
 
@@ -179,6 +201,32 @@ class GeminiLinesTests(unittest.TestCase):
                     [
                         {"heard_text": "sai", "start": 102.3, "end": 105.0},
                         {"heard_text": "sai nữa", "start": 110.0, "end": 115.0},
+                    ]
+                )
+            return self._response([{"heard_text": "câu thật", "start": 1.0, "end": 2.0}])
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), patch(
+            "karaoke.gemini_lines._audio_clip", return_value=(b"audio", "audio/mpeg", 0.0)
+        ), patch("karaoke.gemini_lines.probe_duration", return_value=10.0):
+            lines = transcribe_lines(
+                Path("vocal.mp3"),
+                "câu thật",
+                use_cache=False,
+                generate=generate,
+            )
+        self.assertEqual([line["text"] for line in lines], ["câu thật"])
+        self.assertEqual(len(calls), 2)
+
+    def test_end_past_clip_response_is_retried(self):
+        calls: list[int] = []
+
+        def generate(model, payload, key):
+            calls.append(1)
+            if len(calls) == 1:
+                return self._response(
+                    [
+                        {"heard_text": "sai", "start": 1.0, "end": 500.0},
+                        {"heard_text": "sai nữa", "start": 2.0, "end": 501.0},
                     ]
                 )
             return self._response([{"heard_text": "câu thật", "start": 1.0, "end": 2.0}])
