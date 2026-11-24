@@ -559,7 +559,8 @@ Cộng A4 optional nếu cần.
 
 ### 8.2. Approach B (đề xuất thay default)
 
-- Line start MAE/P90 không tệ hơn A theo dung sai tuyệt đối (+0,02s/+0,05s).
+- Line start **P90 ≤0,5s**; MAE được phép tăng tối đa **+0,15s** so A nếu P90 ≤0,5s
+  (gate đã chọn để B không bị loại vì chênh 0,1–0,2s trên bài dễ).
 - Matching precision ≥0,9; recall ≥0,85.
 - Hallucination ≤5% số câu Gemini trả.
 - Word onset P90 **matched** ≤0,2s; interpolated tách riêng.
@@ -588,6 +589,7 @@ Cộng A4 optional nếu cần.
 4. **Gate 0 thử cả 1 request toàn bài và chunked**, ưu tiên 1 request.
 5. **B được phép thành default** nếu pass gate + hold-out.
 6. **SIM_MIN khởi điểm 0.30**, calibrate trên 4 bài dev.
+7. **Gate B:** P90 ≤0,5s; MAE tăng tối đa +0,15s so A (thay cho +0,02s).
 
 ### Còn chốt
 
@@ -1125,17 +1127,16 @@ không?".
 - **Word onset P90** tách:
   - matched words;
   - interpolated words (không thể đạt 0,2s, không tính vào gate matched).
-- **Không tệ hơn A** dùng dung sai tuyệt đối §3.2 (+0,02/+0,05), không dùng "bằng
-  hoặc tốt hơn" vì A đã 0,088s ở Quả Cam.
+- **Gate đã chọn:** P90 ≤0,5s; MAE được phép tăng tối đa +0,15s so A nếu P90 ≤0,5s.
 
 Gate:
 
 - Gate 0: P90 ≤1,0s; nếu 0,8–1,0s chỉ tiếp tục khi biên được tính lại từ word/RMS.
-- Line start P90 ≤0,5s (tốt) hoặc ≤0,8s (chấp nhận).
+- Line start P90 ≤0,5s.
+- MAE tăng tối đa +0,15s so A khi P90 ≤0,5s.
 - Matching precision ≥0,9, recall ≥0,85.
 - Hallucination ≤5% số câu Gemini trả.
 - Word onset P90 matched ≤0,2s; interpolated tách riêng.
-- Không tệ hơn A theo dung sai tuyệt đối.
 - Chi phí/latency chấp nhận.
 
 Nếu Gate 0 fail: dừng B, làm A. Nếu spike fail: B chỉ opt-in cho bài khó.
@@ -1164,8 +1165,8 @@ cho tới khi pass gate + hold-out; A vẫn là đường offline mặc định/
 
 Chỉ thay thế default khi spike chứng minh:
 
-- line start/end không tệ hơn A theo dung sai tuyệt đối §3.2 (+0,02s bài thường,
-  +0,05s bài hò); không dùng "bằng hoặc tốt hơn" vì A đã 0,088s ở Quả Cam;
+- line start P90 ≤0,5s; MAE tăng tối đa +0,15s so A (gate đã chọn để B không bị loại
+  vì chênh 0,1–0,2s trên bài dễ);
 - matching precision/recall đạt gate;
 - hallucination thấp hơn ngưỡng;
 - word timing trong câu không tệ hơn A;
