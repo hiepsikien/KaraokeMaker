@@ -6,8 +6,13 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from karaoke.approach_b import align_with_gemini_lines
+from karaoke.approach_b import (
+    _needs_chunk,
+    _region_has_missing_lyrics,
+    align_with_gemini_lines,
+)
 from karaoke.errors import JobError
+from karaoke.align import WhisperFailed
 from karaoke.gemini_lines import GeminiLineError
 from karaoke.pipeline import align_job, align_options
 
@@ -136,14 +141,33 @@ class ApproachBTests(unittest.TestCase):
         self.assertEqual([line["text"] for line in lines], ["một", "ba"])
 
     def test_clip_for_whisper_rejects_fragmented_or_mostly_voiced(self):
-        from karaoke.approach_b import _clip_for_whisper
+        from karaoke.voiced import clip_for_whisper
 
         self.assertIsNone(
-            _clip_for_whisper([(i, i + 1.0) for i in range(0, 13)], 30.0)
+            clip_for_whisper([(i, i + 1.0) for i in range(0, 13)], 30.0)
         )
-        self.assertIsNone(_clip_for_whisper([(0.0, 29.0)], 30.0))
-        clip = _clip_for_whisper([(0.0, 5.0), (20.0, 25.0)], 30.0)
+        self.assertIsNone(clip_for_whisper([(0.0, 29.0)], 30.0))
+        clip = clip_for_whisper([(0.0, 5.0), (20.0, 25.0)], 30.0)
         self.assertEqual(clip, [0.0, 5.0, 20.0, 25.0])
+
+    def test_needs_chunk_and_region_missing(self):
+        words = [
+            {"text": "a", "start": 1.0, "end": 1.5},
+            {"text": "b", "start": 2.0, "end": 2.5},
+            {"text": "c", "start": 3.0, "end": 3.5},
+        ]
+        self.assertTrue(_needs_chunk([], words, ["a", "b", "c"], 10.0))
+        self.assertFalse(
+            _needs_chunk([{"start": 0.0, "end": 9.0}], words, ["a", "b", "c"], 10.0)
+        )
+        self.assertTrue(
+            _region_has_missing_lyrics(0.0, 5.0, words, [], [100.0] * 100, 0.1)
+        )
+        self.assertFalse(
+            _region_has_missing_lyrics(
+                0.0, 5.0, words, [{"start": 0.0, "end": 5.0}], [100.0] * 100, 0.1
+            )
+        )
 
     def test_gemini_failure_falls_back_to_whisper(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -336,6 +360,26 @@ class AlignStrategyTests(unittest.TestCase):
             self.assertEqual(align_job(prepared, lambda message: None), [{"text": "A"}])
             self.assertFalse(gemini.called)
             self.assertTrue(whisper.called)
+
+
+    def test_whisper_failed_does_not_run_whisper_twice(self):
+        prepared = {
+            "vocal_audio": "/tmp/vocal.wav",
+            "lyrics": "một",
+            "language": "vi",
+            "model_name": "small",
+            "device": "cpu",
+            "align_strategy": "gemini_lines",
+            "gemini_model": "gemini-3.8-flash",
+            "google_audio_consent": True,
+        }
+        with patch(
+            "karaoke.pipeline.align_with_gemini_lines",
+            side_effect=WhisperFailed("load failed"),
+        ), patch("karaoke.pipeline.align_lyrics") as whisper:
+            with self.assertRaises(JobError):
+                align_job(prepared, lambda message: None)
+            self.assertFalse(whisper.called)
 
 
 if __name__ == "__main__":

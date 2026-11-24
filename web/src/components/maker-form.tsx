@@ -580,6 +580,10 @@ export function MakerForm() {
             align_strategy: payload.align_strategy,
             gemini_model: payload.gemini_model,
             google_audio_consent: payload.google_audio_consent,
+            whisper_engine: payload.whisper_engine,
+            whisper_vad: payload.whisper_vad,
+            gemini_chunk_workers: payload.gemini_chunk_workers,
+            align_parallel: payload.align_parallel,
           }),
         });
         if (!response.ok) {

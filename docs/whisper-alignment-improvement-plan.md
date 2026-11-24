@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **378 test hiện tại vẫn pass**:
+- **382 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -1206,7 +1206,7 @@ Gemini lỗi, hoặc người dùng chọn Whisper. Hold-out vẫn cần chạy 
 
 Kết quả test:
 
-- `378` Python tests pass.
+- `382` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)

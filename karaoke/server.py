@@ -195,7 +195,7 @@ class AlignRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
-    align_strategy: str = "whisper"
+    align_strategy: str = "gemini_lines"
     gemini_model: str = DEFAULT_GEMINI_MODEL
     google_audio_consent: bool = False
     whisper_engine: str = "auto"

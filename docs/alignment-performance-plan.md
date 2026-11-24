@@ -842,4 +842,4 @@ Còn lại:
 - Cân nhắc thêm UI cho `gemini_chunk_workers`/`align_parallel` (hiện env/default).
 - Đo peak RAM MLX trên bài dài, chạy lặp 3 lần.
 - 2026-11-24 (implement): B/D/E/F đã code; thêm Silero (`vad=True`) và regional
-  check có điều kiện; 378 test pass; đo thật Tàn Hồng 47.1 s, Tên Người 33.2 s.
+  check có điều kiện; 382 test pass; đo thật Tàn Hồng 47.1 s, Tên Người 33.2 s.

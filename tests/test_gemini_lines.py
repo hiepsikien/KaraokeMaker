@@ -8,8 +8,11 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
+from karaoke.director import GeminiHTTPError
 from karaoke.gemini_lines import (
+    GeminiBudget,
     GeminiLineError,
+    _post_generate_retry,
     _dedupe_lines,
     _normalize_lines,
     _timestamps_out_of_clip,
@@ -264,6 +267,36 @@ class GeminiLinesTests(unittest.TestCase):
             )
         self.assertEqual([line["text"] for line in lines], ["câu thật"])
         self.assertEqual(len(calls), 2)
+
+    def test_retry_uses_shared_budget_for_transient_errors(self):
+        calls: list[int] = []
+
+        def fake(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise GeminiHTTPError("429", status=429, transient=True)
+            return {"lines": []}
+
+        with patch("karaoke.gemini_lines._post_generate", side_effect=fake), patch(
+            "karaoke.gemini_lines.time.sleep"
+        ):
+            result = _post_generate_retry(
+                "m", {}, "key", budget=GeminiBudget(2), log=None
+            )
+        self.assertEqual(result, {"lines": []})
+        self.assertEqual(len(calls), 2)
+
+    def test_retry_does_not_repeat_non_transient_errors(self):
+        calls: list[int] = []
+
+        def fake(*_args, **_kwargs):
+            calls.append(1)
+            raise GeminiHTTPError("400", status=400, transient=False)
+
+        with patch("karaoke.gemini_lines._post_generate", side_effect=fake):
+            with self.assertRaises(GeminiHTTPError):
+                _post_generate_retry("m", {}, "key", budget=GeminiBudget(4), log=None)
+        self.assertEqual(len(calls), 1)
 
     def test_invalid_cached_response_is_ignored(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -11,7 +11,8 @@ from pathlib import Path
 import numpy as np
 
 from karaoke.lyrics import extract_sung_lines, normalize_token
-from karaoke.media import MediaError, is_pcm16_wav, pcm16_wav
+from karaoke.media import MediaError, is_pcm16_wav, pcm16_wav, probe_duration
+from karaoke.voiced import clip_for_whisper, voiced_spans
 from karaoke.whisper_backend import load_whisper_model
 
 _WHISPER_LOCK = threading.Lock()
@@ -828,7 +829,23 @@ def transcribe_whisper(
         transcribe_options["vad"] = True
 
     with _WHISPER_LOCK:
-        model, backend = load_whisper_model(model_name, device, engine, log)
+        try:
+            model, backend = load_whisper_model(model_name, device, engine, log)
+        except Exception as error:
+            if device != "cpu":
+                log(f"Không tải được model trên {device} ({error}). Chuyển sang CPU.")
+                try:
+                    model, backend = load_whisper_model(
+                        model_name, "cpu", engine, log
+                    )
+                except Exception as cpu_error:
+                    raise WhisperFailed(
+                        f"Không tải được model căn lời: {cpu_error}"
+                    ) from cpu_error
+            else:
+                raise WhisperFailed(
+                    f"Không tải được model căn lời: {error}"
+                ) from error
         if backend == "stable":
             _log_model_cache(model_name, log)
             _allow_mps_alignment()
@@ -882,6 +899,7 @@ def align_lyrics(
     whisper_retry: bool = True,
     engine: str = "auto",
     vad: bool = False,
+    whisper_vad: str = "off",
 ) -> list[dict]:
     typed = extract_sung_lines(lyrics)
     if typed:
@@ -889,6 +907,14 @@ def align_lyrics(
             f"Lời đã nhập có {len(typed)} câu. "
             "Chỗ khớp sẽ hiện lời này; đoạn chỉ nghe được sẽ được thêm như câu bổ sung."
         )
+    clip = None
+    if whisper_vad == "rms":
+        try:
+            duration = probe_duration(vocal_path)
+            levels, hop = _vocal_rms(vocal_path)
+            clip = clip_for_whisper(voiced_spans(levels, hop, min_gap=1.5), duration)
+        except Exception:
+            clip = None
     heard_segments = transcribe_whisper(
         vocal_path,
         language,
@@ -899,6 +925,7 @@ def align_lyrics(
         whisper_retry=whisper_retry,
         engine=engine,
         vad=vad,
+        clip_timestamps=clip,
     )
     if typed:
         matched = reconcile_lyrics_with_transcript(typed, heard_segments)

@@ -484,27 +484,29 @@ def align_options(payload: dict, *, strict: bool = True) -> dict:
     else:
         consent = bool(consent)
     engine = str(
-        payload.get("whisper_engine")
-        or os.environ.get("KARAOKE_WHISPER_ENGINE")
+        os.environ.get("KARAOKE_WHISPER_ENGINE")
+        or payload.get("whisper_engine")
         or "auto"
     ).strip().lower()
     if engine not in {"auto", "mlx", "stable"}:
         engine = "auto"
     vad = str(
-        payload.get("whisper_vad")
-        or os.environ.get("KARAOKE_WHISPER_VAD")
+        os.environ.get("KARAOKE_WHISPER_VAD")
+        or payload.get("whisper_vad")
         or "off"
     ).strip().lower()
     if vad not in {"off", "rms", "silero"}:
         vad = "off"
-    raw_workers = payload.get("gemini_chunk_workers") or os.environ.get(
-        "KARAOKE_GEMINI_WORKERS"
+    raw_workers = os.environ.get("KARAOKE_GEMINI_WORKERS") or payload.get(
+        "gemini_chunk_workers"
     ) or 3
     try:
         workers = max(1, min(3, int(raw_workers)))
     except (TypeError, ValueError):
         workers = 3
-    parallel = payload.get("align_parallel", os.environ.get("KARAOKE_ALIGN_PARALLEL", "1"))
+    parallel = os.environ.get(
+        "KARAOKE_ALIGN_PARALLEL", payload.get("align_parallel", "1")
+    )
     if isinstance(parallel, str):
         parallel = parallel.strip().lower() not in {"0", "false", "no", ""}
     else:
@@ -561,6 +563,7 @@ def align_job(prepared: dict, log) -> list[dict]:
             whisper_retry=prepared.get("whisper_retry", True),
             engine=prepared.get("whisper_engine") or "auto",
             vad=(prepared.get("whisper_vad") or "off") == "silero",
+            whisper_vad=prepared.get("whisper_vad") or "off",
         )
     except AlignError as error:
         raise JobError(str(error)) from error

@@ -34,7 +34,7 @@ from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.line_match import match_lines
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import probe_duration
-from karaoke.voiced import flat_clip, voiced_spans
+from karaoke.voiced import clip_for_whisper, voiced_spans
 
 PAD = 0.8
 SNAP_SHIFT = 0.20
@@ -108,20 +108,6 @@ def _region_has_missing_lyrics(
     return _voiced_ratio(
         levels, hop, start, end, _voice_threshold(levels)
     ) >= 0.2
-
-
-def _clip_for_whisper(spans: list[tuple[float, float]], duration: float) -> list[float] | None:
-    """Use clip_timestamps only when it is likely to save work.
-
-    Many short spans make mlx-whisper slower (upstream #1285), so fall back to
-    the full file when the voiced spans are fragmented or cover most of the song.
-    """
-    if not spans or duration <= 0:
-        return None
-    total = sum(max(0.0, end - start) for start, end in spans)
-    if len(spans) > 12 or total < 0.05 * duration or total > 0.65 * duration:
-        return None
-    return flat_clip(spans, duration)
 
 
 def _needs_chunk(
@@ -490,9 +476,9 @@ def align_with_gemini_lines(
     clip = None
     if whisper_vad == "rms" and levels and duration > 0:
         # Merging 1.5s gaps keeps the clip list short; long lists make
-        # mlx-whisper slower (upstream #1285). _clip_for_whisper rejects
+        # mlx-whisper slower (upstream #1285). clip_for_whisper rejects
         # fragmented/mostly-voiced songs and falls back to the full file.
-        clip = _clip_for_whisper(voiced_spans(levels, hop, min_gap=1.5), duration)
+        clip = clip_for_whisper(voiced_spans(levels, hop, min_gap=1.5), duration)
 
     def whisper_log(message: str) -> None:
         log(f"[Whisper] {message}")
@@ -534,9 +520,18 @@ def align_with_gemini_lines(
     gemini_lines = None
     if align_parallel and gemini_start is None and gemini_end is None:
         executor = ThreadPoolExecutor(max_workers=2)
+        gemini_future = None
+
+        def consume(future) -> None:
+            try:
+                future.exception()
+            except Exception:
+                pass
+
         try:
             whisper_future = executor.submit(run_whisper)
             gemini_future = executor.submit(run_gemini_full)
+            gemini_future.add_done_callback(consume)
             segments = whisper_future.result()
             try:
                 gemini_lines = gemini_future.result()
@@ -547,6 +542,8 @@ def align_with_gemini_lines(
                 log(f"Gemini full-song lỗi tạm thời ({error}); thử chunk.")
                 gemini_lines = None
         finally:
+            if gemini_future is not None and not gemini_future.done():
+                gemini_future.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
     else:
         segments = run_whisper()

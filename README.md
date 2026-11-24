@@ -31,7 +31,7 @@ ffprobe -version
 cd web && npm install
 ```
 
-`requirements-karaoke.txt` gồm `stable-ts`, `torch`, Pillow, FastAPI, Uvicorn, `requests`, `python-dotenv` và `numpy`. Lần cài đầu có thể mất vài phút vì `torch` lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
+`requirements-karaoke.txt` gồm `stable-ts>=2.19.1`, `torch`, Pillow, FastAPI, Uvicorn, `requests`, `python-dotenv`, `numpy` và `mlx-whisper` (chỉ macOS Apple Silicon). Lần cài đầu có thể mất vài phút vì `torch` lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
 
 Thư mục nhạc mặc định là `~/Downloads/Audio` nếu thư mục đó tồn tại, kể cả tên có một dấu cách ở cuối. Đổi bằng:
 

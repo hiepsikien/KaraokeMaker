@@ -232,10 +232,18 @@ class DirectorError(RuntimeError):
 class GeminiHTTPError(DirectorError):
     """HTTP failure from Gemini, with enough detail to decide on retry."""
 
-    def __init__(self, message: str, *, status: int | None = None, transient: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        transient: bool = False,
+        retry_after: float | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.transient = transient
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------------------
@@ -465,10 +473,18 @@ def _post_generate(model: str, payload: dict, api_key: str, *, timeout: int) -> 
 
     status = response.status_code
     if status == 429:
+        retry_after = None
+        try:
+            raw_retry = response.headers.get("Retry-After")
+            if raw_retry:
+                retry_after = max(0.0, float(raw_retry))
+        except (AttributeError, TypeError, ValueError):
+            retry_after = None
         raise GeminiHTTPError(
             "Gemini đang giới hạn tần suất (429). Hãy đợi một lát rồi thử lại.",
             status=status,
             transient=True,
+            retry_after=retry_after,
         )
     if status >= 500:
         raise GeminiHTTPError(

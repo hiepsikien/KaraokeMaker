@@ -159,3 +159,19 @@ def flat_clip(spans: list[tuple[float, float]], duration: float) -> list[float]:
         if flat[-1] <= flat[-2]:
             del flat[-2:]
     return flat
+
+
+def clip_for_whisper(
+    spans: list[tuple[float, float]], duration: float
+) -> list[float] | None:
+    """Use clip_timestamps only when it is likely to save work.
+
+    Many short spans make mlx-whisper slower (upstream #1285), so fall back to
+    the full file when the voiced spans are fragmented or cover most of the song.
+    """
+    if not spans or duration <= 0:
+        return None
+    total = sum(max(0.0, end - start) for start, end in spans)
+    if len(spans) > 12 or total < 0.05 * duration or total > 0.65 * duration:
+        return None
+    return flat_clip(spans, duration)

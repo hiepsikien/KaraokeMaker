@@ -1,4 +1,4 @@
-stable-ts>=2.17.0
+stable-ts>=2.19.1
 torch>=2.2.0
 Pillow>=10.0.0
 fastapi

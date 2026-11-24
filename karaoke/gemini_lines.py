@@ -106,7 +106,7 @@ def _post_generate_retry(
         except GeminiHTTPError as error:
             if not error.transient or budget.left <= 0:
                 raise
-            wait = _retry_after_seconds(error, attempt)
+            wait = float(getattr(error, "retry_after", None) or _retry_after_seconds(error, attempt))
             if log is not None:
                 log(f"Gemini tạm lỗi ({error}); thử lại sau {wait:.0f}s.")
             time.sleep(wait)
@@ -474,7 +474,7 @@ def transcribe_lines_chunked(
                 failures.append((index, first_error))
 
             worker_count = max(1, min(int(workers or 1), len(chunks)))
-            if log is not None:
+            if log is not None and worker_count > 1:
                 log(
                     f"Gemini chunk song song: {worker_count} worker, "
                     f"{len(chunks)} đoạn."
@@ -588,7 +588,9 @@ def transcribe_lines(
             parsed = request({**payload, "contents": [{"role": "user", "parts": parts}]})
     except DirectorError as error:
         transient = bool(getattr(error, "transient", False))
-        config = isinstance(error, GeminiHTTPError) and not transient
+        # A non-HTTP DirectorError (missing key, safety block, no candidate)
+        # is not fixed by retrying chunks; fallback A instead.
+        config = not isinstance(error, GeminiHTTPError) or not transient
         raise GeminiLineError(
             str(error), transient=transient, config=config
         ) from error
