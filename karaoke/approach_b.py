@@ -159,6 +159,43 @@ def _line_confidence(line: dict, words: list[dict], ref: str) -> float:
     return max(0.0, min(1.0, 0.7 * base + 0.3 * coverage))
 
 
+def _apply_window_boundaries(lines: list[dict]) -> None:
+    """Blend Gemini line boundaries with word boundaries without moving lines.
+
+    Ends are adjusted first. A Gemini end may extend a held note, but only if it
+    stays before the next word start. Then starts may use the Gemini start when
+    it fills a real gap after the previous adjusted end. This fixes the easy-song
+    case where the first Whisper word starts about 0.2s late.
+    """
+    lines.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    word_starts = [float(item["start"]) for item in lines]
+    for index, line in enumerate(lines):
+        word_end = float(line["end"])
+        gemini_end = line.pop("window_end", None)
+        next_word_start = word_starts[index + 1] if index + 1 < len(lines) else None
+        if (
+            gemini_end is not None
+            and float(gemini_end) > word_end + 0.10
+            and (next_word_start is None or float(gemini_end) <= next_word_start - 0.02)
+        ):
+            line["end"] = float(gemini_end)
+
+    previous_end = 0.0
+    for line in lines:
+        word_start = float(line["start"])
+        gemini_start = line.pop("window_start", None)
+        start = word_start
+        early = word_start - float(gemini_start) if gemini_start is not None else 0.0
+        if (
+            gemini_start is not None
+            and 0.10 < early <= 0.35
+            and float(gemini_start) >= previous_end + 0.02
+        ):
+            start = float(gemini_start)
+        line["start"] = max(start, previous_end)
+        previous_end = float(line["end"])
+
+
 def _cut_overlaps(lines: list[dict]) -> None:
     lines.sort(key=lambda item: (float(item["start"]), float(item["end"])))
     for index in range(1, len(lines)):
@@ -226,6 +263,8 @@ def _build_from_match(
                 "confidence": confidence,
                 "text_similarity": item.get("text_similarity", 0.0),
                 "status": item.get("status", "matched"),
+                "window_start": start,
+                "window_end": end,
             }
         )
         if item.get("status") == "repeat":
@@ -257,6 +296,7 @@ def _build_from_match(
             line["label"] = "chant" if len(text.split()) >= 2 else "adlib"
         lines.append(line)
 
+    _apply_window_boundaries(lines)
     _cut_overlaps(lines)
     unsung = match.get("unsung") or []
     if unsung:

@@ -43,7 +43,7 @@ class ApproachBTests(unittest.TestCase):
             gemini = [
                 {"text": "màn sương buông", "start": 0.1, "end": 2.5, "status": "matched", "confidence": 0.9, "reference_index": 0},
                 {"text": "hò ơi hò khoan", "start": 2.5, "end": 4.0, "status": "extra", "confidence": 0.8},
-                {"text": "anh yêu em", "start": 4.2, "end": 6.4, "status": "matched", "confidence": 0.9, "reference_index": 1},
+                {"text": "anh yêu em", "start": 3.8, "end": 6.4, "status": "matched", "confidence": 0.9, "reference_index": 1},
             ]
             with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
                 "karaoke.approach_b.transcribe_lines", return_value=gemini
