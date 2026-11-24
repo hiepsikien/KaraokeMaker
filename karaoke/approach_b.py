@@ -56,6 +56,19 @@ def _mid(word: dict) -> float:
     return (float(word["start"]) + float(word["end"])) / 2.0
 
 
+def _window_coverage(words: list[dict], lines: list[dict]) -> float:
+    """Fraction of heard words that fall inside a Gemini line window."""
+    if not words:
+        return 1.0
+    windows = [(float(line["start"]), float(line["end"])) for line in lines]
+    covered = 0
+    for word in words:
+        mid = _mid(word)
+        if any(start - 1.0 <= mid <= end + 1.0 for start, end in windows):
+            covered += 1
+    return covered / len(words)
+
+
 def _snap_time(moment: float, levels: list[float], hop: float, threshold: float) -> float:
     if not levels:
         return moment
@@ -415,8 +428,12 @@ def align_with_gemini_lines(
             ) / max(1.0, total)
             line_ratio = len(gemini_lines) / max(1, len(references))
             late_start = bool(whisper_words) and first > whisper_words[0]["start"] + 8.0
-            if covered < 0.55 or line_ratio < 0.8 or late_start:
-                detail = f"Gemini chỉ phủ {covered * 100:.0f}% bài, {line_ratio * 100:.0f}% số câu"
+            word_cov = _window_coverage(whisper_words, gemini_lines)
+            if covered < 0.55 or line_ratio < 0.8 or late_start or word_cov < 0.55:
+                detail = (
+                    f"Gemini chỉ phủ {covered * 100:.0f}% bài, "
+                    f"{line_ratio * 100:.0f}% số câu, {word_cov * 100:.0f}% từ"
+                )
                 if late_start:
                     detail += f", bắt đầu trễ {first - whisper_words[0]['start']:.0f}s"
                 log(f"{detail}; chạy lại theo chunk.")

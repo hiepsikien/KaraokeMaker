@@ -273,8 +273,8 @@ def _dedupe_lines(lines: list[dict]) -> list[dict]:
 def plan_chunks(
     vocal_path: Path,
     *,
-    target_seconds: float = 90.0,
-    max_seconds: float = 120.0,
+    target_seconds: float = 60.0,
+    max_seconds: float = 90.0,
     min_seconds: float = 30.0,
     min_silence: float = 0.8,
 ) -> list[tuple[float, float]]:
@@ -354,7 +354,7 @@ def transcribe_lines_chunked(
     *,
     language: str = "vi",
     model: str = DEFAULT_MODEL,
-    chunk_seconds: float = 90.0,
+    chunk_seconds: float = 60.0,
     log=None,
     use_cache: bool = True,
 ) -> list[dict]:

@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **348 test hiện tại vẫn pass**:
+- **349 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -682,14 +682,16 @@ fallback A nếu Gemini lỗi/429/tắt consent.
 
 #### Chunk policy
 
-- **Cắt tại khoảng nghỉ dài** (RMS thấp ≥0.8s), target 90s, max 120s.
-- Nếu bài không có khoảng nghỉ đủ dài → cắt fixed max 120s với overlap 2s.
+- **Cắt tại khoảng nghỉ dài** (RMS thấp ≥0.8s), target 60s, max 90s (Gemini kém ổn định
+  trên đoạn dài; 45–60s cho kết quả tốt hơn).
+- Nếu bài không có khoảng nghỉ đủ dài → cắt fixed max 90s với overlap 2s.
 - Chunk tại nghỉ giúp không cắt giữa câu; overlap 1.5s quanh cut (0.75s mỗi bên).
 - Nếu câu bị cắt ở cả hai chunk → đánh `uncertain` + request lại chunk dịch 20–30s
   (chỉ 1 lần).
-- **Coverage check:** nếu response full-song chỉ phủ <55% độ dài bài hoặc <70% số câu
-  reference → tự chạy lại chunked. Đây là fix cho Văn Lang full-song chỉ trả 14 dòng
-  bắt đầu từ 209s.
+- **Coverage check:** nếu response full-song phủ <55% độ dài bài, <80% số câu
+  reference, <55% số từ Whisper, hoặc bắt đầu trễ >8s → tự chạy lại chunked.
+  Đây là fix cho Văn Lang (14 dòng, bắt đầu từ 209s) và Tên Người Ở Lại
+  (đủ 18 dòng nhưng bỏ trống đoạn 117–207s).
 - Timestamp từng chunk có thể drift; calibrate bằng anchor tin cậy
   (Whisper word hoặc RMS activity) trước khi cộng offset.
 - Dedupe overlap phải so cả `text` + `start/end`; không dedupe hai chorus giống text
@@ -1202,7 +1204,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `348` Python tests pass.
+- `349` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
@@ -1270,6 +1272,11 @@ Kết luận:
   clip; response có mốc ngoài clip bị loại và retry; cache sai bị bỏ qua; coverage
   dùng thêm tỉ lệ số câu + mốc bắt đầu → tự chunk. Kết quả 18/18 câu đúng, câu 5
   ở 93.3s, chorus cuối 185.8s.
+- **Sự cố Tên Người Ở Lại**: Gemini full-song trả đủ 18 câu nhưng bỏ trống đoạn
+  117–207s, dồn verse 2/pre-chorus sang 203–255s (im lặng), và chèn outro vào giữa
+  chorus. Coverage theo span/số câu không bắt được. Đã thêm coverage theo **tỉ lệ từ
+  Whisper** (41.8% <55%) và giảm chunk target xuống **60s / max 90s**. Kết quả:
+  18/18 câu, "Gò Công cuộn sóng" ở 123.7s, chorus 177.8–205.2s, outro 259–274s.
 
 Ghi chú kỹ thuật:
 

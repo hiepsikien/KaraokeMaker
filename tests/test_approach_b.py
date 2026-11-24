@@ -188,6 +188,15 @@ class ApproachBTests(unittest.TestCase):
         self.assertEqual(chant[0]["text"], "hò ơi")
         self.assertEqual(chant[0]["text"], " ".join(word["text"] for word in chant[0]["words"]))
 
+    def test_window_coverage_detects_missing_middle(self):
+        from karaoke.approach_b import _window_coverage
+
+        words = [
+            {"text": "a", "start": 1.0, "end": 2.0},
+            {"text": "b", "start": 50.0, "end": 51.0},
+        ]
+        self.assertAlmostEqual(_window_coverage(words, [{"start": 0.0, "end": 3.0}]), 0.5)
+
     def test_word_times_never_overlap_after_snap(self):
         from karaoke.approach_b import _words_for_line
 
