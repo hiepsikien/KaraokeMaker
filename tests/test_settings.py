@@ -36,12 +36,13 @@ class SettingsTests(unittest.TestCase):
             "model_name": "medium",
             "output_dir": "/tmp/karaoke out",
         }
+        expected = {**DEFAULT_SETTINGS, **payload}
         saved = save_settings(payload)
-        self.assertEqual(saved, payload)
-        self.assertEqual(load_settings(), payload)
+        self.assertEqual(saved, expected)
+        self.assertEqual(load_settings(), expected)
 
         path = self.data_root / "settings.json"
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), payload)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), expected)
         self.assertEqual((path.stat().st_mode & 0o777), 0o600)
 
     def test_public_settings_hides_key(self):

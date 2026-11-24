@@ -389,16 +389,26 @@ export function MakerForm() {
     });
   }
 
+  function projectDefaults() {
+    return {
+      ...emptyFields(settings.output_dir),
+      device: settings.device || "cpu",
+      model_name: settings.model_name || "small",
+      align_strategy:
+        settings.align_strategy === "gemini_lines"
+          ? ("gemini_lines" as const)
+          : ("whisper" as const),
+      gemini_model: settings.gemini_model || "gemini-3.8-flash",
+      google_audio_consent: Boolean(settings.google_audio_consent),
+    };
+  }
+
   function startCreate() {
     setNotice("");
     setJob(null);
     setProjectExported(false);
     setHasLines(false);
-    setFields({
-      ...emptyFields(settings.output_dir),
-      device: settings.device || "cpu",
-      model_name: settings.model_name || "small",
-    });
+    setFields(projectDefaults());
     setAlignReturn("setup");
     setPhase("setup");
     setOpenedProject("");
@@ -431,15 +441,10 @@ export function MakerForm() {
         setProjectExported(false);
         setJobId("");
         setHasLines(false);
-        setFields({
-          ...emptyFields(settings.output_dir),
-          device: settings.device || "cpu",
-          model_name: settings.model_name || "small",
-        });
+        setFields(projectDefaults());
         setPhase("home");
         return false;
-      }
-      const data = (await response.json()) as {
+      }      const data = (await response.json()) as {
         phase: "setup" | "edit";
         project: Project;
         job: Job | null;
@@ -475,11 +480,7 @@ export function MakerForm() {
       setProjectExported(false);
       setJobId("");
       setHasLines(false);
-      setFields({
-        ...emptyFields(settings.output_dir),
-        device: settings.device || "cpu",
-        model_name: settings.model_name || "small",
-      });
+      setFields(projectDefaults());
       setPhase("home");
       return false;
     }
@@ -572,6 +573,9 @@ export function MakerForm() {
             device: payload.device,
             no_speech_threshold: payload.no_speech_threshold,
             whisper_retry: payload.whisper_retry,
+            align_strategy: payload.align_strategy,
+            gemini_model: payload.gemini_model,
+            google_audio_consent: payload.google_audio_consent,
           }),
         });
         if (!response.ok) {

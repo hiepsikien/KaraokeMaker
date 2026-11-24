@@ -458,6 +458,9 @@ export type Project = {
   device: string;
   no_speech_threshold?: number | null;
   whisper_retry?: boolean;
+  align_strategy?: "whisper" | "gemini_lines";
+  gemini_model?: string;
+  google_audio_consent?: boolean;
   lines: TimedLine[];
   outputs: Outputs | null;
   restore?: RestoreSettings | null;
@@ -519,6 +522,9 @@ export type ProjectFields = {
   device: string;
   no_speech_threshold: string;
   whisper_retry: boolean;
+  align_strategy: "whisper" | "gemini_lines";
+  gemini_model: string;
+  google_audio_consent: boolean;
   project_path: string;
 };
 
@@ -546,6 +552,9 @@ export function emptyFields(outputDir = ""): ProjectFields {
     device: "cpu",
     no_speech_threshold: "",
     whisper_retry: true,
+    align_strategy: "whisper",
+    gemini_model: "gemini-3.8-flash",
+    google_audio_consent: false,
     project_path: "",
   };
 }
@@ -575,6 +584,9 @@ export function fieldsFromProject(project: Project): ProjectFields {
     no_speech_threshold:
       project.no_speech_threshold == null ? "" : String(project.no_speech_threshold),
     whisper_retry: project.whisper_retry !== false,
+    align_strategy: project.align_strategy === "gemini_lines" ? "gemini_lines" : "whisper",
+    gemini_model: project.gemini_model || "gemini-3.8-flash",
+    google_audio_consent: project.google_audio_consent === true,
     project_path: project.path || "",
   };
 }
@@ -604,6 +616,9 @@ export function fieldsPayload(fields: ProjectFields) {
     device: fields.device,
     no_speech_threshold: fields.no_speech_threshold.trim() === "" ? null : Number(fields.no_speech_threshold),
     whisper_retry: fields.whisper_retry,
+    align_strategy: fields.align_strategy,
+    gemini_model: fields.gemini_model,
+    google_audio_consent: fields.google_audio_consent,
     project_path: fields.project_path,
   };
 }

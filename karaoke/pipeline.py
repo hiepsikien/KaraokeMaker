@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from karaoke.access import AccessError, ensure_allowed, grant, grant_project_paths
 from karaoke.align import AlignError, align_lyrics
+from karaoke.approach_b import align_with_gemini_lines
 from karaoke.errors import JobError
+from karaoke.gemini_models import AUDIO_MODELS as GEMINI_AUDIO_MODELS, DEFAULT_GEMINI_MODEL
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import (
     AUDIO_SUFFIXES,
     IMAGE_SUFFIXES,
+    LINE_META_KEYS,
     MediaError,
     probe_duration,
     safe_title,
@@ -22,6 +27,7 @@ from karaoke.profiles import normalize_profile_id
 
 EXPORT_FORMATS = frozenset({"mp4", "mov", "mkv"})
 WHISPER_MODELS = frozenset({"tiny", "base", "small", "medium", "large-v2", "large"})
+ALIGN_STRATEGIES = frozenset({"whisper", "gemini_lines"})
 
 
 def _existing_file(path_text: str, label: str, suffixes: set[str]) -> Path:
@@ -42,12 +48,16 @@ def _dict_list(value) -> list[dict]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def _strip_tags(text: str) -> str:
+    return " ".join(re.sub(r"\[[^\]]*\]", " ", str(text)).split())
+
+
 def normalize_edited_lines(lines: list[dict]) -> list[dict]:
     cleaned: list[dict] = []
     for line in lines:
         words: list[dict] = []
         for word in line.get("words") or []:
-            text = " ".join(str(word.get("text", "")).split())
+            text = _strip_tags(word.get("text", ""))
             if not text:
                 continue
             try:
@@ -69,16 +79,30 @@ def normalize_edited_lines(lines: list[dict]) -> list[dict]:
             "end": words[-1]["end"],
             "words": words,
         }
-        if line.get("uncertain"):
-            cleaned_line["uncertain"] = True
-        if line.get("supplemented"):
-            cleaned_line["supplemented"] = True
+        for key in LINE_META_KEYS:
+            if key in line and line[key] is not None:
+                cleaned_line[key] = line[key]
         cleaned.append(cleaned_line)
     if not cleaned:
         raise JobError("Không còn chữ nào để xuất.")
     # Cue timing reads the previous line by position, so lines must be in time order.
     cleaned.sort(key=lambda item: item["start"])
     return cleaned
+
+
+def audio_consent_receipt(vocal: Path, gemini_model: str) -> dict:
+    """Receipt for sending the vocal stem (and lyrics text) to Gemini."""
+    digest = hashlib.sha256()
+    with Path(vocal).open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return {
+        "vocal_path": str(vocal),
+        "vocal_hash": "sha256:" + digest.hexdigest(),
+        "model": gemini_model,
+        "prompt_version": "align_lines_v1",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def prepare_job(payload: dict, log) -> dict:
@@ -129,7 +153,22 @@ def prepare_job(payload: dict, log) -> dict:
 
     language = str(payload.get("language") or "vi").strip() or "vi"
     output_profile = normalize_profile_id(payload.get("output_profile"))
-    whisper = whisper_options(payload)
+    align = align_options(payload)
+    consent_receipt = None
+    if align["align_strategy"] == "gemini_lines" and align["google_audio_consent"]:
+        existing_receipt = payload.get("audio_consent_receipt")
+        consent_receipt = (
+            dict(existing_receipt) if isinstance(existing_receipt, dict) else None
+        )
+        if not (
+            consent_receipt
+            and str(consent_receipt.get("vocal_path") or "") == str(vocal)
+            and str(consent_receipt.get("model") or "") == align["gemini_model"]
+        ):
+            try:
+                consent_receipt = audio_consent_receipt(vocal, align["gemini_model"])
+            except OSError as error:
+                raise JobError(f"Không đọc được file vocal để ghi consent: {error}") from error
 
     try:
         original_length = probe_duration(original)
@@ -176,10 +215,14 @@ def prepare_job(payload: dict, log) -> dict:
         "cover_duration": cover_duration,
         "image_duration": image_duration,
         "language": language,
-        "model_name": whisper["model_name"],
-        "device": whisper["device"],
-        "no_speech_threshold": whisper["no_speech_threshold"],
-        "whisper_retry": whisper["whisper_retry"],
+        "model_name": align["model_name"],
+        "device": align["device"],
+        "no_speech_threshold": align["no_speech_threshold"],
+        "whisper_retry": align["whisper_retry"],
+        "align_strategy": align["align_strategy"],
+        "gemini_model": align["gemini_model"],
+        "google_audio_consent": align["google_audio_consent"],
+        "audio_consent_receipt": consent_receipt,
         "vocal_duration": vocal_length,
     }
 
@@ -286,6 +329,9 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
         "language": "vi",
         "model_name": "small",
         "device": "cpu",
+        "align_strategy": "whisper",
+        "gemini_model": DEFAULT_GEMINI_MODEL,
+        "google_audio_consent": False,
         "vocal_duration": vocal_length,
         "timing_path": str(timing),
     }
@@ -379,13 +425,15 @@ def open_project_file(path_text: str) -> tuple[dict, list[dict], dict]:
     return prepared, lines, project
 
 
-def whisper_options(payload: dict) -> dict:
+def whisper_options(payload: dict, *, strict: bool = True) -> dict:
     model_name = str(payload.get("model_name") or "small").strip() or "small"
     device = str(payload.get("device") or "cpu").strip() or "cpu"
     if device not in {"cpu", "mps"}:
         device = "cpu"
     if model_name not in WHISPER_MODELS:
-        raise JobError("Model Whisper không hợp lệ.")
+        if strict:
+            raise JobError("Model Whisper không hợp lệ.")
+        model_name = "small"
     raw_threshold = payload.get("no_speech_threshold")
     if raw_threshold is None or raw_threshold == "":
         no_speech_threshold = None
@@ -393,9 +441,13 @@ def whisper_options(payload: dict) -> dict:
         try:
             no_speech_threshold = float(raw_threshold)
         except (TypeError, ValueError) as error:
-            raise JobError("Ngưỡng không-lời phải là số từ 0 đến 1, hoặc để trống.") from error
-        if not 0 <= no_speech_threshold <= 1:
-            raise JobError("Ngưỡng không-lời phải từ 0 đến 1.")
+            if strict:
+                raise JobError("Ngưỡng không-lời phải là số từ 0 đến 1, hoặc để trống.") from error
+            no_speech_threshold = None
+        if no_speech_threshold is not None and not 0 <= no_speech_threshold <= 1:
+            if strict:
+                raise JobError("Ngưỡng không-lời phải từ 0 đến 1.")
+            no_speech_threshold = None
     retry = payload.get("whisper_retry", True)
     if isinstance(retry, str):
         whisper_retry = retry.strip().lower() not in {"0", "false", "no"}
@@ -409,8 +461,54 @@ def whisper_options(payload: dict) -> dict:
     }
 
 
+def align_options(payload: dict, *, strict: bool = True) -> dict:
+    result = whisper_options(payload, strict=strict)
+    strategy = str(payload.get("align_strategy") or "whisper").strip().lower() or "whisper"
+    if strategy not in ALIGN_STRATEGIES:
+        if strict:
+            raise JobError("Chiến lược căn lời không hợp lệ.")
+        strategy = "whisper"
+    gemini_model = str(payload.get("gemini_model") or DEFAULT_GEMINI_MODEL).strip()
+    if gemini_model not in GEMINI_AUDIO_MODELS:
+        if strict:
+            raise JobError("Model Gemini cho audio không hợp lệ.")
+        gemini_model = DEFAULT_GEMINI_MODEL
+    consent = payload.get("google_audio_consent", False)
+    if isinstance(consent, str):
+        consent = consent.strip().lower() not in {"0", "false", "no", ""}
+    else:
+        consent = bool(consent)
+    result.update(
+        {
+            "align_strategy": strategy,
+            "gemini_model": gemini_model,
+            "google_audio_consent": consent,
+        }
+    )
+    return result
+
+
 def align_job(prepared: dict, log) -> list[dict]:
     try:
+        strategy = str(prepared.get("align_strategy") or "whisper").strip().lower()
+        if strategy == "gemini_lines":
+            if not prepared.get("google_audio_consent"):
+                log("Chưa đồng ý gửi audio lên Gemini; dùng Whisper fallback.")
+            else:
+                try:
+                    return align_with_gemini_lines(
+                        Path(prepared["vocal_audio"]),
+                        prepared["lyrics"],
+                        prepared["language"],
+                        prepared["model_name"],
+                        prepared["device"],
+                        log,
+                        no_speech_threshold=prepared.get("no_speech_threshold"),
+                        whisper_retry=prepared.get("whisper_retry", True),
+                        gemini_model=prepared.get("gemini_model") or DEFAULT_GEMINI_MODEL,
+                    )
+                except Exception as error:
+                    log(f"Approach B lỗi ({error}); dùng Whisper fallback.")
         return align_lyrics(
             Path(prepared["vocal_audio"]),
             prepared["lyrics"],

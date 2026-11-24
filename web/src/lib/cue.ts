@@ -12,8 +12,16 @@ export type TimedLine = {
   text: string;
   start: number;
   end: number;
+  kind?: "lyric" | "nlv";
+  label?: string;
+  status?: string;
+  reference_index?: number;
+  heard_text?: string;
+  confidence?: number;
+  occurrence?: number;
   uncertain?: boolean;
   supplemented?: boolean;
+  repeated?: boolean;
   words: TimedWord[];
 };
 

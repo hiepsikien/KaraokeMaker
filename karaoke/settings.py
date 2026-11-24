@@ -24,16 +24,22 @@ except ImportError:  # pragma: no cover - macOS/Linux
     msvcrt = None
 
 from karaoke.cache import data_root
+from karaoke.gemini_models import AUDIO_MODELS as GEMINI_AUDIO_MODELS, DEFAULT_GEMINI_MODEL
 
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
     "gemini_consent": False,
     "gemini_api_key": "",
+    "google_audio_consent": False,
+    "align_strategy": "whisper",
+    "gemini_model": DEFAULT_GEMINI_MODEL,
     "device": "cpu",
     "model_name": "small",
     "output_dir": "",
 }
 DEVICES = frozenset({"cpu", "mps"})
+ALIGN_STRATEGIES = frozenset({"whisper", "gemini_lines"})
+
 _LOCK = threading.Lock()
 
 
@@ -77,6 +83,15 @@ def _clean(payload: object) -> dict:
     api_key = data.get("gemini_api_key", result["gemini_api_key"])
     if isinstance(api_key, str):
         result["gemini_api_key"] = api_key.strip()
+    audio_consent = data.get("google_audio_consent", result["google_audio_consent"])
+    if isinstance(audio_consent, bool):
+        result["google_audio_consent"] = audio_consent
+    strategy = data.get("align_strategy", result["align_strategy"])
+    if isinstance(strategy, str) and strategy.strip() in ALIGN_STRATEGIES:
+        result["align_strategy"] = strategy.strip()
+    gemini_model = data.get("gemini_model", result["gemini_model"])
+    if isinstance(gemini_model, str) and gemini_model.strip() in GEMINI_AUDIO_MODELS:
+        result["gemini_model"] = gemini_model.strip()
     device = data.get("device", result["device"])
     if isinstance(device, str) and device.strip() in DEVICES:
         result["device"] = device.strip()

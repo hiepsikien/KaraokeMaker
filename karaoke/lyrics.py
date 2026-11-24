@@ -5,13 +5,15 @@ import unicodedata
 
 
 def extract_sung_lines(lyrics: str) -> list[str]:
-    """Giữ các câu hát. Bỏ dòng trống và dòng ghi chú nằm trọn trong [ngoặc]."""
+    """Giữ các câu hát. Bỏ dòng trống, tag [..] và dòng ghi chú trọn trong (..)."""
     sung: list[str] = []
     for raw in lyrics.splitlines():
-        line = " ".join(raw.strip().split())
+        # [Intro], [Male], [Female], [Chorus]... có thể nằm giữa dòng.
+        line = re.sub(r"\[[^\]]*\]", " ", raw)
+        line = " ".join(line.split())
         if not line:
             continue
-        if line.startswith("[") and line.endswith("]"):
+        if line.startswith("(") and line.endswith(")"):
             continue
         sung.append(line)
     return sung

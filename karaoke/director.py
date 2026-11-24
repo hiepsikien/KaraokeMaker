@@ -28,10 +28,11 @@ import requests
 from PIL import Image, ImageOps
 
 from karaoke.cache import cache_root, prune
+from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.presentation import normalize_plan_objects
 from karaoke.profiles import normalize_profile_id
 
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODEL = DEFAULT_GEMINI_MODEL
 INTENT_MODEL = "gemini-3.1-flash-lite"
 # Models the server is willing to call. A client-supplied value is ignored
 # unless it is on this list, so it can never be interpolated into the URL.

@@ -18,6 +18,9 @@ export type AppSettings = {
   gemini_api_key_set: boolean;
   gemini_api_key?: string;
   clear_gemini_api_key?: boolean;
+  google_audio_consent: boolean;
+  align_strategy: "whisper" | "gemini_lines";
+  gemini_model: string;
   device: string;
   model_name: string;
   output_dir: string;
@@ -26,6 +29,9 @@ export type AppSettings = {
 export const DEFAULT_SETTINGS: AppSettings = {
   gemini_consent: false,
   gemini_api_key_set: false,
+  google_audio_consent: false,
+  align_strategy: "whisper",
+  gemini_model: "gemini-3.8-flash",
   device: "cpu",
   model_name: "small",
   output_dir: "",

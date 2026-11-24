@@ -639,20 +639,40 @@ def safe_title(title: str) -> str:
     return name or "karaoke"
 
 
+# Line-level metadata produced by Approach B. It is not needed to render a
+# video, but losing it on save makes editor badges/status impossible and hides
+# which lines were repeats, NLV or low-confidence.
+LINE_META_KEYS = (
+    "status",
+    "confidence",
+    "text_similarity",
+    "reference_index",
+    "kind",
+    "label",
+    "repeated",
+    "occurrence",
+    "heard_text",
+    "uncertain",
+    "supplemented",
+)
+
+
 def write_timing(path: Path, lines: list[dict]) -> None:
     payload = []
     for line in lines:
-        payload.append(
-            {
-                "text": line["text"],
-                "start": line["start"],
-                "end": line["end"],
-                "words": [
-                    {"text": word["text"], "start": word["start"], "end": word["end"]}
-                    for word in line["words"]
-                ],
-            }
-        )
+        item = {
+            "text": line["text"],
+            "start": line["start"],
+            "end": line["end"],
+            "words": [
+                {"text": word["text"], "start": word["start"], "end": word["end"]}
+                for word in line["words"]
+            ],
+        }
+        for key in LINE_META_KEYS:
+            if key in line and line[key] is not None:
+                item[key] = line[key]
+        payload.append(item)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

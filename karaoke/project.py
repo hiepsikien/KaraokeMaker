@@ -8,6 +8,7 @@ from typing import Any
 
 from karaoke.access import AccessError, ensure_allowed, grant
 from karaoke.errors import JobError
+from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.media import safe_title
 from karaoke.mix import default_mix_settings, parse_mix_settings
 from karaoke.presentation import (
@@ -145,6 +146,10 @@ def empty_project() -> dict:
         "device": "cpu",
         "no_speech_threshold": None,
         "whisper_retry": True,
+        "align_strategy": "whisper",
+        "gemini_model": DEFAULT_GEMINI_MODEL,
+        "google_audio_consent": False,
+        "audio_consent_receipt": None,
         "lines": [],
         "outputs": None,
         "restore": {
@@ -196,9 +201,13 @@ def project_from_fields(payload: dict, *, lines: list[dict] | None = None, statu
     except (TypeError, ValueError) as error:
         raise JobError("Thời lượng phải là số giây.") from error
     project["language"] = str(payload.get("language") or "vi").strip() or "vi"
-    from karaoke.pipeline import whisper_options
+    from karaoke.pipeline import align_options
 
-    project.update(whisper_options(payload))
+    # Saving/loading must never fail because an older project stores a model
+    # that is no longer allowed. New job requests still validate strictly.
+    project.update(align_options(payload, strict=False))
+    receipt = payload.get("audio_consent_receipt")
+    project["audio_consent_receipt"] = dict(receipt) if isinstance(receipt, dict) else None
     if status not in STATUSES:
         raise JobError("Trạng thái dự án không hợp lệ.")
     project["status"] = status
@@ -246,6 +255,14 @@ def public_project(project: dict, path: Path | None = None) -> dict:
         "device": project.get("device") or "cpu",
         "no_speech_threshold": project.get("no_speech_threshold"),
         "whisper_retry": bool(project.get("whisper_retry", True)),
+        "align_strategy": project.get("align_strategy") or "whisper",
+        "gemini_model": project.get("gemini_model") or DEFAULT_GEMINI_MODEL,
+        "google_audio_consent": bool(project.get("google_audio_consent", False)),
+        "audio_consent_receipt": (
+            dict(project["audio_consent_receipt"])
+            if isinstance(project.get("audio_consent_receipt"), dict)
+            else None
+        ),
         "lines": list(project.get("lines") or []),
         "outputs": project.get("outputs"),
         "restore": restore_from_payload(project),
@@ -435,6 +452,14 @@ def prepared_from_project(project: dict) -> dict:
         "device": project.get("device") or "cpu",
         "no_speech_threshold": project.get("no_speech_threshold"),
         "whisper_retry": bool(project.get("whisper_retry", True)),
+        "align_strategy": project.get("align_strategy") or "whisper",
+        "gemini_model": project.get("gemini_model") or DEFAULT_GEMINI_MODEL,
+        "google_audio_consent": bool(project.get("google_audio_consent", False)),
+        "audio_consent_receipt": (
+            dict(project["audio_consent_receipt"])
+            if isinstance(project.get("audio_consent_receipt"), dict)
+            else None
+        ),
         "project_path": str(project.get("path") or ""),
         "timing_path": str(project.get("timing_path") or ""),
         "restore": restore_from_payload(project),

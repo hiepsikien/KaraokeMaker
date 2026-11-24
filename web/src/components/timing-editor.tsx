@@ -884,7 +884,11 @@ export function TimingEditor({
                       <span className={`min-w-0 flex-1 truncate text-sm ${active ? "text-[var(--paper)]" : "text-[var(--muted)]"}`}>
                         {line.text || "(chưa có chữ)"}
                       </span>
-                      {line.supplemented ? (
+                      {line.kind === "nlv" ? (
+                        <Badge tone="info">{line.label === "chant" ? "hò" : "ad-lib"}</Badge>
+                      ) : line.repeated ? (
+                        <Badge tone="gold">lặp</Badge>
+                      ) : line.supplemented ? (
                         <Badge tone="info">bổ sung</Badge>
                       ) : line.uncertain ? (
                         <Badge tone="gold">ước lượng</Badge>

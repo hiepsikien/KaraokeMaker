@@ -50,6 +50,7 @@ from karaoke.background import (
     cleanup_pictures,
 )
 from karaoke.director import DirectorError, analyze_scene, build_fit_transform
+from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.lyrics import display_name_from_stem, song_key_from_stem
 from karaoke.media import COVER_RENDER_VERSION, IMAGE_SUFFIXES, find_original, find_stems, inspect_image, safe_title, sibling_stem
 from karaoke.mix import normalize_mix_format, parse_mix_settings, render_mix
@@ -59,6 +60,7 @@ from karaoke.studio import StudioError, cache_path, is_preview_id, render_previe
 from karaoke.pipeline import (
     JobError,
     align_job,
+    audio_consent_receipt,
     export_gaps,
     open_project_file,
     open_saved,
@@ -66,7 +68,7 @@ from karaoke.pipeline import (
     render_job,
     save_timing_file,
     timing_path_for,
-    whisper_options,
+    align_options,
 )
 from karaoke.profiles import get_profile, normalize_profile_id
 from karaoke.project import (
@@ -178,6 +180,9 @@ class ProjectFieldsRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
+    align_strategy: str = "whisper"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
+    google_audio_consent: bool = False
     project_path: str = ""
 
 
@@ -186,6 +191,9 @@ class AlignRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
+    align_strategy: str = "whisper"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
+    google_audio_consent: bool = False
 
 
 CreateJobRequest = ProjectFieldsRequest
@@ -261,6 +269,9 @@ class SettingsRequest(BaseModel):
     gemini_consent: bool | None = None
     gemini_api_key: str | None = None
     clear_gemini_api_key: bool = False
+    google_audio_consent: bool | None = None
+    align_strategy: str | None = None
+    gemini_model: str | None = None
     device: str | None = None
     model_name: str | None = None
     output_dir: str | None = None
@@ -1802,9 +1813,9 @@ def job_audio(job_id: str):
 
 @app.post("/api/jobs/{job_id}/realign")
 def realign_job(job_id: str, body: AlignRequest):
-    """Run Whisper alignment again and replace the timing currently being edited."""
+    """Run alignment again and replace the timing currently being edited."""
     try:
-        options = whisper_options(body.model_dump())
+        options = align_options(body.model_dump())
     except JobError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     with _lock:
@@ -1820,9 +1831,23 @@ def realign_job(job_id: str, body: AlignRequest):
         record["status"] = "running"
         record["started"] = time.time()
         record["error"] = ""
+        if options.get("align_strategy") == "gemini_lines":
+            source = f"Gemini line-level ({options.get('gemini_model')}) + Whisper word-level"
+        else:
+            source = f"Whisper {options['model_name']} trên {options['device']}"
         record["log"].append(
-            f"Ghép chữ lại bằng {options['model_name']} trên {options['device']}. Timing đang sửa sẽ được thay khi nghe xong."
+            f"Ghép chữ lại bằng {source}. Timing đang sửa sẽ được thay khi nghe xong."
         )
+
+    if prepared.get("align_strategy") == "gemini_lines" and prepared.get("google_audio_consent"):
+        try:
+            prepared["audio_consent_receipt"] = audio_consent_receipt(
+                Path(prepared["vocal_audio"]), str(prepared.get("gemini_model") or "")
+            )
+        except (OSError, KeyError):
+            prepared["audio_consent_receipt"] = None
+    else:
+        prepared["audio_consent_receipt"] = None
 
     def log(message: str) -> None:
         with _lock:

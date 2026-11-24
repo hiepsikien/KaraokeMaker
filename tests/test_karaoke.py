@@ -5,6 +5,7 @@ import struct
 import tempfile
 import unittest
 import wave
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,6 +57,17 @@ class LyricsTests(unittest.TestCase):
     def test_skips_blank_lines_and_stage_directions(self):
         lyrics = "\n[Intro]\n[Tiếng trống]\n\nMười tám con người\n"
         self.assertEqual(extract_sung_lines(lyrics), ["Mười tám con người"])
+
+    def test_skips_parenthetical_stage_directions(self):
+        lyrics = "(Smooth jazz vibe)\nBên bến Bình Than\n(Playful swing)\n"
+        self.assertEqual(extract_sung_lines(lyrics), ["Bên bến Bình Than"])
+
+    def test_strips_inline_bracket_tags(self):
+        lyrics = "[Verse]\n[Male] Bên bến Bình Than\n[Female] Thuyền rồng [Harmony]\n"
+        self.assertEqual(
+            extract_sung_lines(lyrics),
+            ["Bên bến Bình Than", "Thuyền rồng"],
+        )
 
 
 class RepairTests(unittest.TestCase):
@@ -550,6 +562,74 @@ class EditedLinesTests(unittest.TestCase):
             {"text": "trước", "words": [{"text": "trước", "start": 10, "end": 10.5}]},
         ]
         self.assertEqual([line["text"] for line in normalize_edited_lines(lines)], ["trước", "sau"])
+
+    def test_removes_bracket_tags_from_saved_words(self):
+        lines = [
+            {
+                "text": "[Male] Dẫu phương Bắc",
+                "words": [
+                    {"text": "[Male]", "start": 107.16, "end": 107.46},
+                    {"text": "Dẫu", "start": 107.46, "end": 107.9},
+                    {"text": "phương", "start": 107.9, "end": 108.4},
+                    {"text": "Bắc", "start": 108.4, "end": 108.9},
+                ],
+            }
+        ]
+        cleaned = normalize_edited_lines(lines)
+        self.assertEqual(cleaned[0]["text"], "Dẫu phương Bắc")
+        self.assertEqual(cleaned[0]["start"], 107.46)
+
+    def test_keeps_alignment_metadata(self):
+        lines = [
+            {
+                "text": "dòng",
+                "status": "matched",
+                "confidence": 0.82,
+                "text_similarity": 0.9,
+                "reference_index": 3,
+                "kind": "nlv",
+                "label": "chant",
+                "repeated": True,
+                "occurrence": 1,
+                "heard_text": "nghe được",
+                "words": [{"text": "dòng", "start": 1.0, "end": 2.0}],
+            }
+        ]
+        cleaned = normalize_edited_lines(lines)[0]
+        for key, value in {
+            "status": "matched",
+            "confidence": 0.82,
+            "text_similarity": 0.9,
+            "reference_index": 3,
+            "kind": "nlv",
+            "label": "chant",
+            "repeated": True,
+            "occurrence": 1,
+            "heard_text": "nghe được",
+        }.items():
+            self.assertEqual(cleaned[key], value)
+
+    def test_timing_file_keeps_alignment_metadata(self):
+        lines = [
+            {
+                "text": "dòng",
+                "status": "matched",
+                "confidence": 0.82,
+                "reference_index": 3,
+                "kind": "nlv",
+                "label": "chant",
+                "words": [{"text": "dòng", "start": 1.0, "end": 2.0}],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            grant(Path(folder))
+            path = save_timing_file(Path(folder) / "timing.json", lines)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload[0]["status"], "matched")
+        self.assertEqual(payload[0]["confidence"], 0.82)
+        self.assertEqual(payload[0]["reference_index"], 3)
+        self.assertEqual(payload[0]["kind"], "nlv")
+        self.assertEqual(payload[0]["label"], "chant")
 
 
 class AccessTests(unittest.TestCase):
