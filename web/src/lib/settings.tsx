@@ -21,6 +21,10 @@ export type AppSettings = {
   google_audio_consent: boolean;
   align_strategy: "whisper" | "gemini_lines";
   gemini_model: string;
+  whisper_engine: "auto" | "mlx" | "stable";
+  whisper_vad: "off" | "rms" | "silero";
+  gemini_chunk_workers: number;
+  align_parallel: boolean;
   device: string;
   model_name: string;
   output_dir: string;
@@ -30,8 +34,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gemini_consent: false,
   gemini_api_key_set: false,
   google_audio_consent: false,
-  align_strategy: "whisper",
+  align_strategy: "gemini_lines",
   gemini_model: "gemini-3.8-flash",
+  whisper_engine: "auto",
+  whisper_vad: "off",
+  gemini_chunk_workers: 3,
+  align_parallel: true,
   device: "cpu",
   model_name: "small",
   output_dir: "",

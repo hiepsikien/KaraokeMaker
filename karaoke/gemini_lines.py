@@ -14,13 +14,16 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from karaoke.align import _vocal_rms
 from karaoke.cache import cache_root
 from karaoke.director import (
     DirectorError,
+    GeminiHTTPError,
     _api_key,
     _extract_payload,
     _post_generate,
@@ -61,7 +64,56 @@ _LINE_SCHEMA = {
 
 
 class GeminiLineError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, transient: bool = False, config: bool = False):
+        super().__init__(message)
+        self.transient = transient
+        self.config = config
+
+
+class GeminiBudget:
+    """Shared call budget for one Gemini line request (or one chunk)."""
+
+    def __init__(self, calls: int = 4):
+        self.left = max(0, int(calls))
+
+    def take(self) -> bool:
+        if self.left <= 0:
+            return False
+        self.left -= 1
+        return True
+
+
+def _retry_after_seconds(attempt: int) -> float:
+    base = 2.0 * (2 ** max(0, attempt - 1))
+    return min(8.0, base)
+
+
+def _post_generate_retry(
+    model: str,
+    payload: dict,
+    api_key: str,
+    *,
+    budget: GeminiBudget,
+    log=None,
+    timeout: int = 180,
+) -> dict:
+    """Call Gemini with 429/5xx retries, sharing the caller's budget."""
+    attempt = 0
+    while budget.take():
+        attempt += 1
+        try:
+            return _post_generate(model, payload, api_key, timeout=timeout)
+        except GeminiHTTPError as error:
+            if not error.transient or budget.left <= 0:
+                raise
+            raw_wait = float(
+                getattr(error, "retry_after", None) or _retry_after_seconds(attempt)
+            )
+            wait = min(30.0, max(0.0, raw_wait))
+            if log is not None:
+                log(f"Gemini tạm lỗi ({error}); thử lại sau {wait:.0f}s.")
+            time.sleep(wait)
+    raise GeminiLineError("Gemini đã hết lượt thử cho đoạn này.")
 
 
 def _prompt(lyrics: str, start: float, end: float) -> str:
@@ -283,6 +335,7 @@ def plan_chunks(
     max_seconds: float = 90.0,
     min_seconds: float = 30.0,
     min_silence: float = 0.8,
+    levels_hop: tuple[list[float], float] | None = None,
 ) -> list[tuple[float, float]]:
     """Split at long vocal rests; fall back to fixed max-length chunks.
 
@@ -295,10 +348,13 @@ def plan_chunks(
         return []
     if total <= max_seconds:
         return [(0.0, total)]
-    try:
-        levels, hop = _vocal_rms(vocal_path)
-    except Exception:
-        levels, hop = [], 0.03
+    if levels_hop is not None:
+        levels, hop = levels_hop
+    else:
+        try:
+            levels, hop = _vocal_rms(vocal_path)
+        except Exception:
+            levels, hop = [], 0.03
     if not levels:
         chunks: list[tuple[float, float]] = []
         start = 0.0
@@ -363,29 +419,31 @@ def transcribe_lines_chunked(
     chunk_seconds: float = 60.0,
     log=None,
     use_cache: bool = True,
-) -> list[dict]:
-    """Transcribe a long song in vocal-rest chunks.
+    workers: int = 3,
+    chunks: list[tuple[float, float]] | None = None,
+) -> tuple[list[dict], list[tuple[int, str]]]:
+    """Transcribe a long song in vocal-rest chunks, up to `workers` at once.
 
-    Convert to 16-bit PCM once, then reuse that file for every chunk. A failed
-    chunk is reported instead of silently returning a partial transcript, so the
-    caller can fall back to Whisper-only (A) rather than publish missing lines.
+    Returns ``(lines, failures)``. A failed chunk does not discard the good
+    chunks; the caller checks regional coverage and decides on fallback A.
     """
     try:
         with pcm16_wav(Path(vocal_path)) as wav_path:
-            chunks = plan_chunks(
-                wav_path,
-                target_seconds=chunk_seconds,
-                max_seconds=max(chunk_seconds * 1.35, chunk_seconds + 20),
-            )
+            if chunks is None:
+                chunks = plan_chunks(
+                    wav_path,
+                    target_seconds=chunk_seconds,
+                    max_seconds=max(chunk_seconds * 1.35, chunk_seconds + 20),
+                )
             if not chunks:
                 chunks = [(0.0, probe_duration(wav_path))]
-            lines: list[dict] = []
-            failures: list[str] = []
-            for index, (start, end) in enumerate(chunks, start=1):
-                if log is not None:
-                    log(f"Gemini chunk {index}/{len(chunks)}: {start:.1f}s–{end:.1f}s.")
+            results: list[list[dict] | None] = [None] * len(chunks)
+            failures: list[tuple[int, str]] = []
+
+            def run(index: int, start: float, end: float) -> None:
+                budget = GeminiBudget(4)
                 try:
-                    chunk = transcribe_lines(
+                    results[index] = transcribe_lines(
                         wav_path,
                         lyrics,
                         language=language,
@@ -394,21 +452,56 @@ def transcribe_lines_chunked(
                         end=end,
                         use_cache=use_cache,
                         log=None,
+                        budget=budget,
                     )
+                    return
                 except GeminiLineError as error:
-                    failures.append(f"{start:.0f}–{end:.0f}s: {error}")
+                    first_error = str(error)
+                # One fresh rerun of the same chunk, still within the budget.
+                try:
+                    if budget.left > 0:
+                        results[index] = transcribe_lines(
+                            wav_path,
+                            lyrics,
+                            language=language,
+                            model=model,
+                            start=start,
+                            end=end,
+                            use_cache=False,
+                            log=None,
+                            budget=budget,
+                        )
+                        return
+                except GeminiLineError as error:
+                    first_error = str(error)
+                failures.append((index, first_error))
+
+            worker_count = max(1, min(int(workers or 1), len(chunks)))
+            if log is not None and worker_count > 1:
+                log(
+                    f"Gemini chunk song song: {worker_count} worker, "
+                    f"{len(chunks)} đoạn."
+                )
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                futures = {
+                    pool.submit(run, index, start, end): index
+                    for index, (start, end) in enumerate(chunks)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        future.result()
+                    except Exception as error:  # defensive: never orphan a worker
+                        failures.append((index, str(error)))
                     if log is not None:
-                        log(f"Gemini chunk {index} lỗi: {error}")
-                    continue
-                lines.extend(chunk)
+                        start, end = chunks[index]
+                        status = "lỗi" if any(i == index for i, _ in failures) else "xong"
+                        log(f"Gemini chunk {index + 1}/{len(chunks)} {status} "
+                            f"({start:.1f}s–{end:.1f}s).")
     except MediaError as error:
         raise GeminiLineError(str(error)) from error
-    if failures:
-        detail = "; ".join(failures[:3])
-        raise GeminiLineError(
-            f"Gemini lỗi {len(failures)}/{len(chunks)} đoạn ({detail})."
-        )
-    return _dedupe_lines(lines)
+    lines = [line for part in results if part for line in part]
+    return _dedupe_lines(lines), failures
 
 
 def transcribe_lines(
@@ -422,8 +515,10 @@ def transcribe_lines(
     log=None,
     use_cache: bool = True,
     generate=None,
+    budget: GeminiBudget | None = None,
 ) -> list[dict]:
     """Return Gemini line-level transcript, with absolute timestamps."""
+    budget = budget or GeminiBudget(4)
     if model not in ALLOWED_AUDIO_MODELS:
         raise GeminiLineError(f"Model Gemini không được phép dùng cho audio: {model}")
     try:
@@ -467,8 +562,17 @@ def transcribe_lines(
 
     def request(body: dict) -> dict:
         if generate is None:
-            raw_response = _post_generate(model, body, _api_key(), timeout=180)
+            raw_response = _post_generate_retry(
+                model,
+                body,
+                _api_key(),
+                budget=budget,
+                log=log,
+                timeout=180,
+            )
         else:
+            if not budget.take():
+                raise GeminiLineError("Gemini đã hết lượt thử cho đoạn này.")
             raw_response = generate(model, body, _api_key())
         return _extract_payload(raw_response, "align_lines")
 
@@ -486,7 +590,13 @@ def transcribe_lines(
             }
             parsed = request({**payload, "contents": [{"role": "user", "parts": parts}]})
     except DirectorError as error:
-        raise GeminiLineError(str(error)) from error
+        transient = bool(getattr(error, "transient", False))
+        # A non-HTTP DirectorError (missing key, safety block, no candidate)
+        # is not fixed by retrying chunks; fallback A instead.
+        config = not isinstance(error, GeminiHTTPError) or not transient
+        raise GeminiLineError(
+            str(error), transient=transient, config=config
+        ) from error
     if _timestamps_out_of_clip(parsed, clip_end):
         raise GeminiLineError("Gemini trả mốc ngoài độ dài đoạn audio.")
     if use_cache:

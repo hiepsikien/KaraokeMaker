@@ -1,15 +1,21 @@
 import math
+import os
 import struct
 import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from karaoke.approach_b import align_with_gemini_lines
+from karaoke.approach_b import (
+    _needs_chunk,
+    _region_has_missing_lyrics,
+    align_with_gemini_lines,
+)
 from karaoke.errors import JobError
+from karaoke.align import WhisperFailed
 from karaoke.gemini_lines import GeminiLineError
-from karaoke.pipeline import align_job, align_options
+from karaoke.pipeline import align_job, align_options, apply_env_overrides
 
 
 def tone(path: Path, spans: list[tuple[float, float]], seconds: float = 7.0) -> None:
@@ -135,6 +141,94 @@ class ApproachBTests(unittest.TestCase):
         self.assertFalse(chunked.called)
         self.assertEqual([line["text"] for line in lines], ["một", "ba"])
 
+    def test_whisper_load_falls_back_to_cpu(self):
+        from types import SimpleNamespace
+
+        from karaoke import align as align_module
+
+        calls: list[str] = []
+        fake_model = Mock()
+        fake_model.transcribe.return_value = SimpleNamespace(segments=[])
+
+        def loader(_name, device, _engine, _log):
+            calls.append(device)
+            if device != "cpu":
+                raise RuntimeError("mps load failed")
+            return fake_model, "stable"
+
+        with patch.object(align_module, "load_whisper_model", side_effect=loader), patch.object(
+            align_module, "_log_model_cache"
+        ), patch.object(align_module, "_allow_mps_alignment"):
+            result = align_module.transcribe_whisper(
+                Path("vocal.wav"), "vi", "small", "mps", lambda message: None
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(calls, ["mps", "cpu"])
+
+    def test_mlx_transcribe_failure_falls_back_to_stable_cpu(self):
+        from types import SimpleNamespace
+
+        from karaoke import align as align_module
+
+        calls: list[tuple[str, str]] = []
+        bad_model = Mock()
+        bad_model.transcribe.side_effect = RuntimeError("mlx failed")
+        good_model = Mock()
+        good_model.transcribe.return_value = SimpleNamespace(segments=[])
+
+        def loader(_name, device, engine, _log):
+            calls.append((device, engine))
+            if engine == "mlx":
+                return bad_model, "mlx"
+            if device != "cpu":
+                raise RuntimeError("stable mps failed")
+            return good_model, "stable"
+
+        with patch.object(align_module, "load_whisper_model", side_effect=loader), patch.object(
+            align_module, "_log_model_cache"
+        ), patch.object(align_module, "_allow_mps_alignment"):
+            result = align_module.transcribe_whisper(
+                Path("vocal.wav"),
+                "vi",
+                "small",
+                "mps",
+                lambda message: None,
+                engine="mlx",
+            )
+        self.assertEqual(result, [])
+        self.assertEqual(
+            calls, [("mps", "mlx"), ("mps", "stable"), ("cpu", "stable")]
+        )
+
+    def test_clip_for_whisper_rejects_fragmented_or_mostly_voiced(self):
+        from karaoke.voiced import clip_for_whisper
+
+        self.assertIsNone(
+            clip_for_whisper([(i, i + 1.0) for i in range(0, 13)], 30.0)
+        )
+        self.assertIsNone(clip_for_whisper([(0.0, 29.0)], 30.0))
+        clip = clip_for_whisper([(0.0, 5.0), (20.0, 25.0)], 30.0)
+        self.assertEqual(clip, [0.0, 5.0, 20.0, 25.0])
+
+    def test_needs_chunk_and_region_missing(self):
+        words = [
+            {"text": "a", "start": 1.0, "end": 1.5},
+            {"text": "b", "start": 2.0, "end": 2.5},
+            {"text": "c", "start": 3.0, "end": 3.5},
+        ]
+        self.assertTrue(_needs_chunk([], words, ["a", "b", "c"], 10.0))
+        self.assertFalse(
+            _needs_chunk([{"start": 0.0, "end": 9.0}], words, ["a", "b", "c"], 10.0)
+        )
+        self.assertTrue(
+            _region_has_missing_lyrics(0.0, 5.0, words, [], [100.0] * 100, 0.1)
+        )
+        self.assertFalse(
+            _region_has_missing_lyrics(
+                0.0, 5.0, words, [{"start": 0.0, "end": 5.0}], [100.0] * 100, 0.1
+            )
+        )
+
     def test_gemini_failure_falls_back_to_whisper(self):
         with tempfile.TemporaryDirectory() as folder:
             vocal = Path(folder) / "vocal.wav"
@@ -142,6 +236,9 @@ class ApproachBTests(unittest.TestCase):
             segments = [{"words": words([("Màn", 0.5, 0.9), ("sương", 0.9, 1.4), ("buông", 1.4, 2.0)])}]
             with patch("karaoke.approach_b.transcribe_whisper", return_value=segments), patch(
                 "karaoke.approach_b.transcribe_lines", side_effect=GeminiLineError("429")
+            ), patch(
+                "karaoke.approach_b.transcribe_lines_chunked",
+                side_effect=GeminiLineError("429"),
             ):
                 lines = align_with_gemini_lines(
                     vocal,
@@ -256,6 +353,39 @@ class AlignStrategyTests(unittest.TestCase):
         self.assertEqual(options["align_strategy"], "gemini_lines")
         self.assertTrue(options["google_audio_consent"])
 
+    def test_default_strategy_is_gemini_lines(self):
+        from karaoke.project import empty_project
+
+        self.assertEqual(align_options({})["align_strategy"], "gemini_lines")
+        self.assertEqual(empty_project()["align_strategy"], "gemini_lines")
+
+    def test_env_overrides_do_not_persist_in_project(self):
+        from karaoke.project import project_from_fields
+
+        with patch.dict(
+            os.environ,
+            {"KARAOKE_WHISPER_ENGINE": "stable", "KARAOKE_GEMINI_WORKERS": "1"},
+        ):
+            project = project_from_fields(
+                {
+                    "title": "t",
+                    "artist": "a",
+                    "whisper_engine": "mlx",
+                    "gemini_chunk_workers": 3,
+                }
+            )
+            self.assertEqual(project["whisper_engine"], "mlx")
+            self.assertEqual(project["gemini_chunk_workers"], 3)
+            runtime = apply_env_overrides(project)
+            self.assertEqual(runtime["whisper_engine"], "stable")
+            self.assertEqual(runtime["gemini_chunk_workers"], 1)
+
+    def test_align_parallel_none_defaults_true(self):
+        self.assertTrue(align_options({"align_parallel": None})["align_parallel"])
+
+    def test_explicit_whisper_strategy_is_kept(self):
+        self.assertEqual(align_options({"align_strategy": "whisper"})["align_strategy"], "whisper")
+
     def test_rejects_unknown_strategy(self):
         with self.assertRaises(JobError):
             align_options({"align_strategy": "magic"})
@@ -314,6 +444,26 @@ class AlignStrategyTests(unittest.TestCase):
             self.assertEqual(align_job(prepared, lambda message: None), [{"text": "A"}])
             self.assertFalse(gemini.called)
             self.assertTrue(whisper.called)
+
+
+    def test_whisper_failed_does_not_run_whisper_twice(self):
+        prepared = {
+            "vocal_audio": "/tmp/vocal.wav",
+            "lyrics": "một",
+            "language": "vi",
+            "model_name": "small",
+            "device": "cpu",
+            "align_strategy": "gemini_lines",
+            "gemini_model": "gemini-3.8-flash",
+            "google_audio_consent": True,
+        }
+        with patch(
+            "karaoke.pipeline.align_with_gemini_lines",
+            side_effect=WhisperFailed("load failed"),
+        ), patch("karaoke.pipeline.align_lyrics") as whisper:
+            with self.assertRaises(JobError):
+                align_job(prepared, lambda message: None)
+            self.assertFalse(whisper.called)
 
 
 if __name__ == "__main__":

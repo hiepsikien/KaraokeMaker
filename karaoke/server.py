@@ -180,9 +180,13 @@ class ProjectFieldsRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
-    align_strategy: str = "whisper"
+    align_strategy: str = "gemini_lines"
     gemini_model: str = DEFAULT_GEMINI_MODEL
     google_audio_consent: bool = False
+    whisper_engine: str = "auto"
+    whisper_vad: str = "off"
+    gemini_chunk_workers: int = 3
+    align_parallel: bool = True
     project_path: str = ""
 
 
@@ -191,9 +195,13 @@ class AlignRequest(BaseModel):
     device: str = "cpu"
     no_speech_threshold: float | None = None
     whisper_retry: bool = True
-    align_strategy: str = "whisper"
+    align_strategy: str = "gemini_lines"
     gemini_model: str = DEFAULT_GEMINI_MODEL
     google_audio_consent: bool = False
+    whisper_engine: str = "auto"
+    whisper_vad: str = "off"
+    gemini_chunk_workers: int = 3
+    align_parallel: bool = True
 
 
 CreateJobRequest = ProjectFieldsRequest
@@ -272,6 +280,10 @@ class SettingsRequest(BaseModel):
     google_audio_consent: bool | None = None
     align_strategy: str | None = None
     gemini_model: str | None = None
+    whisper_engine: str | None = None
+    whisper_vad: str | None = None
+    gemini_chunk_workers: int | None = None
+    align_parallel: bool | None = None
     device: str | None = None
     model_name: str | None = None
     output_dir: str | None = None
@@ -1286,6 +1298,13 @@ def project_session(body: ProjectFieldsRequest):
             "device",
             "no_speech_threshold",
             "whisper_retry",
+            "align_strategy",
+            "gemini_model",
+            "google_audio_consent",
+            "whisper_engine",
+            "whisper_vad",
+            "gemini_chunk_workers",
+            "align_parallel",
             "output_profile",
             "background_effects",
             "overlay_effects",

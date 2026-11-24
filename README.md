@@ -31,7 +31,7 @@ ffprobe -version
 cd web && npm install
 ```
 
-`requirements-karaoke.txt` gồm `stable-ts`, `torch`, Pillow, FastAPI, Uvicorn, `requests`, `python-dotenv` và `numpy`. Lần cài đầu có thể mất vài phút vì `torch` lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
+`requirements-karaoke.txt` gồm `stable-ts>=2.19.1`, `torch`, Pillow, FastAPI, Uvicorn, `requests`, `python-dotenv`, `numpy` và `mlx-whisper` (chỉ macOS Apple Silicon). Lần cài đầu có thể mất vài phút vì `torch` lớn. Nếu `ffmpeg` hoặc `ffprobe` không có trong `PATH`, cài bằng `brew install ffmpeg`.
 
 Thư mục nhạc mặc định là `~/Downloads/Audio` nếu thư mục đó tồn tại, kể cả tên có một dấu cách ở cuối. Đổi bằng:
 
@@ -162,8 +162,9 @@ Chỉ dòng thứ ba được căn giờ và hiện trên video.
 
 Căn lời dùng file vocal. Trước khi chạy, chọn chiến lược:
 
-- **Whisper** — local, mặc định; chọn model (`tiny`, `base`, `small`, `medium`, `large-v2`, `large`), thiết bị CPU/GPU Apple.
-- **Gemini line-level + Whisper word-level** — Gemini chia câu và lấy mốc câu; Whisper căn từng từ trong câu. Cần `GEMINI_API_KEY` và bật đồng ý gửi vocal + lời lên Gemini. Nếu Gemini lỗi hoặc chưa đồng ý, app tự quay lại Whisper.
+- **Gemini line-level + Whisper word-level** — mặc định; Gemini chia câu và lấy mốc câu, Whisper căn từng từ trong câu. Cần `GEMINI_API_KEY` và bật đồng ý gửi vocal + lời lên Gemini. Nếu Gemini lỗi hoặc chưa đồng ý, app tự quay lại Whisper.
+- **Whisper** — local, dự phòng; chọn model (`tiny`, `base`, `small`, `medium`, `large-v2`, `large`), thiết bị CPU/GPU Apple.
+- **Tăng tốc:** engine `Auto / MLX / Stable`; trên Apple Silicon nên để `Auto` để dùng `mlx-whisper` (nhanh hơn ~2–3 lần). VAD `RMS` chỉ nghe các đoạn có hát; mặc định tắt, bật khi bài có nhiều khoảng nghỉ.
 
 Chỗ khớp với lời đã nhập thì chữ trên video là lời đó. Đoạn hò/ad-lib không có trong lời được đánh dấu riêng; câu không đủ tin cậy có thể bỏ trống để thêm tay.
 

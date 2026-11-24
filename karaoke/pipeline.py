@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from karaoke.access import AccessError, ensure_allowed, grant, grant_project_paths
-from karaoke.align import AlignError, align_lyrics
+from karaoke.align import AlignError, WhisperFailed, align_lyrics
 from karaoke.approach_b import align_with_gemini_lines
 from karaoke.errors import JobError
 from karaoke.gemini_models import AUDIO_MODELS as GEMINI_AUDIO_MODELS, DEFAULT_GEMINI_MODEL
@@ -222,6 +223,10 @@ def prepare_job(payload: dict, log) -> dict:
         "align_strategy": align["align_strategy"],
         "gemini_model": align["gemini_model"],
         "google_audio_consent": align["google_audio_consent"],
+        "whisper_engine": align["whisper_engine"],
+        "whisper_vad": align["whisper_vad"],
+        "gemini_chunk_workers": align["gemini_chunk_workers"],
+        "align_parallel": align["align_parallel"],
         "audio_consent_receipt": consent_receipt,
         "vocal_duration": vocal_length,
     }
@@ -329,7 +334,7 @@ def open_saved(payload: dict) -> tuple[dict, list[dict]]:
         "language": "vi",
         "model_name": "small",
         "device": "cpu",
-        "align_strategy": "whisper",
+        "align_strategy": "gemini_lines",
         "gemini_model": DEFAULT_GEMINI_MODEL,
         "google_audio_consent": False,
         "vocal_duration": vocal_length,
@@ -463,11 +468,11 @@ def whisper_options(payload: dict, *, strict: bool = True) -> dict:
 
 def align_options(payload: dict, *, strict: bool = True) -> dict:
     result = whisper_options(payload, strict=strict)
-    strategy = str(payload.get("align_strategy") or "whisper").strip().lower() or "whisper"
+    strategy = str(payload.get("align_strategy") or "gemini_lines").strip().lower() or "gemini_lines"
     if strategy not in ALIGN_STRATEGIES:
         if strict:
             raise JobError("Chiến lược căn lời không hợp lệ.")
-        strategy = "whisper"
+        strategy = "gemini_lines"
     gemini_model = str(payload.get("gemini_model") or DEFAULT_GEMINI_MODEL).strip()
     if gemini_model not in GEMINI_AUDIO_MODELS:
         if strict:
@@ -478,21 +483,70 @@ def align_options(payload: dict, *, strict: bool = True) -> dict:
         consent = consent.strip().lower() not in {"0", "false", "no", ""}
     else:
         consent = bool(consent)
+    engine = str(payload.get("whisper_engine") or "auto").strip().lower()
+    if engine not in {"auto", "mlx", "stable"}:
+        engine = "auto"
+    vad = str(payload.get("whisper_vad") or "off").strip().lower()
+    if vad not in {"off", "rms", "silero"}:
+        vad = "off"
+    raw_workers = payload.get("gemini_chunk_workers") or 3
+    try:
+        workers = max(1, min(3, int(raw_workers)))
+    except (TypeError, ValueError):
+        workers = 3
+    parallel = payload.get("align_parallel", True)
+    if parallel is None:
+        parallel = True
+    if isinstance(parallel, str):
+        parallel = parallel.strip().lower() not in {"0", "false", "no", ""}
+    else:
+        parallel = bool(parallel)
     result.update(
         {
             "align_strategy": strategy,
             "gemini_model": gemini_model,
             "google_audio_consent": consent,
+            "whisper_engine": engine,
+            "whisper_vad": vad,
+            "gemini_chunk_workers": workers,
+            "align_parallel": parallel,
         }
     )
     return result
 
 
+def apply_env_overrides(prepared: dict) -> dict:
+    """Apply benchmark/runtime env overrides without persisting them in projects."""
+    runtime = dict(prepared)
+    engine = os.environ.get("KARAOKE_WHISPER_ENGINE")
+    if engine and engine.strip().lower() in {"auto", "mlx", "stable"}:
+        runtime["whisper_engine"] = engine.strip().lower()
+    vad = os.environ.get("KARAOKE_WHISPER_VAD")
+    if vad and vad.strip().lower() in {"off", "rms", "silero"}:
+        runtime["whisper_vad"] = vad.strip().lower()
+    workers = os.environ.get("KARAOKE_GEMINI_WORKERS")
+    if workers:
+        try:
+            runtime["gemini_chunk_workers"] = max(1, min(3, int(workers)))
+        except (TypeError, ValueError):
+            pass
+    parallel = os.environ.get("KARAOKE_ALIGN_PARALLEL")
+    if parallel is not None:
+        runtime["align_parallel"] = parallel.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "",
+        }
+    return runtime
+
+
 def align_job(prepared: dict, log) -> list[dict]:
     try:
-        strategy = str(prepared.get("align_strategy") or "whisper").strip().lower()
+        runtime = apply_env_overrides(prepared)
+        strategy = str(runtime.get("align_strategy") or "gemini_lines").strip().lower()
         if strategy == "gemini_lines":
-            if not prepared.get("google_audio_consent"):
+            if not runtime.get("google_audio_consent"):
                 log("Chưa đồng ý gửi audio lên Gemini; dùng Whisper fallback.")
             else:
                 try:
@@ -506,7 +560,13 @@ def align_job(prepared: dict, log) -> list[dict]:
                         no_speech_threshold=prepared.get("no_speech_threshold"),
                         whisper_retry=prepared.get("whisper_retry", True),
                         gemini_model=prepared.get("gemini_model") or DEFAULT_GEMINI_MODEL,
+                        whisper_engine=runtime.get("whisper_engine") or "auto",
+                        whisper_vad=runtime.get("whisper_vad") or "off",
+                        gemini_workers=int(runtime.get("gemini_chunk_workers") or 3),
+                        align_parallel=bool(runtime.get("align_parallel", True)),
                     )
+                except WhisperFailed:
+                    raise
                 except Exception as error:
                     log(f"Approach B lỗi ({error}); dùng Whisper fallback.")
         return align_lyrics(
@@ -518,6 +578,8 @@ def align_job(prepared: dict, log) -> list[dict]:
             log,
             no_speech_threshold=prepared.get("no_speech_threshold"),
             whisper_retry=prepared.get("whisper_retry", True),
+            engine=runtime.get("whisper_engine") or "auto",
+            whisper_vad=runtime.get("whisper_vad") or "off",
         )
     except AlignError as error:
         raise JobError(str(error)) from error

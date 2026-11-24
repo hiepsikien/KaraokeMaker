@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from karaoke.align import (
@@ -22,11 +23,18 @@ from karaoke.align import (
     reconcile_lyrics_with_transcript,
     transcribe_whisper,
 )
-from karaoke.gemini_lines import GeminiLineError, transcribe_lines, transcribe_lines_chunked
+from karaoke.gemini_lines import (
+    GeminiBudget,
+    GeminiLineError,
+    plan_chunks,
+    transcribe_lines,
+    transcribe_lines_chunked,
+)
 from karaoke.gemini_models import DEFAULT_GEMINI_MODEL
 from karaoke.line_match import match_lines
 from karaoke.lyrics import extract_sung_lines
 from karaoke.media import probe_duration
+from karaoke.voiced import clip_for_whisper, voiced_spans
 
 PAD = 0.8
 SNAP_SHIFT = 0.20
@@ -67,6 +75,62 @@ def _window_coverage(words: list[dict], lines: list[dict]) -> float:
         if any(start - 1.0 <= mid <= end + 1.0 for start, end in windows):
             covered += 1
     return covered / len(words)
+
+
+def _voice_threshold(levels: list[float]) -> float:
+    peak = max(levels) if levels else 0.0
+    return max(80.0, peak * 0.12)
+
+
+def _region_has_missing_lyrics(
+    start: float,
+    end: float,
+    whisper_words: list[dict],
+    gemini_lines: list[dict],
+    levels: list[float],
+    hop: float,
+) -> bool:
+    """True when a chunk window has singing but no Gemini line covers it."""
+    region = [word for word in whisper_words if start <= _mid(word) <= end]
+    if len(region) >= 3:
+        covered = sum(
+            1
+            for word in region
+            if any(
+                float(line["start"]) - 1.0 <= _mid(word) <= float(line["end"]) + 1.0
+                for line in gemini_lines
+            )
+        )
+        return covered / len(region) < 0.6
+    if not levels:
+        return False
+    # Whisper may miss a quiet verse; RMS is the fallback signal.
+    return _voiced_ratio(
+        levels, hop, start, end, _voice_threshold(levels)
+    ) >= 0.2
+
+
+def _needs_chunk(
+    gemini_lines: list[dict],
+    whisper_words: list[dict],
+    references: list[str],
+    duration: float,
+) -> bool:
+    if not gemini_lines:
+        return True
+    first = min(float(item["start"]) for item in gemini_lines)
+    covered = (
+        max(float(item["end"]) for item in gemini_lines) - first
+    ) / max(1.0, duration)
+    line_ratio = len(gemini_lines) / max(1, len(references))
+    late_start = bool(whisper_words) and first > whisper_words[0]["start"] + 8.0
+    word_cov = _window_coverage(whisper_words, gemini_lines)
+    return (
+        covered < 0.55
+        or (line_ratio < 0.8 and word_cov < 0.75)
+        or late_start
+        or word_cov < 0.55
+    )
 
 
 def _snap_time(moment: float, levels: list[float], hop: float, threshold: float) -> float:
@@ -262,12 +326,13 @@ def _build_from_match(
     whisper_words: list[dict],
     vocal_path: Path,
     log=None,
+    levels_hop: tuple[list[float], float] | None = None,
 ) -> list[dict]:
     def note(message: str) -> None:
         if log is not None:
             log(message)
 
-    levels, hop = _vocal_rms(vocal_path)
+    levels, hop = levels_hop if levels_hop is not None else _vocal_rms(vocal_path)
     peak = max(levels) if levels else 0.0
     threshold = max(80.0, peak * 0.12)
     used: set[int] = set()
@@ -390,68 +455,157 @@ def align_with_gemini_lines(
     gemini_start: float | None = None,
     gemini_end: float | None = None,
     use_cache: bool = True,
+    whisper_engine: str = "auto",
+    whisper_vad: str = "off",
+    gemini_workers: int = 3,
+    align_parallel: bool = True,
 ) -> list[dict]:
     """Run Approach B. Falls back to reconcile if Gemini/matching is unusable."""
     references = extract_sung_lines(lyrics)
     if not references:
         raise AlignError("Chưa có lời đã nhập để ghép chữ.")
 
-    # Whisper first: its words calibrate Gemini chunks, provide a second opinion
-    # for matching, and make the A fallback free if Gemini fails.
-    segments = transcribe_whisper(
-        vocal_path,
-        language,
-        model_name,
-        device,
-        log,
-        no_speech_threshold=no_speech_threshold,
-        whisper_retry=whisper_retry,
-    )
-    whisper_words = _words(segments)
-
     try:
-        gemini_lines = transcribe_lines(
+        duration = probe_duration(vocal_path)
+    except Exception:
+        duration = 0.0
+    try:
+        levels, hop = _vocal_rms(vocal_path)
+    except Exception:
+        levels, hop = [], 0.03
+    clip = None
+    if whisper_vad == "rms" and levels and duration > 0:
+        # Merging 1.5s gaps keeps the clip list short; long lists make
+        # mlx-whisper slower (upstream #1285). clip_for_whisper rejects
+        # fragmented/mostly-voiced songs and falls back to the full file.
+        clip = clip_for_whisper(voiced_spans(levels, hop, min_gap=1.5), duration)
+
+    def whisper_log(message: str) -> None:
+        log(f"[Whisper] {message}")
+
+    def gemini_log(message: str) -> None:
+        log(f"[Gemini] {message}")
+
+    def run_whisper():
+        return transcribe_whisper(
+            vocal_path,
+            language,
+            model_name,
+            device,
+            whisper_log,
+            no_speech_threshold=no_speech_threshold,
+            whisper_retry=whisper_retry,
+            clip_timestamps=clip,
+            engine=whisper_engine,
+            vad=whisper_vad == "silero",
+        )
+
+    def run_gemini_full():
+        return transcribe_lines(
             vocal_path,
             lyrics,
             language=language,
             model=gemini_model,
             start=gemini_start,
             end=gemini_end,
-            log=log,
+            log=gemini_log,
             use_cache=use_cache,
+            budget=GeminiBudget(4),
         )
-        if gemini_start is None and gemini_end is None and gemini_lines:
-            total = probe_duration(vocal_path)
-            first = min(float(item["start"]) for item in gemini_lines)
-            covered = (
-                max(float(item["end"]) for item in gemini_lines) - first
-            ) / max(1.0, total)
-            line_ratio = len(gemini_lines) / max(1, len(references))
-            late_start = bool(whisper_words) and first > whisper_words[0]["start"] + 8.0
-            word_cov = _window_coverage(whisper_words, gemini_lines)
-            if (
-                covered < 0.55
-                or (line_ratio < 0.8 and word_cov < 0.75)
-                or late_start
-                or word_cov < 0.55
-            ):
-                detail = (
-                    f"Gemini chỉ phủ {covered * 100:.0f}% bài, "
-                    f"{line_ratio * 100:.0f}% số câu, {word_cov * 100:.0f}% từ"
+
+    def config_error(error: Exception) -> bool:
+        return bool(getattr(error, "config", False))
+
+    segments = None
+    gemini_lines = None
+    if align_parallel and gemini_start is None and gemini_end is None:
+        executor = ThreadPoolExecutor(max_workers=2)
+        gemini_future = None
+
+        def consume(future) -> None:
+            try:
+                future.exception()
+            except Exception:
+                pass
+
+        try:
+            whisper_future = executor.submit(run_whisper)
+            gemini_future = executor.submit(run_gemini_full)
+            gemini_future.add_done_callback(consume)
+            segments = whisper_future.result()
+            try:
+                gemini_lines = gemini_future.result()
+            except GeminiLineError as error:
+                if config_error(error):
+                    log(f"Gemini full-song lỗi cấu hình ({error}); dùng Whisper fallback.")
+                    return reconcile_lyrics_with_transcript(references, segments)
+                log(f"Gemini full-song lỗi tạm thời ({error}); thử chunk.")
+                gemini_lines = None
+        finally:
+            if gemini_future is not None and not gemini_future.done():
+                gemini_future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+    else:
+        segments = run_whisper()
+        try:
+            gemini_lines = run_gemini_full()
+        except GeminiLineError as error:
+            if config_error(error):
+                log(f"Gemini full-song lỗi cấu hình ({error}); dùng Whisper fallback.")
+                return reconcile_lyrics_with_transcript(references, segments)
+            if gemini_start is not None or gemini_end is not None:
+                log(f"Gemini line pass lỗi ({error}); dùng Whisper fallback.")
+                return reconcile_lyrics_with_transcript(references, segments)
+            log(f"Gemini full-song lỗi tạm thời ({error}); thử chunk.")
+            gemini_lines = None
+
+    whisper_words = _words(segments)
+    failures: list[tuple[int, str]] = []
+    chunks: list[tuple[float, float]] = []
+    try:
+        if gemini_start is None and gemini_end is None and gemini_lines is not None:
+            if _needs_chunk(gemini_lines, whisper_words, references, duration):
+                log(
+                    "Gemini full-song chưa phủ đủ; chạy lại theo chunk."
                 )
-                if late_start:
-                    detail += f", bắt đầu trễ {first - whisper_words[0]['start']:.0f}s"
-                log(f"{detail}; chạy lại theo chunk.")
-                gemini_lines = transcribe_lines_chunked(
-                    vocal_path,
-                    lyrics,
-                    language=language,
-                    model=gemini_model,
-                    log=log,
-                    use_cache=use_cache,
-                )
+                gemini_lines = None
+
+        if gemini_lines is None:
+            chunks = plan_chunks(vocal_path, levels_hop=(levels, hop)) if duration > 0 else []
+            chunk_result = transcribe_lines_chunked(
+                vocal_path,
+                lyrics,
+                language=language,
+                model=gemini_model,
+                log=gemini_log,
+                use_cache=use_cache,
+                workers=gemini_workers,
+                chunks=chunks or None,
+            )
+            if isinstance(chunk_result, tuple):
+                gemini_lines, failures = chunk_result
+            else:  # compatibility with older mocks/tests
+                gemini_lines, failures = chunk_result, []
+            if not gemini_lines:
+                log("Gemini chunk không trả câu nào; dùng Whisper fallback.")
+                return reconcile_lyrics_with_transcript(references, segments)
+            if failures:
+                log(f"{len(failures)} chunk Gemini lỗi; kiểm tra vùng lời.")
 
         match = match_lines(references, gemini_lines, whisper_words)
+        global_coverage = _window_coverage(whisper_words, gemini_lines)
+        needs_region_check = bool(failures) or (
+            bool(match.get("unsung")) and global_coverage < 0.8
+        )
+        if chunks and needs_region_check:
+            if any(
+                _region_has_missing_lyrics(
+                    start, end, whisper_words, gemini_lines, levels, hop
+                )
+                for start, end in chunks
+            ):
+                log("Có vùng có lời nhưng Gemini bỏ trống; dùng Whisper fallback.")
+                return reconcile_lyrics_with_transcript(references, segments)
         if not match.get("matched") and not match.get("repeat"):
             log("Gemini không khớp được câu nào; dùng Whisper fallback.")
             return reconcile_lyrics_with_transcript(references, segments)
@@ -462,7 +616,14 @@ def align_with_gemini_lines(
                 "Kiểm tra lời nhập và audio; các câu còn lại sẽ để trống."
             )
 
-        lines = _build_from_match(references, match, whisper_words, vocal_path, log)
+        lines = _build_from_match(
+            references,
+            match,
+            whisper_words,
+            vocal_path,
+            log,
+            levels_hop=(levels, hop),
+        )
         if not lines:
             log("Không dựng được dòng nào từ kết quả Gemini; dùng Whisper fallback.")
             return reconcile_lyrics_with_transcript(references, segments)

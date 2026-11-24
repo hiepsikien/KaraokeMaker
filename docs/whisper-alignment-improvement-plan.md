@@ -30,9 +30,9 @@ Vì vậy:
 Mục tiêu không phải "Whisper hoàn hảo", mà là **giảm số câu phải sửa tay** và
 **không để một câu sai kéo lệch các câu sau**.
 
-**Thứ tự thực hiện: B trước, A là fallback.** Approach B là pipeline mới; Approach A
-chỉ quay lại nếu B fail gate. B luôn chạy sau **feature flag/opt-in** cho tới khi qua
-gate + hold-out; A vẫn là đường offline mặc định trong thời gian thử B.
+**Thứ tự thực hiện: B trước, A là fallback.** Approach B là pipeline mới. B đã pass
+gate trên bộ dev hiện có và **là mặc định từ bản này**; A vẫn là fallback khi thiếu
+consent, Gemini lỗi, hoặc người dùng chọn Whisper. Hold-out vẫn cần chạy để chốt.
 
 ### Thứ tự triển khai (không cộng dồn 20–28 ngày)
 
@@ -570,7 +570,7 @@ Cộng A4 optional nếu cần.
 
 ### 8.3. Chung
 
-- **353 test hiện tại vẫn pass**:
+- **387 test hiện tại vẫn pass**:
   ```bash
   .venv-karaoke/bin/python -m unittest discover -s tests -q
   ```
@@ -1167,9 +1167,9 @@ Chưa tính chi phí Gemini. Nếu B fail, không cộng dồn với A; chỉ l�
 
 ### 10.9. Điều kiện thay thế Approach A
 
-Trong **phát triển**, B làm trước. Trong **sản phẩm**, B luôn opt-in sau feature flag
-cho tới khi pass gate + hold-out; A vẫn là đường offline mặc định/fallback trong giai
-đoạn thử.
+Trong **phát triển**, B làm trước. Trong **sản phẩm**, B đã pass gate trên bộ dev và
+là mặc định từ bản này; A vẫn là fallback/opt-in. Hold-out vẫn cần chạy trước khi coi
+là chốt cuối.
 
 Chỉ thay thế default khi spike chứng minh:
 
@@ -1181,8 +1181,9 @@ Chỉ thay thế default khi spike chứng minh:
 - chi phí/latency chấp nhận;
 - có feature flag + fallback A.
 
-Nếu không đạt, B chỉ dùng cho bài có hò/ad-lib nhiều hoặc bài A bị cascade nặng.
-Mặc định sản phẩm vẫn là A.
+B đã đạt gate trên bộ dev hiện có (Quả Cam, Bài Ca, Văn Lang, Tàn Hồng, Tên Người),
+nên **mặc định sản phẩm chuyển sang B** từ bản này. A vẫn là fallback khi thiếu consent,
+Gemini lỗi, hoặc người dùng chọn Whisper. Hold-out vẫn cần chạy trước khi coi là chốt.
 
 ---
 
@@ -1205,7 +1206,7 @@ Mặc định sản phẩm vẫn là A.
 
 Kết quả test:
 
-- `353` Python tests pass.
+- `387` Python tests pass.
 - `npx tsc --noEmit` pass.
 
 ### Gate 0 thật (key đã cập nhật)
