@@ -83,7 +83,7 @@ class GeminiBudget:
         return True
 
 
-def _retry_after_seconds(error: Exception, attempt: int) -> float:
+def _retry_after_seconds(attempt: int) -> float:
     base = 2.0 * (2 ** max(0, attempt - 1))
     return min(8.0, base)
 
@@ -106,7 +106,10 @@ def _post_generate_retry(
         except GeminiHTTPError as error:
             if not error.transient or budget.left <= 0:
                 raise
-            wait = float(getattr(error, "retry_after", None) or _retry_after_seconds(error, attempt))
+            raw_wait = float(
+                getattr(error, "retry_after", None) or _retry_after_seconds(attempt)
+            )
+            wait = min(30.0, max(0.0, raw_wait))
             if log is not None:
                 log(f"Gemini tạm lỗi ({error}); thử lại sau {wait:.0f}s.")
             time.sleep(wait)

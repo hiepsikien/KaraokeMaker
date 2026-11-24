@@ -856,12 +856,28 @@ def transcribe_whisper(
         def run(current_model):
             return current_model.transcribe(str(vocal_path), **transcribe_options)
 
+        def load_stable_with_cpu(*, force_cpu: bool = False):
+            target = "cpu" if force_cpu else device
+            try:
+                return load_whisper_model(model_name, target, "stable", log)[0]
+            except Exception as error:
+                if target == "cpu":
+                    raise WhisperFailed(f"Không tải được model căn lời: {error}") from error
+                log(f"Không tải được model stable trên {target} ({error}). Chuyển CPU.")
+                try:
+                    return load_whisper_model(model_name, "cpu", "stable", log)[0]
+                except Exception as cpu_error:
+                    raise WhisperFailed(
+                        f"Không tải được model căn lời: {cpu_error}"
+                    ) from cpu_error
+
         try:
             result = run(model)
         except Exception as error:
             if backend == "mlx":
                 log(f"MLX Whisper lỗi ({error}); fallback stable_whisper.")
-                model, backend = load_whisper_model(model_name, device, "stable", log)
+                model = load_stable_with_cpu()
+                backend = "stable"
                 _allow_mps_alignment()
                 try:
                     result = run(model)
@@ -871,7 +887,7 @@ def transcribe_whisper(
                 raise WhisperFailed(f"Nghe vocal thất bại: {error}") from error
             else:
                 log(f"GPU Apple không nghe được ({error}). Đang nghe lại trên CPU.")
-                model, _backend = load_whisper_model(model_name, "cpu", "stable", log)
+                model = load_stable_with_cpu(force_cpu=True)
                 try:
                     result = run(model)
                 except Exception as cpu_error:
@@ -898,7 +914,6 @@ def align_lyrics(
     no_speech_threshold: float | None = None,
     whisper_retry: bool = True,
     engine: str = "auto",
-    vad: bool = False,
     whisper_vad: str = "off",
 ) -> list[dict]:
     typed = extract_sung_lines(lyrics)
@@ -924,7 +939,7 @@ def align_lyrics(
         no_speech_threshold=no_speech_threshold,
         whisper_retry=whisper_retry,
         engine=engine,
-        vad=vad,
+        vad=whisper_vad == "silero",
         clip_timestamps=clip,
     )
     if typed:

@@ -298,6 +298,26 @@ class GeminiLinesTests(unittest.TestCase):
                 _post_generate_retry("m", {}, "key", budget=GeminiBudget(4), log=None)
         self.assertEqual(len(calls), 1)
 
+    def test_retry_honours_retry_after_capped(self):
+        calls: list[int] = []
+
+        def fake(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise GeminiHTTPError(
+                    "429", status=429, transient=True, retry_after=3600
+                )
+            return {"lines": []}
+
+        with patch("karaoke.gemini_lines._post_generate", side_effect=fake), patch(
+            "karaoke.gemini_lines.time.sleep"
+        ) as sleep:
+            result = _post_generate_retry(
+                "m", {}, "key", budget=GeminiBudget(2), log=None
+            )
+        self.assertEqual(result, {"lines": []})
+        sleep.assert_called_once_with(30.0)
+
     def test_invalid_cached_response_is_ignored(self):
         with tempfile.TemporaryDirectory() as folder:
             cache = Path(folder) / "lines.json"

@@ -1,4 +1,5 @@
 import math
+import os
 import struct
 import tempfile
 import unittest
@@ -14,7 +15,7 @@ from karaoke.approach_b import (
 from karaoke.errors import JobError
 from karaoke.align import WhisperFailed
 from karaoke.gemini_lines import GeminiLineError
-from karaoke.pipeline import align_job, align_options
+from karaoke.pipeline import align_job, align_options, apply_env_overrides
 
 
 def tone(path: Path, spans: list[tuple[float, float]], seconds: float = 7.0) -> None:
@@ -298,6 +299,27 @@ class AlignStrategyTests(unittest.TestCase):
 
         self.assertEqual(align_options({})["align_strategy"], "gemini_lines")
         self.assertEqual(empty_project()["align_strategy"], "gemini_lines")
+
+    def test_env_overrides_do_not_persist_in_project(self):
+        from karaoke.project import project_from_fields
+
+        with patch.dict(
+            os.environ,
+            {"KARAOKE_WHISPER_ENGINE": "stable", "KARAOKE_GEMINI_WORKERS": "1"},
+        ):
+            project = project_from_fields(
+                {
+                    "title": "t",
+                    "artist": "a",
+                    "whisper_engine": "mlx",
+                    "gemini_chunk_workers": 3,
+                }
+            )
+            self.assertEqual(project["whisper_engine"], "mlx")
+            self.assertEqual(project["gemini_chunk_workers"], 3)
+            runtime = apply_env_overrides(project)
+            self.assertEqual(runtime["whisper_engine"], "stable")
+            self.assertEqual(runtime["gemini_chunk_workers"], 1)
 
     def test_explicit_whisper_strategy_is_kept(self):
         self.assertEqual(align_options({"align_strategy": "whisper"})["align_strategy"], "whisper")

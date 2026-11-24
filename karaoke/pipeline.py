@@ -483,30 +483,18 @@ def align_options(payload: dict, *, strict: bool = True) -> dict:
         consent = consent.strip().lower() not in {"0", "false", "no", ""}
     else:
         consent = bool(consent)
-    engine = str(
-        os.environ.get("KARAOKE_WHISPER_ENGINE")
-        or payload.get("whisper_engine")
-        or "auto"
-    ).strip().lower()
+    engine = str(payload.get("whisper_engine") or "auto").strip().lower()
     if engine not in {"auto", "mlx", "stable"}:
         engine = "auto"
-    vad = str(
-        os.environ.get("KARAOKE_WHISPER_VAD")
-        or payload.get("whisper_vad")
-        or "off"
-    ).strip().lower()
+    vad = str(payload.get("whisper_vad") or "off").strip().lower()
     if vad not in {"off", "rms", "silero"}:
         vad = "off"
-    raw_workers = os.environ.get("KARAOKE_GEMINI_WORKERS") or payload.get(
-        "gemini_chunk_workers"
-    ) or 3
+    raw_workers = payload.get("gemini_chunk_workers") or 3
     try:
         workers = max(1, min(3, int(raw_workers)))
     except (TypeError, ValueError):
         workers = 3
-    parallel = os.environ.get(
-        "KARAOKE_ALIGN_PARALLEL", payload.get("align_parallel", "1")
-    )
+    parallel = payload.get("align_parallel", True)
     if isinstance(parallel, str):
         parallel = parallel.strip().lower() not in {"0", "false", "no", ""}
     else:
@@ -525,11 +513,38 @@ def align_options(payload: dict, *, strict: bool = True) -> dict:
     return result
 
 
+def apply_env_overrides(prepared: dict) -> dict:
+    """Apply benchmark/runtime env overrides without persisting them in projects."""
+    runtime = dict(prepared)
+    engine = os.environ.get("KARAOKE_WHISPER_ENGINE")
+    if engine and engine.strip().lower() in {"auto", "mlx", "stable"}:
+        runtime["whisper_engine"] = engine.strip().lower()
+    vad = os.environ.get("KARAOKE_WHISPER_VAD")
+    if vad and vad.strip().lower() in {"off", "rms", "silero"}:
+        runtime["whisper_vad"] = vad.strip().lower()
+    workers = os.environ.get("KARAOKE_GEMINI_WORKERS")
+    if workers:
+        try:
+            runtime["gemini_chunk_workers"] = max(1, min(3, int(workers)))
+        except (TypeError, ValueError):
+            pass
+    parallel = os.environ.get("KARAOKE_ALIGN_PARALLEL")
+    if parallel is not None:
+        runtime["align_parallel"] = parallel.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "",
+        }
+    return runtime
+
+
 def align_job(prepared: dict, log) -> list[dict]:
     try:
-        strategy = str(prepared.get("align_strategy") or "gemini_lines").strip().lower()
+        runtime = apply_env_overrides(prepared)
+        strategy = str(runtime.get("align_strategy") or "gemini_lines").strip().lower()
         if strategy == "gemini_lines":
-            if not prepared.get("google_audio_consent"):
+            if not runtime.get("google_audio_consent"):
                 log("Chưa đồng ý gửi audio lên Gemini; dùng Whisper fallback.")
             else:
                 try:
@@ -543,10 +558,10 @@ def align_job(prepared: dict, log) -> list[dict]:
                         no_speech_threshold=prepared.get("no_speech_threshold"),
                         whisper_retry=prepared.get("whisper_retry", True),
                         gemini_model=prepared.get("gemini_model") or DEFAULT_GEMINI_MODEL,
-                        whisper_engine=prepared.get("whisper_engine") or "auto",
-                        whisper_vad=prepared.get("whisper_vad") or "off",
-                        gemini_workers=int(prepared.get("gemini_chunk_workers") or 3),
-                        align_parallel=bool(prepared.get("align_parallel", True)),
+                        whisper_engine=runtime.get("whisper_engine") or "auto",
+                        whisper_vad=runtime.get("whisper_vad") or "off",
+                        gemini_workers=int(runtime.get("gemini_chunk_workers") or 3),
+                        align_parallel=bool(runtime.get("align_parallel", True)),
                     )
                 except WhisperFailed:
                     raise
@@ -561,9 +576,8 @@ def align_job(prepared: dict, log) -> list[dict]:
             log,
             no_speech_threshold=prepared.get("no_speech_threshold"),
             whisper_retry=prepared.get("whisper_retry", True),
-            engine=prepared.get("whisper_engine") or "auto",
-            vad=(prepared.get("whisper_vad") or "off") == "silero",
-            whisper_vad=prepared.get("whisper_vad") or "off",
+            engine=runtime.get("whisper_engine") or "auto",
+            whisper_vad=runtime.get("whisper_vad") or "off",
         )
     except AlignError as error:
         raise JobError(str(error)) from error
